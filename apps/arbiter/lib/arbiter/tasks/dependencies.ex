@@ -209,6 +209,69 @@ defmodule Arbiter.Tasks.Dependencies do
   end
 
   @doc """
+  List dependency edges, for the read surfaces (`arb dep list`, MCP `dep_list`,
+  `GET /api/dependencies`) that bd-1defgu adds alongside the writes above.
+
+  Options:
+
+    * `:workspace_id` — restrict to edges where either endpoint lives in this
+      workspace.
+    * `:issue_id` — restrict to edges touching this issue, in either
+      direction.
+    * `:type` — restrict to one edge type (atom or string; validated the same
+      way `add/4` validates it).
+
+  `:workspace_id` and `:issue_id` may be combined (the caller-side "does this
+  issue actually live in that workspace" check some callers want); with
+  neither, every edge is returned.
+
+  ## Symmetric edges (`:conflicts_with`, and any future symmetric type)
+
+  A `conflicts_with` row is stored once, directed, like every other edge —
+  `list/1` does not synthesize a mirrored second row for it. That means a
+  symmetric edge appears exactly once in a workspace-wide listing, and
+  exactly once when scoped to either one of its two endpoints (found via the
+  `from OR to` match), never doubled. This is the documented answer to the
+  "shown once or twice" question from the ticket: once, from wherever you
+  look at it.
+
+  Returns `{:ok, [%{edge: %Dependency{}, from: %Issue{}, to: %Issue{}}]}`,
+  sorted oldest-first, or `{:error, {:invalid_type, message}}` for a bad
+  `:type`. `from` / `to` are always loaded structs — a dangling FK cannot
+  exist under the resource's `on_delete: :restrict` references.
+  """
+  @spec list(keyword()) :: {:ok, [map()]} | {:error, error()}
+  def list(opts \\ []) do
+    with {:ok, type} <- cast_optional_type(Keyword.get(opts, :type)) do
+      edges =
+        Dependency
+        |> Ash.Query.load([:from_issue, :to_issue])
+        |> Ash.Query.sort(created_at: :asc)
+        |> filter_workspace(Keyword.get(opts, :workspace_id))
+        |> filter_issue(Keyword.get(opts, :issue_id))
+        |> filter_type(type)
+        |> Ash.read!()
+
+      {:ok, Enum.map(edges, &%{edge: &1, from: &1.from_issue, to: &1.to_issue})}
+    end
+  end
+
+  defp filter_workspace(query, nil), do: query
+
+  defp filter_workspace(query, ws_id) do
+    Ash.Query.filter(query, from_issue.workspace_id == ^ws_id or to_issue.workspace_id == ^ws_id)
+  end
+
+  defp filter_issue(query, nil), do: query
+
+  defp filter_issue(query, issue_id) do
+    Ash.Query.filter(query, from_issue_id == ^issue_id or to_issue_id == ^issue_id)
+  end
+
+  defp filter_type(query, nil), do: query
+  defp filter_type(query, type), do: Ash.Query.filter(query, type == ^type)
+
+  @doc """
   Is `id` inside the `parent_of` subtree rooted at `root_id` — the root itself,
   or reachable from it by following `parent_of` edges downward?
 

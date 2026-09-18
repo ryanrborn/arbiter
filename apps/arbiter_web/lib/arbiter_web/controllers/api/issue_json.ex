@@ -14,11 +14,16 @@ defmodule ArbiterWeb.Api.IssueJSON do
   # bd-3j4ch4: the single-issue read carries a cost estimate (or an explicit
   # null — "no estimate yet" has to be distinguishable from "$0").
   # bd-18vl9q: and the epic cost rollup, null for a non-epic issue.
-  def show(%{issue: issue, estimate: estimate, epic_rollup: epic_rollup}) do
+  # bd-1defgu: and the issue's dependency edges — `arb issue show` was
+  # write-only for them before.
+  def show(%{issue: issue, estimate: estimate, epic_rollup: epic_rollup, dependencies: deps}) do
+    %{data: rendered_deps} = ArbiterWeb.Api.DependencyJSON.index(%{dependencies: deps})
+
     issue
     |> data()
     |> Map.put(:estimate, estimate)
     |> Map.put(:epic_rollup, epic_rollup)
+    |> Map.put(:dependencies, rendered_deps)
   end
 
   def show(%{issue: issue}), do: data(issue)
@@ -50,7 +55,6 @@ defmodule ArbiterWeb.Api.IssueJSON do
       # consumer can tell "not parked" from "this API predates the field".
       review_park_reason: issue.review_park_reason,
       review_parked_at: iso(issue.review_parked_at),
-      assignee: issue.assignee,
       tracker_type: to_string_atom(issue.tracker_type),
       tracker_ref: issue.tracker_ref,
       pr_ref: issue.pr_ref,

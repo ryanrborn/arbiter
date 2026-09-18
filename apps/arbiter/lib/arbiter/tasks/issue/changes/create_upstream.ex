@@ -130,7 +130,6 @@ defmodule Arbiter.Tasks.Issue.Changes.CreateUpstream do
     %{}
     |> put_if_present(:title, issue.title)
     |> put_if_present(:description, issue.description)
-    |> put_if_present(:assignee, issue.assignee)
     |> put_if_present(:status, issue.status)
   end
 

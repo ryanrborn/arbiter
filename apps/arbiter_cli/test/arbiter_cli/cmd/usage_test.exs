@@ -177,6 +177,112 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert code == 0
       assert out =~ "(no usage rows for --by day)"
     end
+
+    # bd-481sz7: agy/Antigravity never reports cost (subscription, metered by
+    # quota %, not dollars) — a group whose rows are entirely agy must render
+    # the cost column as "n/a", never "$0.0000", which would read as "this
+    # session was free" rather than "cost is unknowable for this provider".
+    test "a group with no known cost renders the cost column as n/a, not $0.0000" do
+      stub_get("/api/usage", %{
+        "by" => "model",
+        "data" => [
+          %{
+            "group" => "gemini-3.8-flash-low",
+            "rows" => 2,
+            "total_cost_usd" => nil,
+            "tokens_in" => 4000,
+            "tokens_out" => 250,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 5_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "model"]) end)
+
+      assert code == 0
+      row_line = out |> String.split("\n") |> Enum.find(&(&1 =~ "gemini-3.8-flash-low"))
+      assert row_line =~ "n/a"
+      refute row_line =~ "0.0000"
+    end
+
+    # bd-481sz7 round 2, finding 3: the totals footer folded a nil
+    # `total_cost_usd` to 0.0 before formatting, so an all-agy rollup's
+    # "-- total: $0.0000" line contradicted the "n/a" cost column right above
+    # it — the exact "this looks free" misreport this ticket removes.
+    test "the totals footer renders n/a, not $0.0000, when every group is unpriced" do
+      stub_get("/api/usage", %{
+        "by" => "model",
+        "data" => [
+          %{
+            "group" => "gemini-3.8-flash-low",
+            "rows" => 2,
+            "total_cost_usd" => nil,
+            "tokens_in" => 4000,
+            "tokens_out" => 250,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 5_000
+          },
+          %{
+            "group" => "claude-opus-4-6-thinking",
+            "rows" => 1,
+            "total_cost_usd" => nil,
+            "tokens_in" => 1000,
+            "tokens_out" => 100,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 1_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "model"]) end)
+
+      assert code == 0
+      total_line = out |> String.split("\n") |> Enum.find(&(&1 =~ "-- total:"))
+      assert total_line =~ "n/a"
+      refute total_line =~ "0.0000"
+    end
+
+    test "the totals footer still renders a priced total when at least one group has cost" do
+      stub_get("/api/usage", %{
+        "by" => "model",
+        "data" => [
+          %{
+            "group" => "gemini-3.8-flash-low",
+            "rows" => 1,
+            "total_cost_usd" => nil,
+            "tokens_in" => 4000,
+            "tokens_out" => 250,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 5_000
+          },
+          %{
+            "group" => "claude-sonnet-5",
+            "rows" => 1,
+            "total_cost_usd" => 0.02,
+            "tokens_in" => 1000,
+            "tokens_out" => 100,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 1_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "model"]) end)
+
+      assert code == 0
+      total_line = out |> String.split("\n") |> Enum.find(&(&1 =~ "-- total:"))
+      assert total_line =~ "$0.0200"
+      refute total_line =~ "n/a"
+    end
   end
 
   describe "arb usage --by session" do

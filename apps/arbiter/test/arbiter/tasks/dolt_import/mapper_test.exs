@@ -52,8 +52,8 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
   end
 
   describe "parse_external_ref/1" do
-    test "jira-VR-17585 → {:jira, \"VR-17585\"}" do
-      assert Mapper.parse_external_ref("jira-VR-17585") == {:jira, "VR-17585"}
+    test "jira-AX-17585 → {:jira, \"AX-17585\"}" do
+      assert Mapper.parse_external_ref("jira-AX-17585") == {:jira, "AX-17585"}
     end
 
     test "linear-LIN-42 → {:linear, \"LIN-42\"}" do
@@ -164,7 +164,7 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
     test "extracts prefix from first id" do
       assert Mapper.derive_prefix([%{"id" => "hq-3o8"}]) == "hq"
       assert Mapper.derive_prefix([%{"id" => "vs-jwq"}]) == "vs"
-      assert Mapper.derive_prefix([%{"id" => "verus-cv-7ipag"}]) == "verus"
+      assert Mapper.derive_prefix([%{"id" => "apex-cv-7ipag"}]) == "apex"
     end
 
     test "lowercases the prefix" do
@@ -194,6 +194,17 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
     test "issue_record/3 keeps workspace_id as the hyphenated string" do
       ws_id = Ash.UUIDv7.generate()
       assert Mapper.issue_record(%{"id" => "hq-1"}, ws_id, @now).workspace_id == ws_id
+    end
+
+    # bd-1ozks5: the local assignee column is gone; the import record must not
+    # carry the key at all, or Repo.insert_all (raw column map) would fail.
+    test "issue_record/3 no longer maps an assignee, even when the source row has one" do
+      ws_id = Ash.UUIDv7.generate()
+
+      record =
+        Mapper.issue_record(%{"id" => "hq-1", "assignee" => "someone"}, ws_id, @now)
+
+      refute Map.has_key?(record, :assignee)
     end
   end
 end

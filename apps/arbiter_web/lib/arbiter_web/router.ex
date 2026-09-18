@@ -60,6 +60,17 @@ defmodule ArbiterWeb.Router do
 
     get("/about", PageController, :home)
 
+    # A finished session's artefacts. Not in the `live_session` below because
+    # these are file downloads, not pages — they sit outside the "no
+    # /sessions/:id page" rule the live_session comment documents.
+    #
+    # bd-3tf4oo: the dock's replay shows a bounded tail of the raw PTY stream
+    # and links to `:raw` for the whole of it. bd-cvfjms: `:jsonl` is the
+    # phase 9 session archive — what the issue detail page's "Transcript" link
+    # points at, and what the dock offers when the raw stream is gone.
+    get("/sessions/:id/transcript", SessionTranscriptController, :raw)
+    get("/sessions/:id/jsonl", SessionTranscriptController, :jsonl)
+
     live_session :default,
       # bd-dlc136: every route here is wrapped in the live layout, whose only
       # job is to render the sticky session dock. It has to be a layout the
@@ -136,7 +147,9 @@ defmodule ArbiterWeb.Router do
     post("/issues/:id/verify", IssueController, :verify)
 
     # Dependencies
+    get("/dependencies", DependencyController, :index)
     post("/dependencies", DependencyController, :create)
+    get("/dependencies/:issue_id", DependencyController, :show)
     delete("/dependencies/:from/:to", DependencyController, :delete)
 
     # Loop-analysis pass (Stage 1, bd-dyfaq3) — operator-invoked, report-only.

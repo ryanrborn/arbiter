@@ -343,7 +343,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert "Bash(rm -rf:*)" in deny
       assert "Bash(git push --force:*)" in deny
       assert "Read(**/.env)" in deny
-      assert "Write(~/.ssh/**)" in deny
+      assert "Edit(~/.ssh/**)" in deny
       assert "Bash(gh pr create:*)" in deny
       assert "Bash(glab mr create:*)" in deny
       refute "Monitor" in deny

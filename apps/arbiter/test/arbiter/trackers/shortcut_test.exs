@@ -463,7 +463,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
       assert {:ok, "9999"} = Shortcut.create(%{title: "Fix the thing"})
     end
 
-    test "includes description and owner_ids when provided" do
+    test "includes description when provided, ignores an assignee input" do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/api/v3/workflows"} ->
@@ -476,7 +476,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
             decoded = Jason.decode!(body)
 
             assert decoded["description"] == "Some details"
-            assert decoded["owner_ids"] == ["member-uuid-abc"]
+            refute Map.has_key?(decoded, "owner_ids")
 
             conn
             |> Plug.Conn.put_status(201)

@@ -410,8 +410,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           %{"id" => "ws-1", "name" => "migrated", "prefix" => "bd", "config" => %{}},
           %{
             "id" => "ws-2",
-            "name" => "leotech",
-            "prefix" => "lt",
+            "name" => "acme",
+            "prefix" => "ac",
             "config" => %{"rig_paths" => %{"tonic" => "/srv/tonic"}}
           }
         ]
@@ -427,7 +427,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
       assert exit_code == 1
       assert out =~ "[fail] repos resolved"
-      assert out =~ "1 workspace still on the retired `rig_paths` key: leotech"
+      assert out =~ "1 workspace still on the retired `rig_paths` key: acme"
     end
 
     # A release install has no Mix, so the mix task cannot be the lead

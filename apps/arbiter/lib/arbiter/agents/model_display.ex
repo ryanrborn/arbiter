@@ -16,6 +16,14 @@ defmodule Arbiter.Agents.ModelDisplay do
   | `claude-haiku*`     | Haiku  |
   | `gemini-2.5-pro*`   | Pro    |
   | `gemini-2.5-flash*` | Flash  |
+  | `gemini-3.*-flash*` (agy) | Flash  |
+  | `gemini-3.*-pro*` (agy)   | Pro    |
+  | `gpt-oss*` (agy)    | GPT-OSS |
+
+  The agy fork's own tier map (bd-d2yut8) resolves to Gemini 3.x ids with an
+  effort suffix (`gemini-3.8-flash-low`, `gemini-3.1-pro-high`, …) — a fixed
+  prefix can't cover every version agy might catalogue next, so those two
+  rows match by family word (`flash`/`pro`) rather than a literal id.
   """
 
   # Ordered prefix → short-name rules. First match wins, so more specific
@@ -49,7 +57,23 @@ defmodule Arbiter.Agents.ModelDisplay do
   def short(model) when is_binary(model) do
     case Enum.find(@rules, fn {prefix, _} -> String.starts_with?(model, prefix) end) do
       {_prefix, name} -> name
-      nil -> model
+      nil -> agy_family(model) || model
     end
   end
+
+  # agy's own catalogue (bd-d2yut8): Gemini 3.x ids carry an effort suffix
+  # (`-low`/`-medium`/`-high`) after an arbitrary version number
+  # (`gemini-3.8-flash-low`, `gemini-3.1-pro-high`, …), so these match by
+  # family word rather than a fixed prefix; `claude-*-4-6*` ids already hit
+  # `@rules` above (same families as native Claude), so no rule needed here.
+  defp agy_family("gemini-3" <> _ = model) do
+    cond do
+      String.contains?(model, "flash") -> "Flash"
+      String.contains?(model, "pro") -> "Pro"
+      true -> nil
+    end
+  end
+
+  defp agy_family("gpt-oss" <> _), do: "GPT-OSS"
+  defp agy_family(_model), do: nil
 end

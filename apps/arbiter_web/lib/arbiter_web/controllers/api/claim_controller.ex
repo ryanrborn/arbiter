@@ -4,7 +4,7 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   Claim dispatches through the workspace's configured tracker adapter
   (`github`, `jira`, `shortcut`, …), so `ref` is whatever that tracker uses —
-  a GitHub issue number (`"42"`), a Jira key (`"VR-1234"`), a Shortcut story
+  a GitHub issue number (`"42"`), a Jira key (`"AX-1234"`), a Shortcut story
   id, etc. The adapter defines the assignment-as-claim signal; workspaces
   without a claim-capable tracker get a 400.
 

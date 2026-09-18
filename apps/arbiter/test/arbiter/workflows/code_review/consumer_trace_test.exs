@@ -4,12 +4,12 @@ defmodule Arbiter.Workflows.CodeReview.ConsumerTraceTest do
   alias Arbiter.Workflows.CodeReview.ConsumerTrace
 
   @diff """
-  diff --git a/lib/verus/token.ex b/lib/verus/token.ex
+  diff --git a/lib/apex/token.ex b/lib/apex/token.ex
   index 1111111..2222222 100644
-  --- a/lib/verus/token.ex
-  +++ b/lib/verus/token.ex
+  --- a/lib/apex/token.ex
+  +++ b/lib/apex/token.ex
   @@ -1,5 +1,5 @@
-   defmodule Verus.Token do
+   defmodule Apex.Token do
   -  def sign(payload, algorithm) do
   +  def sign(payload) do
        :ok
@@ -24,7 +24,7 @@ defmodule Arbiter.Workflows.CodeReview.ConsumerTraceTest do
       assert [%{identifier: "sign", file: file, line: line, snippet: snippet}] =
                ConsumerTrace.trace(@diff, repo)
 
-      assert file == "lib/verus/session.ex"
+      assert file == "lib/apex/session.ex"
       assert line > 0
       assert snippet =~ "sign"
     end
@@ -38,10 +38,10 @@ defmodule Arbiter.Workflows.CodeReview.ConsumerTraceTest do
 
   defp fixture_repo(opts) do
     dir = Path.join(System.tmp_dir!(), "consumer-trace-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(Path.join(dir, "lib/verus"))
+    File.mkdir_p!(Path.join(dir, "lib/apex"))
 
-    File.write!(Path.join(dir, "lib/verus/token.ex"), """
-    defmodule Verus.Token do
+    File.write!(Path.join(dir, "lib/apex/token.ex"), """
+    defmodule Apex.Token do
       def sign(payload) do
         :ok
       end
@@ -49,10 +49,10 @@ defmodule Arbiter.Workflows.CodeReview.ConsumerTraceTest do
     """)
 
     if Keyword.fetch!(opts, :consumer?) do
-      File.write!(Path.join(dir, "lib/verus/session.ex"), """
-      defmodule Verus.Session do
+      File.write!(Path.join(dir, "lib/apex/session.ex"), """
+      defmodule Apex.Session do
         def start(payload) do
-          Verus.Token.sign(payload)
+          Apex.Token.sign(payload)
         end
       end
       """)

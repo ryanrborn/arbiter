@@ -92,7 +92,7 @@ defmodule Arbiter.Tasks.DecommissionSweepTest do
 
     test "Escalation replies" do
       assert DecommissionSweep.escalation_reply?(%Issue{
-               title: "Re: ESCALATION: VR-17575 base branch"
+               title: "Re: ESCALATION: AX-17575 base branch"
              })
 
       assert DecommissionSweep.escalation_reply?(%Issue{

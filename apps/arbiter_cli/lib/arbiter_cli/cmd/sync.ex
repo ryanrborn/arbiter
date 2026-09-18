@@ -76,7 +76,7 @@ defmodule ArbiterCli.Cmd.Sync do
   defp print_action(other), do: IO.puts("  ? #{inspect(other)}")
 
   # GitHub issue refs are bare numbers and read naturally with a `#` prefix
-  # (`#43`); other trackers (Jira `VR-1234`, Shortcut ids) carry their own
+  # (`#43`); other trackers (Jira `AX-1234`, Shortcut ids) carry their own
   # prefix, so print them as-is.
   defp format_ref(ref) when is_binary(ref) do
     if Regex.match?(~r/^\d+$/, ref), do: "##{ref}", else: ref

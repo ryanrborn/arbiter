@@ -28,10 +28,10 @@ defmodule Arbiter.Quota.Gate.Throttle do
   alias Arbiter.Quota.Gate
 
   @impl true
-  def check(_task, quota, workspace, _opts) do
-    case Gate.gating_window(quota, workspace) do
+  def check(_task, quota, workspace, opts) do
+    case Gate.gating_window(quota, workspace, opts) do
       nil -> :allow
-      binding -> {:hold, Map.put(binding, :phrase, Gate.hold_phrase(quota, workspace))}
+      binding -> {:hold, Map.put(binding, :phrase, Gate.hold_phrase(quota, workspace, opts))}
     end
   end
 end

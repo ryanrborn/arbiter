@@ -27,8 +27,8 @@ defmodule Arbiter.Tasks.WorkspaceTest do
         "tracker" => %{
           "type" => "jira",
           "config" => %{
-            "host" => "leotechnologies.atlassian.net",
-            "project_key" => "VR",
+            "host" => "acme.atlassian.net",
+            "project_key" => "AX",
             "credentials_ref" => "env:JIRA_TOKEN"
           }
         }
@@ -36,13 +36,13 @@ defmodule Arbiter.Tasks.WorkspaceTest do
 
       assert {:ok, ws} =
                Ash.create(Workspace, %{
-                 name: "verus",
+                 name: "apex",
                  description: "tracker-backed workspace",
                  config: config
                })
 
       assert ws.config["tracker"]["type"] == "jira"
-      assert ws.config["tracker"]["config"]["project_key"] == "VR"
+      assert ws.config["tracker"]["config"]["project_key"] == "AX"
       # The legacy key is preserved untouched, not rejected.
       assert ws.config["vernacular"]["coordinator"] == "Admiral"
     end
@@ -218,9 +218,12 @@ defmodule Arbiter.Tasks.WorkspaceTest do
   describe "patch_config/2" do
     test "deep-merges a patch without clobbering sibling keys" do
       initial = %{
-        "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "acme"}},
         "repo_paths" => %{"arbiter" => "/srv/arbiter"},
-        "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo", "repo" => "arbiter"}}
+        "merge" => %{
+          "strategy" => "github",
+          "config" => %{"owner" => "acme", "repo" => "arbiter"}
+        }
       }
 
       {:ok, ws} = Ash.create(Workspace, %{name: "deep-merge", config: initial})
@@ -232,7 +235,7 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert updated.config["merge"]["auto_merge"] == true
       # ...and every other sibling survived (this is the original footgun).
       assert updated.config["merge"]["strategy"] == "github"
-      assert updated.config["merge"]["config"]["owner"] == "leo"
+      assert updated.config["merge"]["config"]["owner"] == "acme"
       assert updated.config["merge"]["config"]["repo"] == "arbiter"
       assert updated.config["tracker"]["type"] == "github"
       assert updated.config["repo_paths"]["arbiter"] == "/srv/arbiter"
@@ -252,7 +255,7 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       initial = %{
         "tracker" => %{
           "type" => "jira",
-          "config" => %{"host" => "h.example", "project_key" => "VR"}
+          "config" => %{"host" => "h.example", "project_key" => "AX"}
         }
       }
 
@@ -262,7 +265,7 @@ defmodule Arbiter.Tasks.WorkspaceTest do
         Ash.update(ws, %{unset_paths: ["tracker.config.host"]}, action: :patch_config)
 
       refute Map.has_key?(updated.config["tracker"]["config"], "host")
-      assert updated.config["tracker"]["config"]["project_key"] == "VR"
+      assert updated.config["tracker"]["config"]["project_key"] == "AX"
       assert updated.config["tracker"]["type"] == "jira"
     end
 
@@ -664,7 +667,7 @@ defmodule Arbiter.Tasks.WorkspaceTest do
           "default" => "report_only",
           "repo_overrides" => %{
             "atlas" => "report_only",
-            "verus-infrastructure" => "propose",
+            "apex-infrastructure" => "propose",
             "fast_lane" => "auto"
           }
         }

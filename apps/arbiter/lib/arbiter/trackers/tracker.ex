@@ -16,12 +16,12 @@ defmodule Arbiter.Trackers.Tracker do
       atom uses the task vocabulary (`:open | :in_progress | :closed`); each
       adapter maps it to its own state machine.
     * `update_fields/2` — patch fields on the external item. The fields map
-      uses task-domain keys (`:title`, `:description`, `:assignee`, ...); the
+      uses task-domain keys (`:title`, `:description`, ...); the
       adapter renames + format-converts (e.g. Markdown → ADF for Jira).
     * `link_for/1` — return a human-clickable URL for the ref. Used in CLI
       output and notifications.
     * `parse_ref/1` — best-effort parse of a user-supplied string into the
-      adapter's canonical ref form (e.g. `"VR-17585"` for Jira). Returns
+      adapter's canonical ref form (e.g. `"AX-17585"` for Jira). Returns
       `:error` if the string is clearly not for this tracker.
     * `list_transitions/1` — return the set of legal next-states from the
       current state, as task-vocabulary atoms.
@@ -33,7 +33,7 @@ defmodule Arbiter.Trackers.Tracker do
     * `create/1` — create a new issue in the tracker from the given attrs
       and return the canonical `ref`. Used by `arb create` to mirror a new
       task into the configured tracker. Attrs use task-domain keys
-      (`:title`, `:description`, `:assignee`, `:status`); each adapter
+      (`:title`, `:description`, `:status`); each adapter
       translates to its own field names. Adapters that don't support
       outbound creation return `{:error, :not_supported}`.
     * `add_remote_link/3` — attach an external link (typically the PR/MR that
@@ -48,7 +48,6 @@ defmodule Arbiter.Trackers.Tracker do
       %{
         title: "Wire the thing",
         description: "...",        # optional, Markdown
-        assignee: "alice",         # optional, tracker-specific login
         status: :open,             # optional, default :open
         priority: 2,               # optional, integer 0..4 (task priority scale)
         issue_type: "bug"          # optional, free-form type string
@@ -83,7 +82,7 @@ defmodule Arbiter.Trackers.Tracker do
 
   `:open | :in_progress | :closed` are the task's own statuses. The remaining
   atoms are richer lifecycle moments that don't map to a task status but still
-  drive an external workflow (e.g. Jira's VR board): `:pr_opened` (PR opened
+  drive an external workflow (e.g. Jira's AX board): `:pr_opened` (PR opened
   for review), `:approved_unmerged` (review approved but parked, not merged),
   and `:merged` (PR merged). Adapters that don't model an event simply leave it
   unmapped, and the sync layer skips it.
@@ -128,7 +127,6 @@ defmodule Arbiter.Trackers.Tracker do
   @type create_attrs :: %{
           required(:title) => String.t(),
           optional(:description) => String.t(),
-          optional(:assignee) => String.t() | nil,
           optional(:status) => status,
           optional(:priority) => non_neg_integer() | nil,
           optional(:issue_type) => String.t() | nil

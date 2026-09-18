@@ -35,6 +35,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
+  | `dep_list` | worker + coordinator | `Arbiter.Tasks.Dependencies.list/1` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
   | `worker_resume` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.resume/2` |
   | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) / `Arbiter.Reviews.ExternalReview.dispatch/1` (`pr`) |
@@ -140,7 +141,7 @@ defmodule Arbiter.MCP.Catalog do
           "`child_closed`/`child_total` over its `parent_of` children). A worker reads its " <>
           "own task (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
-          "pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, auto_close, " <>
+          "pr_body, pr_ref, tracker_ref, target_branch, repo, auto_close, " <>
           "verify_after_deploy + the verification state, timestamps). Every view also " <>
           "carries `estimate`: what comparable closed tasks actually cost, as " <>
           "`{range: [p25, p75], median, p90, n, basis, fallback_level}` over a 60-day " <>
@@ -161,7 +162,7 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" =>
               "When true, return the complete record including notes, qa_notes, " <>
-                "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, " <>
+                "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, " <>
                 "auto_close, verify_after_deploy, awaiting_verification_at, " <>
                 "verification_outcome, verification_evidence, review_park_reason, " <>
                 "review_parked_at, and timestamps. " <>
@@ -343,7 +344,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Create a task in the workspace. `title` is required; optional `description`, " <>
-          "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, `assignee`, " <>
+          "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, " <>
           "`tracker_type`, …. The task is always created in the coordinator's own workspace. " <>
           "Created tasks land in the board's Backlog (`refined: false`), not its Ready queue, " <>
           "and stay there until a human promotes them from the task detail page. " <>
@@ -401,7 +402,13 @@ defmodule Arbiter.MCP.Catalog do
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
           },
-          "assignee" => %{"type" => "string"},
+          "assignee" => %{
+            "type" => "string",
+            "description" =>
+              "Deprecated (bd-1ozks5): accepted and ignored. Arbiter is a local " <>
+                "single-user app and no longer tracks an assignee locally; the response " <>
+                "carries a `warnings` entry when this is passed."
+          },
           "tracker_type" => %{
             "type" => "string",
             "description" => "none | jira | shortcut | linear | github | gitlab."
@@ -418,7 +425,7 @@ defmodule Arbiter.MCP.Catalog do
           "tracker_context_ref" => %{
             "type" => "string",
             "description" =>
-              "Tracker issue ref for read-only context (e.g. \"VR-18004\"). The ticket's " <>
+              "Tracker issue ref for read-only context (e.g. \"AX-18004\"). The ticket's " <>
                 "description is fetched at review dispatch and injected into the reviewer's " <>
                 "prompt. No assignment check, no write-back."
           },
@@ -474,7 +481,13 @@ defmodule Arbiter.MCP.Catalog do
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
           },
-          "assignee" => %{"type" => "string"},
+          "assignee" => %{
+            "type" => "string",
+            "description" =>
+              "Deprecated (bd-1ozks5): accepted and ignored. Arbiter is a local " <>
+                "single-user app and no longer tracks an assignee locally; the response " <>
+                "carries a `warnings` entry when this is passed."
+          },
           "tracker_type" => %{"type" => "string"},
           "tracker_ref" => %{"type" => "string"},
           "tracker_context_type" => %{"type" => "string"},
@@ -663,6 +676,38 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.dep_remove/2
     },
     %{
+      name: "dep_list",
+      tiers: @both,
+      description:
+        "List dependency edges in the workspace. Coordinator or worker — a worker with no " <>
+          "`workspace` arg sees its own workspace's edges; naming a different one is refused, " <>
+          "the same rule dep_add/dep_remove already apply. With no `issue_id`, lists every edge " <>
+          "in the workspace; with `issue_id`, lists that issue's edges in both directions " <>
+          "instead. Each row carries both endpoints' id/title/status/priority, so a live edge " <>
+          "is distinguishable from a closed↔closed one without a second lookup. A symmetric " <>
+          "edge (`conflicts_with`) is never doubled — it's stored once, directed, and appears " <>
+          "once no matter which endpoint you query from.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Workspace name or id. Optional; defaults to the scope's workspace."
+          },
+          "issue_id" => %{
+            "type" => "string",
+            "description" => "Scope the listing to one issue's edges instead of the workspace."
+          },
+          "type" => %{
+            "type" => "string",
+            "description" => "Optional edge type to filter by."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.dep_list/2
+    },
+    %{
       name: "worker_dispatch",
       tiers: @coordinator,
       description:
@@ -795,7 +840,7 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Tracker issue ref to fetch acceptance criteria from — read-only " <>
                 "context for the reviewer. No claim, no assignment check, no write-back. Safe " <>
-                "for coworker-owned tickets (e.g. \"VR-18004\"). On a `pr` review with `follow_up`, " <>
+                "for coworker-owned tickets (e.g. \"AX-18004\"). On a `pr` review with `follow_up`, " <>
                 "it is also carried onto the engagement for re-review intent."
           },
           "tracker_context_type" => %{

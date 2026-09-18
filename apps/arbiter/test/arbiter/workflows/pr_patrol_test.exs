@@ -423,7 +423,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert is_pid(Worker.whereis(task.id))
     end
 
-    # Regression for bd-6v2my2 / lt-divfvo -> verus_server#3682: a thread-reply
+    # Regression for bd-6v2my2 / ac-divfvo -> apex_server#3682: a thread-reply
     # follow-up that replies + resolves and pushes zero commits must complete
     # as a SUCCESS with zero new PRs opened on the forge — not the prior
     # behaviour, where the follow-up's own worktree/branch got pushed and
@@ -1011,7 +1011,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
   describe "tick/1 — multi-repo workspace (no repo in config)" do
     test "patrol with explicit repo works when workspace config omits repo field", %{tmp: tmp} do
-      # Simulates the leotech multi-repo shape: owner is set, but repo is absent
+      # Simulates the acme multi-repo shape: owner is set, but repo is absent
       # from the workspace merge config. The per-patrol repo ("owner/explicit-repo")
       # must be injected via prepare_with_repo so list_open/0 resolves the correct
       # REST endpoint. Without the fix, list_open/0 would return {:error, config_missing}.
@@ -1451,7 +1451,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — escalation persistence (bd-dtpjlf)" do
-    # bd-dtpjlf: verus-ai-tools#13 failed to dispatch a follow-up 5 times in a
+    # bd-dtpjlf: apex-ai-tools#13 failed to dispatch a follow-up 5 times in a
     # row; the first failure logged "...closing and escalating", every
     # subsequent one logged "(backing off, already escalated)" — but
     # `coordinator_inbox_peek` showed zero messages. The suppression was keyed
@@ -1485,7 +1485,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json([
-              %{"number" => 13, "title" => "verus-ai-tools#13", "html_url" => "x"}
+              %{"number" => 13, "title" => "apex-ai-tools#13", "html_url" => "x"}
             ])
 
           conn.request_path == "/repos/owner/escalate-fail-repo/pulls/13/reviews" ->

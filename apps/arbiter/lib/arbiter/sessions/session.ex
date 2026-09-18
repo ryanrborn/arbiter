@@ -35,6 +35,10 @@ defmodule Arbiter.Sessions.Session do
       session, which is the coordinator's normal shape (decision 6: a
       workspace-agnostic coordinator token). A bound session is one deliberately
       scoped to one workspace.
+    * `issue_id` — the issue a **refine session** is bound to (bd-1lszsc);
+      `nil` for every other session. Set, it changes what token the session
+      gets (`:refine` tier, not `:coordinator`) and is held to one live row
+      per issue by a partial unique index. See the attribute's own docs.
     * `scope_unit` / `tmux_socket` — the OS handles, derived from `id` at create
       time and never accepted from a caller. Stored rather than only computed so
       a row remains self-describing if the naming scheme ever changes under it.
@@ -84,6 +88,12 @@ defmodule Arbiter.Sessions.Session do
     * `end_reason` — free text saying *why* it ended: an operator kill, a failed
       launch, or the adoption sweep finding the scope vanished. §4.6 requires the
       sweep to record a reason rather than silently flipping rows.
+    * `bridge_status` — `nil` until §8.3's bridge-verification poll finds no
+      `bridge-session` record, then `:unavailable` (`mark_bridge_unavailable`,
+      bd-cdretj). `Arbiter.Sessions.broadcast_error/2`'s live PubSub signal for
+      the same event only reaches a client already attached when it fires —
+      normally nobody, since verification runs in the ~15s right after launch —
+      so this is what a client attaching afterwards has to go on instead.
 
   ## No FK to the ledger
 
@@ -129,6 +139,15 @@ defmodule Arbiter.Sessions.Session do
       index [:status]
       # The ledger join (`usage_events/1`) and the rollover lookup.
       index [:provider_session_id]
+      # The refine binding (bd-1lszsc): the lookup "is there a live refine
+      # session for this issue", and — partial, on the same column — the rule
+      # that there can only ever be one.
+      index [:issue_id]
+
+      index [:issue_id],
+        unique: true,
+        name: "sessions_live_issue_binding_index",
+        where: "issue_id IS NOT NULL AND status != 'ended'"
     end
   end
 
@@ -141,6 +160,7 @@ defmodule Arbiter.Sessions.Session do
       accept [
         :provider,
         :workspace_id,
+        :issue_id,
         :config_dir,
         :cwd,
         :provider_session_id,
@@ -291,6 +311,36 @@ defmodule Arbiter.Sessions.Session do
       accept [:name]
       require_atomic? false
     end
+
+    update :mark_bridge_unavailable do
+      description """
+      §8.3's bridge-verification poll timed out with no `bridge-session`
+      record. Persisted (bd-cdretj) so a client that attaches after
+      `broadcast_error/2`'s fire-and-forget PubSub message already went
+      out — the normal case, since verification runs in the ~15s right
+      after launch and an operator is rarely already attached — still sees
+      that the bridge never came up, instead of a plain terminal that looks
+      no different from a healthy one.
+      """
+
+      accept []
+      require_atomic? false
+      change set_attribute(:bridge_status, :unavailable)
+    end
+
+    update :mark_bridge_available do
+      description """
+      Clear a stale `:unavailable` once a `bridge-session` record is
+      actually observed (bd-cdretj round 2) — an operator retrying
+      `/remote-control` after `mark_bridge_unavailable` fixes the bridge
+      without ever touching this row, so without this the badge and the
+      session-list label keep asserting a failure that is no longer true.
+      """
+
+      accept []
+      require_atomic? false
+      change set_attribute(:bridge_status, nil)
+    end
   end
 
   validations do
@@ -334,6 +384,25 @@ defmodule Arbiter.Sessions.Session do
       public? true
       constraints max_length: 255, trim?: true
       description "nil = cross-workspace (the coordinator's normal shape)."
+    end
+
+    attribute :issue_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description """
+      The issue this session is bound to — set only for **refine sessions**
+      (bd-1lszsc). `nil` for every other session, which is every session that
+      is not one issue's refinement.
+
+      It is not decoration: `Arbiter.Sessions.Provisioning.mint_token/2` mints
+      a `:refine`-tier token bound to this issue (and the row's workspace)
+      whenever it is set, so a bound row structurally cannot hold a
+      coordinator token. A partial unique index
+      (`sessions_live_issue_binding_index`, `WHERE status != 'ended'`) holds
+      the "at most one live refine session per issue" rule against a
+      concurrent double-click.
+      """
     end
 
     attribute :scope_unit, :string do
@@ -428,6 +497,18 @@ defmodule Arbiter.Sessions.Session do
     attribute :end_reason, :string do
       public? true
       constraints max_length: 512, trim?: true
+    end
+
+    attribute :bridge_status, :atom do
+      public? true
+      constraints one_of: [:unavailable]
+
+      description """
+      `nil` until §8.3's bridge-verification poll finds no `bridge-session`
+      record (`mark_bridge_unavailable`, bd-cdretj) — a durable copy of
+      what `Arbiter.Sessions.broadcast_error/2`'s live-only signal cannot
+      guarantee an operator ever sees.
+      """
     end
 
     create_timestamp :inserted_at

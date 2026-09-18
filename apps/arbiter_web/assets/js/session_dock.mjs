@@ -18,13 +18,24 @@
 // reaching for `window` so `test/js/session_dock_test.mjs` can hand them
 // stores that fail in each of those ways.
 
+import {
+  DOCK_SIZES,
+  applyColumnFloor,
+  createDockSizeController,
+  measureColumnWidth
+} from "./session_dock_size.mjs"
+
 export const DOCK_STORAGE_KEY = "arbiter:session-dock"
 
 // Regions inside the dock whose scroll offset has to survive a live
 // navigation. See `rememberScroll`/`restoreScroll` for why that is not free.
 export const DOCK_SCROLL_ATTR = "data-dock-scroll"
 
-const EMPTY = Object.freeze({ open: [], expanded: null })
+// How long a browser resize has to stop for before the side panel re-decides
+// whether it still fits. Long enough that a drag is one decision.
+const SIZE_DEBOUNCE_MS = 120
+
+const EMPTY = Object.freeze({ open: [], expanded: null, sizes: {} })
 
 // `window.localStorage` can throw on access, so even getting hold of the
 // store is a guarded operation.
@@ -78,7 +89,26 @@ function normalize(state) {
   const expanded =
     typeof state.expanded === "string" && open.includes(state.expanded) ? state.expanded : null
 
-  return { open, expanded }
+  return { open, expanded, sizes: normalizeSizes(state.sizes, open) }
+}
+
+// The per-session size preset (bd-covojz). Kept as an object rather than in
+// the `open` list because it outlives neither more nor less than the window
+// does: an id that is no longer open has no size, and a name that is not one
+// of the three presets is not a size at all. Compact is the default and is
+// therefore *absent* rather than stored — one fewer thing for a hand-edited
+// payload to disagree with, and the shape a first-ever write produces anyway.
+function normalizeSizes(sizes, open) {
+  if (!sizes || typeof sizes !== "object" || Array.isArray(sizes)) return {}
+
+  const kept = {}
+
+  for (const id of open) {
+    const size = sizes[id]
+    if (size !== "compact" && DOCK_SIZES.includes(size)) kept[id] = size
+  }
+
+  return kept
 }
 
 // -- the handover from another view -------------------------------------------
@@ -241,6 +271,7 @@ export const SessionDock = {
     this.store = dockStorage(window)
     this.scrollTops = new Map()
     this.restoring = false
+    this.mountSizeControl()
 
     // Capture phase: `scroll` does not bubble, but a capture listener on an
     // ancestor still sees it on the way down to the target. The guard is what
@@ -270,6 +301,17 @@ export const SessionDock = {
     window.addEventListener("phx:navigate", this.onNavigate)
 
     this.handleEvent("session-dock:persist", (state) => writeDockState(this.store, state))
+
+    // The expanded window's size preset (bd-covojz). The server renders the
+    // window's own geometry; what is left for the client is the *page's* half
+    // of it — `<html data-dock-size>`, which is what insets `<main>` so the
+    // page stays readable to a side panel's left — and the one decision only a
+    // browser can make, whether a side panel fits on this viewport at all.
+    //
+    // The terminal's hook listens for this same event and answers with
+    // `reclaim()`, which is phase 2's forced refit. Two audiences, one event:
+    // a size change is announced rather than applied twice.
+    this.handleEvent("session-dock:size", ({ size }) => this.dockSize.set(size))
 
     // Dismiss is "forget this window", and an ended window's last screen — and
     // the note that it ended at all — are part of what is being forgotten.
@@ -318,7 +360,51 @@ export const SessionDock = {
     return { ...readDockState(this.store), frozen: frozenIds() }
   },
 
+  // The page's half of the size presets, and the measurement under it.
+  //
+  // The column floor is a *font* measurement — 80 columns of Geist Mono at the
+  // terminal's 13px, not 80 of the fallback face's — so it is taken again when
+  // the webfont lands, exactly as `session_terminal.mjs` re-measures xterm's
+  // cell for the same reason. Until then the stylesheet's own default stands.
+  mountSizeControl() {
+    this.columnWidth = measureColumnWidth(document)
+    applyColumnFloor(document, this.columnWidth)
+
+    this.dockSize = createDockSizeController({
+      doc: document,
+      viewportWidth: () => window.innerWidth,
+      columnWidth: () => this.columnWidth,
+      // Only ever on a *change* — the controller swallows the repeats, so a
+      // drag across the boundary is one message rather than one per frame.
+      onFallback: (fallback) => this.pushEvent("size_fallback", { fallback })
+    })
+
+    // A browser resize can take a side panel below the floor, or give it back.
+    // Debounced for the same reason the terminal's own fit is: a drag is
+    // hundreds of events and this one ends in a round trip.
+    this.onResize = () => {
+      if (this.resizeTimer) clearTimeout(this.resizeTimer)
+      this.resizeTimer = setTimeout(() => this.dockSize.refresh(), SIZE_DEBOUNCE_MS)
+    }
+    window.addEventListener("resize", this.onResize)
+
+    const fonts = document.fonts
+    if (fonts && fonts.ready) {
+      fonts.ready
+        .then(() => {
+          this.columnWidth = measureColumnWidth(document)
+          applyColumnFloor(document, this.columnWidth)
+          this.dockSize.refresh()
+        })
+        .catch(() => {
+          /* no webfont arrived; the fallback metrics were right all along */
+        })
+    }
+  },
+
   destroyed() {
     window.removeEventListener("phx:navigate", this.onNavigate)
+    window.removeEventListener("resize", this.onResize)
+    if (this.resizeTimer) clearTimeout(this.resizeTimer)
   }
 }

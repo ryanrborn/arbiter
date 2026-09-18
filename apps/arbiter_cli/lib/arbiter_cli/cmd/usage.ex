@@ -341,9 +341,10 @@ defmodule ArbiterCli.Cmd.Usage do
     end)
 
     totals = totals(rollups)
+    total_cost_str = if totals.cost_known, do: "$#{format_cost(totals.cost)}", else: "n/a"
 
     IO.puts(
-      "  -- total: $#{format_cost(totals.cost)} · #{format_int(totals.tokens_in)} in / #{format_int(totals.tokens_out)} out · #{length(rollups)} groups · #{totals.rows} sessions"
+      "  -- total: #{total_cost_str} · #{format_int(totals.tokens_in)} in / #{format_int(totals.tokens_out)} out · #{length(rollups)} groups · #{totals.rows} sessions"
     )
   end
 
@@ -356,7 +357,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
     Enum.each(rows, fn ev ->
       IO.puts(
-        "  #{ev["occurred_at"]}  source=#{ev["source"] || "task"}  task=#{ev["task_id"] || "-"}  session=#{ev["session_id"] || "-"}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
+        "  #{ev["occurred_at"]}  source=#{ev["source"] || "task"}  task=#{ev["task_id"] || "-"}  session=#{ev["session_id"] || "-"}  step=#{ev["step"]}  model=#{ev["model"]}  cost=#{cost_label(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
       )
     end)
   end
@@ -408,11 +409,17 @@ defmodule ArbiterCli.Cmd.Usage do
 
   defp shift_back_hours(_), do: nil
 
-  defp format_cost(nil), do: "0.0000"
+  # nil means "no priced cost known" (e.g. agy/Antigravity, a subscription
+  # with no per-call dollar figure) — never render that as "$0.0000", which
+  # reads as "this session was free" rather than "cost is unknowable here".
+  defp format_cost(nil), do: "n/a"
 
   defp format_cost(n) when is_number(n) do
     :erlang.float_to_binary(n / 1, decimals: 4)
   end
+
+  defp cost_label(nil), do: "n/a"
+  defp cost_label(n) when is_number(n), do: "$" <> format_cost(n)
 
   defp format_int(nil), do: "0"
   defp format_int(n) when is_integer(n), do: Integer.to_string(n)
@@ -435,13 +442,21 @@ defmodule ArbiterCli.Cmd.Usage do
   end
 
   defp totals(rollups) do
-    Enum.reduce(rollups, %{cost: 0.0, tokens_in: 0, tokens_out: 0, rows: 0}, fn r, acc ->
-      %{
-        cost: acc.cost + (r["total_cost_usd"] || 0.0),
-        tokens_in: acc.tokens_in + (r["tokens_in"] || 0),
-        tokens_out: acc.tokens_out + (r["tokens_out"] || 0),
-        rows: acc.rows + (r["rows"] || 0)
-      }
-    end)
+    Enum.reduce(
+      rollups,
+      %{cost: 0.0, cost_known: false, tokens_in: 0, tokens_out: 0, rows: 0},
+      fn r, acc ->
+        %{
+          cost: acc.cost + (r["total_cost_usd"] || 0.0),
+          # At least one group had a priced cost — an all-agy rollup (every
+          # group's total_cost_usd nil) must render "n/a", not "$0.0000",
+          # which reads as "this window was free" (see format_cost/1).
+          cost_known: acc.cost_known or is_number(r["total_cost_usd"]),
+          tokens_in: acc.tokens_in + (r["tokens_in"] || 0),
+          tokens_out: acc.tokens_out + (r["tokens_out"] || 0),
+          rows: acc.rows + (r["rows"] || 0)
+        }
+      end
+    )
   end
 end

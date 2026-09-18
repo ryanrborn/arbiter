@@ -3,11 +3,20 @@ defmodule Arbiter.Agents.Gemini do
   Gemini agent adapter implementing `Arbiter.Agents.Agent`.
 
   Favors `agy` CLI binary, falling back to `gemini` CLI binary if `agy` is not on PATH.
+
+  The two CLIs are not interchangeable — see `resolve_executable/0`. On the agy
+  branch the spawn's security posture is split across
+  `Arbiter.Agents.Gemini.Security` (argv + the generated settings document) and
+  `Arbiter.Agents.Gemini.ConfigDir` (the isolated `$HOME` that document lands
+  in, injected by `spawn_env/1`); the upstream `gemini` branch has no analogue
+  of either (bd-7s29yq).
   """
 
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Gemini.Config
+  alias Arbiter.Agents.Gemini.ConfigDir
+  alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
 
   @done_regex ~r/\barb done\b/
@@ -17,18 +26,44 @@ defmodule Arbiter.Agents.Gemini do
   # dashboards via `resolved_model/1`; dispatch behaviour is unchanged.
   @default_model "gemini-2.5-pro"
 
+  # bd-svczq4: the auth probe's prompt, and the two numbers that bound it. The
+  # fraction keeps agy's own `--print-timeout` strictly inside the harness
+  # watchdog so agy is always the one to yield; the fallback only applies to a
+  # bare adapter call that names no watchdog, since `Arbiter.Agents.Preflight`
+  # always threads one through.
+  @probe_prompt "ping"
+  @probe_timeout_fraction_pct 80
+  @probe_fallback_watchdog_ms 120_000
+
   @impl true
   def provider, do: "gemini"
 
-  # Gemini/agy CLIs have no per-tool deny lists or fine-grained permission modes
-  # analogous to Claude's --permission-mode + --settings. The policy is honored
-  # at the coarse level: :bypass maps to --dangerously-skip-permissions / --skip-trust;
-  # :auto and :strict omit those flags so the tool does not bypass its own
-  # permission checks. Operator-level deny rules and sandbox scoping are not yet
-  # enforceable — hence enforced? returns false so the REST posture surface can
-  # show the gap rather than claiming full enforcement.
+  @doc """
+  Whether this host's Gemini-family spawn actually enforces the resolved
+  `Arbiter.Agents.SecurityPolicy` (bd-7s29yq / T6b).
+
+  True only when **both** halves of the seam are present:
+
+    * the CLI on `PATH` is `agy` — the upstream `gemini` CLI has no analogue of
+      `permissions.allow/deny` and still runs with whatever posture it
+      inherits, so it answers `false`; and
+    * worker config isolation is on (`Arbiter.Agents.Gemini.ConfigDir.enabled?/0`)
+      — agy reads its posture only from `$HOME/.gemini/antigravity-cli/settings.json`,
+      so without an Arbiter-owned `$HOME` there is nowhere to put the generated
+      document and the spawn silently inherits the operator's
+      `always-proceed`-with-no-deny-list file. That is precisely the state
+      bd-7s29yq found, and the REST posture surface must keep showing it as
+      *not* enforced.
+
+  When both hold, `permissions.deny` is a hard block in every mode — confirmed
+  live, including under `--dangerously-skip-permissions`; see
+  `Arbiter.Agents.Gemini.Security`'s moduledoc for the probe results and for
+  the two things agy does *not* enforce.
+  """
   @impl true
-  def security_enforced?, do: false
+  def security_enforced? do
+    match?({:ok, {:agy, _}}, resolve_executable()) and ConfigDir.enabled?()
+  end
 
   @impl true
   def done_sentinel, do: @done_regex
@@ -47,22 +82,82 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   @impl true
-  def auth_probe_argv(_opts \\ []) do
+  def auth_probe_argv(opts \\ []) do
     # Cheap token-validity probe for whichever CLI is on PATH. A bad/expired key
     # makes Gemini print "API key not valid" / "RESOURCE_EXHAUSTED" (or 401) and
     # exit non-zero — classified by Arbiter.Worker.StopReason.
+    #
+    # bd-481sz7 AC3: without `--output-format stream-json` the probe's stdout
+    # is plain text `Arbiter.Agents.Gemini.Stream` can't parse for usage, so
+    # every preflight row landed with zero tokens even on a healthy probe —
+    # the same root cause bd-2fzwlc found on the main spawn path.
+    #
+    # bd-svczq4: the word "ping" is not a ping to an agentic CLI. This probe
+    # runs with tools enabled and an Arbiter-worker `GEMINI.md` in its isolated
+    # HOME, and a measured run answered it with 21 model calls over 102s — well
+    # past the harness watchdog, which then reported a hang that had not
+    # happened. Without a `--print-timeout` agy runs on its own 5-minute
+    # print-mode default, so nothing makes agy yield before the harness gives
+    # up and no exit status is ever observed. Deriving one from the harness
+    # watchdog makes agy the first to yield and report a real status.
     case resolve_executable() do
-      {:ok, {_type, exec}} ->
-        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", "ping"]}
+      {:ok, {:agy, exec}} ->
+        {:ok,
+         ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", @probe_prompt] ++
+           output_format_flag() ++ probe_print_timeout_flag(opts)}
+
+      {:ok, {:gemini, exec}} ->
+        # Upstream `gemini` has no `--print-timeout` (see `print_timeout_flag/1`);
+        # the harness watchdog stays its only bound.
+        {:ok,
+         ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", @probe_prompt] ++
+           output_format_flag()}
 
       {:error, _} = err ->
         err
     end
   end
 
+  # agy's own turn budget for a probe, kept strictly *inside* the harness
+  # watchdog (`Arbiter.Agents.Preflight.timeout_ms/2`, threaded in as
+  # `:timeout_ms`) so agy always yields first and the harness sees a real exit
+  # status instead of having to guess from silence. A bare adapter call that
+  # names no watchdog still gets a bound — never agy's 5-minute default.
+  defp probe_print_timeout_flag(opts) do
+    watchdog =
+      case Keyword.get(opts, :timeout_ms) do
+        ms when is_integer(ms) and ms > 0 -> ms
+        _ -> @probe_fallback_watchdog_ms
+      end
+
+    seconds = max(div(watchdog * @probe_timeout_fraction_pct, 100 * 1000), 1)
+    ["--print-timeout", "#{seconds}s"]
+  end
+
+  @doc """
+  Env pairs for an agy/gemini spawn.
+
+  Besides the API key and thinking level, this injects the isolated `HOME`
+  (`Arbiter.Agents.Gemini.ConfigDir`) that carries the generated agy permission
+  posture and the Arbiter-owned `GEMINI.md` — without it agy reads the
+  operator's own `~/.gemini` (bd-7s29yq). Pass the spawn's `:worktree` (or
+  `:worktree_path`) and `:security` policy so the right directory and posture
+  are prepared; a caller with neither still gets an isolated (default-policy)
+  HOME rather than the operator's.
+  """
   @impl true
   def spawn_env(opts \\ []) do
-    api_key_env(opts) ++ thinking_env(opts)
+    api_key_env(opts) ++ thinking_env(opts) ++ home_env(opts)
+  end
+
+  # Only the agy fork reads its config from $HOME; the upstream gemini CLI
+  # keeps its own state there too, and redirecting HOME for it would buy
+  # nothing while risking its auth. Gate on the resolved executable.
+  defp home_env(opts) do
+    case resolve_executable() do
+      {:ok, {:agy, _}} -> ConfigDir.env(opts)
+      _ -> []
+    end
   end
 
   defp api_key_env(opts) do
@@ -212,7 +307,9 @@ defmodule Arbiter.Agents.Gemini do
 
   Public because the two CLIs do not share a config format: which one is on
   `PATH` decides whether a worktree-local MCP config is even readable
-  (`Arbiter.MCP.AgentConfig.Gemini`, bd-m8geh4).
+  (`Arbiter.MCP.AgentConfig.Gemini`, bd-m8geh4). Also public so
+  `Arbiter.Quota.provider_code/1` (bd-7qj58o) can key the quota-gate lookup
+  off the same PATH probe instead of duplicating it and risking drift.
   """
   @spec resolve_executable() ::
           {:ok, {:agy | :gemini, String.t()}} | {:error, {:executable_not_found, String.t()}}
@@ -241,20 +338,24 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  # :bypass → pass skip-permissions so the tool doesn't gate on confirmations.
-  # :auto/:strict → omit the flag; the tool will not bypass its own permission
-  # checks. Operator deny rules are not enforceable on Gemini/agy (no --settings
-  # equivalent) — see security_enforced?/0.
-  defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
-    [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
-      agy_model_and_effort_argv(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
-  end
-
-  defp build_argv(:agy, exec, prompt, opts, _policy) do
+  # The agy branch's permission posture lives in TWO places and they must agree:
+  # the argv fragment here (`Arbiter.Agents.Gemini.Security.permission_argv/1`)
+  # and the generated `settings.json` that `Arbiter.Agents.Gemini.ConfigDir`
+  # drops into the spawn's isolated `$HOME` (injected by `spawn_env/1`). The
+  # settings document is the load-bearing half — it carries `toolPermission`
+  # and the allow/deny rules; the flag is the part agy only accepts on the
+  # command line. See `Arbiter.Agents.Gemini.Security` for the mode table.
+  defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{} = policy) do
     [exec, "-p", prompt] ++
+      Security.permission_argv(policy) ++
       agy_model_and_effort_argv(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
+  # The upstream `gemini` CLI has no allow/deny mechanism and no settings file
+  # we can generate, so its branches stay coarse: `:bypass` skips its own trust
+  # and confirmation gates, `:auto`/`:strict` leave them on. Nothing here
+  # enforces the policy's deny rules, which is why `security_enforced?/0`
+  # answers `false` on a host where `gemini` (not `agy`) is the resolved CLI.
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--skip-trust", "-y"] ++
       model_flag(:gemini, opts) ++ thinking_flag(:gemini, opts) ++ output_format_flag()

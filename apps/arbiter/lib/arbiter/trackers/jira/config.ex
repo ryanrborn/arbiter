@@ -13,10 +13,10 @@ defmodule Arbiter.Trackers.Jira.Config do
   ## Shape
 
       %{
-        "host" => "leotechnologies.atlassian.net",
-        "project_key" => "VR",
+        "host" => "acme.atlassian.net",
+        "project_key" => "AX",
         "credentials_ref" => "env:JIRA_TOKEN",
-        "email" => "ryan.born@leotechnologies.com",
+        "email" => "jira-bot@acme.example",
         # optional:
         "status_map" => %{
           # Task lifecycle event -> Jira target STATUS name (NOT a transition
@@ -26,14 +26,14 @@ defmodule Arbiter.Trackers.Jira.Config do
           "open" => "To Do",
           "in_progress" => "In Progress",
           "pr_opened" => "In Code Review",
-          # Unmapped by default (bd-al6v70): on LeoTech's VR workflow "Pending
+          # Unmapped by default (bd-al6v70): on Acme's AX workflow "Pending
           # Merge" means intentionally held from merging, not "review passed,
           # awaiting merge" — arbiter must not auto-transition into it under
           # the operator's identity. A workspace that wants the old behavior
           # can still opt in with an explicit override here.
           "approved_unmerged" => "",
           "merged" => "Code Complete",
-          # `:closed` targets the terminal status. On LeoTech's VR (Verus)
+          # `:closed` targets the terminal status. On Acme's AX (Apex)
           # workflow this is "Done"; the path runs In Code Review -> Code
           # Complete -> Done, and the Code Complete hop is gated until the
           # "QA Testing Notes" and "Deployment Notes" custom fields are set.
@@ -53,7 +53,7 @@ defmodule Arbiter.Trackers.Jira.Config do
         "field_ids" => %{
           "title" => "summary",
           "description" => "description",
-          # Verified LeoTech VR custom-field IDs (textarea, ADF-encoded).
+          # Verified Acme AX custom-field IDs (textarea, ADF-encoded).
           "qa_notes" => "customfield_10184",
           "deployment_notes" => "customfield_10185",
           "assignee" => "assignee"
@@ -62,7 +62,7 @@ defmodule Arbiter.Trackers.Jira.Config do
         # (and their absence escalated) regardless of what the live
         # `expand=transitions.fields` metadata reports. Jira's transitions API
         # only surfaces *screen*-required fields; a workflow *validator*
-        # requiring a field (LeoTech's VR Story workflow gates "Pull request
+        # requiring a field (Acme's AX Story workflow gates "Pull request
         # created" this way) is invisible to that call, so detection alone
         # under-reports the gate. Defaults to `["pr_opened"]` — override per
         # workspace to force additional events.
@@ -86,7 +86,7 @@ defmodule Arbiter.Trackers.Jira.Config do
   # Events with no entry here are treated as "this tracker doesn't model that
   # state" and are skipped silently — only a *mapped* status that can't be
   # reached fails loudly. Defaults are the conservative Jira-default status
-  # names; LeoTech's VR (Verus) workflow overrides them via workspace config.
+  # names; Acme's AX (Apex) workflow overrides them via workspace config.
   @default_status_map %{
     open: "To Do",
     in_progress: "In Progress",
@@ -97,7 +97,7 @@ defmodule Arbiter.Trackers.Jira.Config do
     closed: "Done"
   }
 
-  # Default multi-hop transition graph for LeoTech's VR (Verus) workflow,
+  # Default multi-hop transition graph for Acme's AX (Apex) workflow,
   # keyed by SOURCE status name. Each edge declares the status the hop lands on;
   # `"transition"` is an optional hint, used only to break a tie when several
   # live transitions land on that same status. The graph is therefore a *route*,
@@ -110,7 +110,7 @@ defmodule Arbiter.Trackers.Jira.Config do
   # reachable by a single live transition is resolved directly from the
   # `/transitions` response (its `to` field), no graph required.
   #
-  # The names below come from the VR *Story/Bug* workflow discovery in bd-c4cfuv
+  # The names below come from the AX *Story/Bug* workflow discovery in bd-c4cfuv
   # and are retained purely as tie-break hints — they are no longer required to
   # match. Transition ids are deliberately NOT used: ids collide across issue
   # types with opposite meanings on this project (id 131 is "Ready to work (2)"
@@ -118,7 +118,7 @@ defmodule Arbiter.Trackers.Jira.Config do
   # by id would close tickets it meant to advance.
   #
   # Destination matching fixes hops whose *name* was wrong; it cannot conjure a
-  # route that doesn't exist. `Code Complete -> Done` is one such: no VR
+  # route that doesn't exist. `Code Complete -> Done` is one such: no AX
   # transition from Code Complete lands on Done at all — the only forward edge
   # is "Release branch cut" -> Release Ready for QA, and reaching Done means
   # traversing the whole deploy pipeline. The fabricated edge is therefore NOT
@@ -141,8 +141,8 @@ defmodule Arbiter.Trackers.Jira.Config do
     ]
   }
 
-  # The QA / Deployment custom-field IDs default to LeoTech's verified VR
-  # (Verus) workspace IDs — these are the gated fields LeoTech requires before
+  # The QA / Deployment custom-field IDs default to Acme's verified AX
+  # (Apex) workspace IDs — these are the gated fields Acme requires before
   # a forward transition (`com.atlassian.jira.plugin.system.customfieldtypes:textarea`,
   # so they take ADF). A workspace running a *different* Jira instance overrides
   # them via `tracker.config.field_ids`; the merge in `field_ids/1` lets the
@@ -182,7 +182,7 @@ defmodule Arbiter.Trackers.Jira.Config do
 
   # Lifecycle events forced to gate on the QA/Deployment notes fields
   # regardless of what the live transitions-metadata detection reports (see
-  # `"gated_note_events"` above). LeoTech's VR Story workflow enforces these
+  # `"gated_note_events"` above). Acme's AX Story workflow enforces these
   # via a workflow validator on "Pull request created" — invisible to the
   # `expand=transitions.fields` screen-metadata call `gating_fields/2` relies
   # on for live detection (bd-4isprn).
@@ -365,7 +365,7 @@ defmodule Arbiter.Trackers.Jira.Config do
   # The transition graph drives multi-hop path-finding. Workspaces may supply
   # their own (string-keyed status -> list of %{"to"} edges, each optionally
   # carrying a `"transition"` name as a tie-break hint); the
-  # VR default is used when none is configured. A workspace that sets an empty
+  # AX default is used when none is configured. A workspace that sets an empty
   # map opts out of graph-based multi-hop (single-hop fast path still works).
   defp transition_graph(raw) do
     case Map.get(raw, "transition_graph") do

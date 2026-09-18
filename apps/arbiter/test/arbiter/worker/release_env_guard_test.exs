@@ -95,6 +95,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker.ex" => :pure_tool,
+    # bd-svczq4: the OS-process-tree kill helpers extracted out of `worker.ex`
+    # (and now shared with `Arbiter.Agents.Preflight`'s probe teardown). Spawns
+    # only `kill` and `pgrep`.
+    "apps/arbiter/lib/arbiter/worker/os_process.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/loop/apply/repo_doc.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/direct.ex" => :pure_tool,
@@ -102,6 +106,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/mergers/github/repo_resolver.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/net_diff.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/checkout.ex" => :pure_tool,
+    # bd-1lszsc: git only (rev-parse / worktree add) to build a refine
+    # session's read-only grounding checkout. Same classification as
+    # `reviews/checkout.ex`, which does the same thing for a PR head.
+    "apps/arbiter/lib/arbiter/sessions/repo_checkout.ex" => :pure_tool,
     # bd-2jkrqu: git only (rev-parse / fetch / push / merge-base), which never
     # reads ROOTDIR or BINDIR.
     "apps/arbiter/lib/arbiter/reviews/push_state.ex" => :pure_tool,

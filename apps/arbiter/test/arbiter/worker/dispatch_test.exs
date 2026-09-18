@@ -27,6 +27,25 @@ defmodule Arbiter.Worker.DispatchTest do
     {:ok, ws: ws}
   end
 
+  defp eventually(fun, timeout_ms \\ 2_000, step_ms \\ 20) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(fun, deadline, step_ms)
+  end
+
+  defp do_eventually(fun, deadline, step_ms) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("eventually/2 timed out")
+
+      true ->
+        Process.sleep(step_ms)
+        do_eventually(fun, deadline, step_ms)
+    end
+  end
+
   describe "dispatch/2 happy path" do
     test "spawns a worker and starts a workflow machine", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "hello world", workspace_id: ws.id})
@@ -244,9 +263,9 @@ defmodule Arbiter.Worker.DispatchTest do
       on_exit(fn -> File.rm_rf(tmp) end)
 
       # Registry keyed by repo NAME "client"; the repo's origin resolves to the
-      # differently-named slug "leo-technologies-llc/verus-client".
+      # differently-named slug "acme-corp/apex-client".
       repo_path =
-        seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
+        seed_repo_with_github_origin!(tmp, "client", "acme-corp/apex-client")
 
       {:ok, ws} =
         Ash.update(ws, %{config: %{"repo_paths" => %{"client" => repo_path}}}, action: :update)
@@ -261,10 +280,10 @@ defmodule Arbiter.Worker.DispatchTest do
       # If the slug resolves, dispatch gets past the repo guard and fails later
       # at worktree provisioning (:missing_worktree) — the same distinguishable
       # outcome the bd-bi5pn0 tests rely on. The pre-fix behavior was
-      # {:error, {:repo_not_found, "leo-technologies-llc/verus-client"}}.
+      # {:error, {:repo_not_found, "acme-corp/apex-client"}}.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
-                 repo: "leo-technologies-llc/verus-client",
+                 repo: "acme-corp/apex-client",
                  start_driver: false,
                  start_claude: true,
                  provision_worktree: false,
@@ -273,16 +292,18 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
-  describe "pre-flight auth check (bd-awi4nw)" do
+  describe "pre-flight auth guard (bd-2jgs2h)" do
+    alias Arbiter.Agents.CredentialWatchdog
     alias Arbiter.Messages.Message
 
     # bd-1ziw04: real-work dispatchs now require the repo to be in :repo_paths.
-    # Configure a minimal entry so repo validation passes and the preflight check
-    # actually fires. No real git repo is needed — the probe aborts before the
+    # Configure a minimal entry so repo validation passes and the guard check
+    # actually fires. No real git repo is needed — the guard aborts before the
     # worktree provisioning step.
     setup do
       prior = Application.get_env(:arbiter, :repo_paths)
       Application.put_env(:arbiter, :repo_paths, %{"test/repo" => "/tmp"})
+      on_exit(fn -> CredentialWatchdog.reset() end)
 
       on_exit(fn ->
         if prior,
@@ -291,40 +312,150 @@ defmodule Arbiter.Worker.DispatchTest do
       end)
     end
 
-    test "a failing auth probe REFUSES to dispatch and leaves the task untouched", %{ws: ws} do
+    test "a normal dispatch writes no :preflight usage event (bd-2jgs2h acceptance 1)", %{
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "no probe", workspace_id: ws.id})
+
+      # No CredentialWatchdog expiry mark, so the guard is a plain state
+      # lookup — no CLI probe is spawned. The dispatch still fails downstream
+      # (no worktree provisioned), just never via a probe. Deliberately no
+      # `claude_command:` override here: the old `maybe_preflight/2` had a
+      # clause that skipped the probe whenever `claude_command` was set
+      # without `probe_command`, which would have made this assertion pass
+      # even against the pre-change code. That clause is gone — the guard
+      # never spawns a probe at all now — so this exercises the real path.
+      assert {:error, :missing_worktree} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 provision_worktree: false
+               )
+
+      # A live probe (the old `Preflight.check/2` call inside `run_preflight/2`)
+      # would have billed its spend to the task under `source: :preflight`
+      # (bd-adyhvn). No such probe runs anymore, so no such row exists.
+      assert [] =
+               UsageEvent
+               |> Ash.Query.filter(source == :preflight and task_id == ^task.id)
+               |> Ash.read!()
+    end
+
+    test "a known-expired adapter REFUSES to dispatch and leaves the task untouched", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "auth gate", workspace_id: ws.id})
+
+      :ok =
+        CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401 invalid authentication credentials",
+          remediation: "Re-authenticate",
+          exit_status: 1,
+          signal: nil
+        })
+
+      eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
 
       assert {:error, {:auth_check_failed, reason}} =
                Dispatch.dispatch(task.id,
                  repo: "test/repo",
                  start_driver: false,
-                 start_claude: true,
-                 probe_command: [
-                   "sh",
-                   "-c",
-                   "echo '401 invalid authentication credentials'; exit 1"
-                 ],
-                 probe_env: []
+                 start_claude: true
                )
 
       assert reason.category == :auth_expired
 
-      # Refused BEFORE any state mutation: task is still :open, no worker spawned.
+      # Refused BEFORE any state mutation: task is still :open, no worker spawned,
+      # no worktree provisioned.
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :open
       assert Worker.whereis(task.id) == nil
     end
 
-    test "a failed pre-flight escalates to the Coordinator with a re-auth message", %{ws: ws} do
+    test "a worker dying with :auth_expired bounds the wave (bd-2jgs2h acceptance 3)",
+         %{ws: ws} do
+      tmp = Path.join(System.tmp_dir!(), "disp-wave-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf(tmp) end)
+      repo = seed_repo!(tmp, "wave-repo")
+
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+      put_app_env(:arbiter, :repo_paths, %{"wave/repo" => repo})
+
+      # Stub the real `claude` binary on PATH so `build_agent_session_opts/4`
+      # takes its normal (non-`claude_command`-override) path and reaches the
+      # routing step (`Worker.report(worker_pid, :routing_config, ...)`) that
+      # `notify_credential_watchdog/2` needs to resolve the dying worker's
+      # adapter — `claude_command` bypasses that step entirely, which is the
+      # real reason a worker dying that way could never mark the watchdog.
+      argv_file = Path.join(tmp, "argv.txt")
+      stub_named_on_path(tmp, "claude", argv_file)
+      claude_stub = Path.join([tmp, "stub-bin", "claude"])
+
+      File.write!(claude_stub, """
+      #!/bin/sh
+      echo 'API Error: 401 Invalid authentication credentials'
+      exit 1
+      """)
+
+      File.chmod!(claude_stub, 0o755)
+
+      {:ok, task1} = Ash.create(Issue, %{title: "wave 1", workspace_id: ws.id})
+
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.dispatch(task1.id,
+                 repo: "wave/repo",
+                 start_driver: false,
+                 start_claude: true
+               )
+
+      eventually(fn -> Worker.state(pid).status == :failed end)
+      assert Worker.state(pid).meta.stop_reason.category == :auth_expired
+
+      # Wait for the (fire-and-forget cast) CredentialWatchdog notification
+      # `Worker.fail_stopped/2` sends before the guard can see it — `:sys.get_state`
+      # does not guarantee this, since system messages can jump the mailbox
+      # ahead of an already-enqueued cast.
+      eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
+
+      {:ok, task2} = Ash.create(Issue, %{title: "wave 2", workspace_id: ws.id})
+
+      assert {:error, {:auth_check_failed, reason}} =
+               Dispatch.dispatch(task2.id,
+                 repo: "wave/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["sh", "-c", "exit 0"]
+               )
+
+      assert reason.category == :auth_expired
+      {:ok, reloaded} = Ash.get(Issue, task2.id)
+      assert reloaded.status == :open
+      assert Worker.whereis(task2.id) == nil
+      # Refused before worktree provisioning — the branch that would prove it
+      # never got the chance to be created.
+      refute File.dir?(Worktree.worktree_path(BranchNamer.derive(reloaded)))
+    end
+
+    test "a refused dispatch escalates to the Coordinator with a re-auth message", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "auth escalate", workspace_id: ws.id})
+
+      :ok =
+        CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401 invalid authentication credentials",
+          remediation: "Re-authenticate",
+          exit_status: 1,
+          signal: nil
+        })
+
+      eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
 
       {:error, {:auth_check_failed, _}} =
         Dispatch.dispatch(task.id,
           repo: "test/repo",
           start_driver: false,
-          start_claude: true,
-          probe_command: ["sh", "-c", "echo '401 invalid authentication credentials'; exit 1"],
-          probe_env: []
+          start_claude: true
         )
 
       assert [escalation] =
@@ -335,170 +466,57 @@ defmodule Arbiter.Worker.DispatchTest do
       assert escalation.body =~ "Re-authenticate"
     end
 
-    # bd-adyhvn: acceptance 3 is about the *real* dispatch path, not
-    # `Preflight.check/2` called by hand — `:usage_task_id` is threaded by
-    # `Dispatch.run_preflight/2` and nowhere else, so a test that passes it
-    # directly would stay green with that threading deleted.
-    test "a pre-flight run by a real dispatch bills its spend to the task it gated",
-         %{ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "preflight ledger", workspace_id: ws.id})
+    test "the guard is skipped when start_claude is false (default path unaffected)", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no guard", workspace_id: ws.id})
 
-      result_json =
-        ~s({"type":"result","subtype":"success","is_error":false,"duration_ms":1234,) <>
-          ~s("session_id":"sess-preflight-1","total_cost_usd":0.021,) <>
-          ~s("usage":{"input_tokens":4,"output_tokens":7,) <>
-          ~s("cache_creation_input_tokens":1024,"cache_read_input_tokens":38952}})
+      :ok =
+        CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401",
+          remediation: nil,
+          exit_status: 1,
+          signal: nil
+        })
 
-      # A probe that authenticates cleanly, so the dispatch proceeds past the
-      # gate (and then fails later for unrelated, un-provisioned reasons).
-      _ =
-        Dispatch.dispatch(task.id,
-          repo: "test/repo",
-          start_driver: false,
-          start_claude: true,
-          probe_command: ["sh", "-c", "printf '%s\\n' '#{result_json}'"],
-          probe_env: []
-        )
+      eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
 
-      assert [row] =
-               UsageEvent
-               |> Ash.Query.filter(source == :preflight and task_id == ^task.id)
-               |> Ash.read!()
-
-      assert row.source == :preflight
-      assert row.task_id == task.id
-      assert row.workspace_id == ws.id
-      assert row.cache_read_tokens == 38_952
-      assert row.tokens_in == 4
-      assert row.tokens_out == 7
-      assert row.cache_creation_tokens == 1024
-      assert row.session_id == "sess-preflight-1"
-      assert row.step == :other
-
-      # ...and that spend must not surface as a phantom task-attributed row:
-      # it is a real task id, so `--by task` legitimately carries it, but the
-      # source split must keep it separable from the worker session's own draw.
-      {:ok, by_source} = Arbiter.Usage.summarize(by: :source, workspace_id: ws.id)
-      assert Enum.any?(by_source, &(&1.group == "preflight"))
-    end
-
-    test "pre-flight is skipped when start_claude is false (default path unaffected)", %{ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "no preflight", workspace_id: ws.id})
-
-      # Even with a probe_command that would 401, no start_claude means no probe.
       # provision_worktree: false so we don't try to git-fetch /tmp.
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
                  repo: "test/repo",
                  start_driver: false,
-                 provision_worktree: false,
-                 probe_command: ["sh", "-c", "exit 1"]
+                 provision_worktree: false
                )
 
       assert result.task.status == :in_progress
     end
 
-    # bd-bw3466: `preflight_opts/1` used to Keyword.take a fixed list that
-    # excluded `:workspace`, so the probe ran with no workspace in hand and
-    # `Claude.spawn_env/1` injected no CLAUDE_CODE_OAUTH_TOKEN — on an install
-    # that configures the token per-workspace (`worker_env`, the supported
-    # way) every dispatch failed its own preflight before a worker spawned.
-    #
-    # A second workspace with a *different* token is deliberate: it makes the
-    # install-wide fallback in ConfigDir.oauth_token/1 ambiguous, so the only
-    # way the probe can see a token is the workspace being threaded through
-    # `preflight_opts/1`. Without the second workspace this test passes even
-    # against the bug.
-    #
-    # The probe below exits 0 only if the workspace's token reached its env, so
-    # a regression turns this into {:error, {:auth_check_failed, _}}. Getting
-    # to :missing_worktree proves the preflight passed.
-    @tag :capture_log
-    test "the preflight probe inherits the workspace's worker_env OAuth token" do
-      {:ok, ws} =
-        Ash.create(Workspace, %{
-          name: "preflight-worker-env-ws",
-          prefix: "pf",
-          worker_env: %{
-            "CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "ws-preflight-token", "secret" => true}
-          }
-        })
-
-      {:ok, _other} =
-        Ash.create(Workspace, %{
-          name: "preflight-other-ws",
-          prefix: "po",
-          worker_env: %{
-            "CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "other-token", "secret" => true}
-          }
-        })
-
-      {:ok, task} = Ash.create(Issue, %{title: "preflight token", workspace_id: ws.id})
-
-      assert {:error, :missing_worktree} =
-               Dispatch.dispatch(task.id,
-                 repo: "test/repo",
-                 start_driver: false,
-                 start_claude: true,
-                 provision_worktree: false,
-                 claude_command: ["sh", "-c", "exit 0"],
-                 probe_command: [
-                   "sh",
-                   "-c",
-                   ~s{test "$CLAUDE_CODE_OAUTH_TOKEN" = "ws-preflight-token"}
-                 ]
-               )
-    end
-
-    # bd-8lnnnt: a genuinely quota-exhausted probe must escalate ONCE across
-    # repeated dispatch attempts (not once per attempt) and must read as a
-    # throttle, not a credential problem. This drives the real classifier
-    # (`StopReason.classify/2`) and the real `PreflightHold`/dedup path
-    # through the production `Dispatch.dispatch/2` entry point, rather than
-    # a hand-built `%StopReason{}` stub.
-    test "a quota-exhausted probe escalates once, not once per attempt, and reads as a throttle",
+    test "preflight: false bypasses the guard even with start_claude and a known-expired adapter",
          %{ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "quota gate", workspace_id: ws.id})
-      epoch = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_unix()
-
-      opts = [
-        repo: "test/repo",
-        start_driver: false,
-        start_claude: true,
-        probe_command: ["sh", "-c", "echo 'Claude AI usage limit reached|#{epoch}'; exit 1"],
-        probe_env: []
-      ]
-
-      for _ <- 1..5 do
-        assert {:error,
-                {:auth_check_failed,
-                 %Arbiter.Worker.StopReason{category: :quota_exhausted, retry_after: %DateTime{}}}} =
-                 Dispatch.dispatch(task.id, opts)
-      end
-
-      assert [escalation] =
-               Message.inbox("admiral", workspace_id: ws.id)
-               |> Enum.filter(&(&1.directive_ref == task.id))
-
-      assert escalation.subject =~ "pre-flight throttled"
-      refute escalation.subject =~ "auth failed"
-    end
-
-    test "preflight: false bypasses the probe even with start_claude", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
+
+      :ok =
+        CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401",
+          remediation: nil,
+          exit_status: 1,
+          signal: nil
+        })
+
+      eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
 
       # start_claude + preflight: false + provision_worktree: false errors at the
       # claude-start step (:missing_worktree) — proving we got PAST the (disabled)
-      # preflight rather than being refused by it. The repo must be valid so the
-      # repo-resolution guard (bd-1ziw04) passes before reaching the preflight gate.
+      # guard rather than being refused by it. The repo must be valid so the
+      # repo-resolution guard (bd-1ziw04) passes before reaching the auth gate.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
                  provision_worktree: false,
-                 preflight: false,
-                 probe_command: ["sh", "-c", "echo 401; exit 1"]
+                 preflight: false
                )
     end
   end
@@ -2619,7 +2637,7 @@ defmodule Arbiter.Worker.DispatchTest do
           title: "tracked work",
           workspace_id: ws.id,
           tracker_type: "jira",
-          tracker_ref: "VR-17585",
+          tracker_ref: "AX-17585",
           skip_upstream_create: true
         })
 
@@ -3271,12 +3289,12 @@ defmodule Arbiter.Worker.DispatchTest do
           workspace_id: ws.id,
           tracker_type: :none,
           tracker_context_type: :jira,
-          tracker_context_ref: "VR-18004"
+          tracker_context_ref: "AX-18004"
         })
 
       # Simulate a pre-fetched tracker context (normally done in build_agent_session_opts).
       context = %{
-        ref: "VR-18004",
+        ref: "AX-18004",
         type: :jira,
         title: "Some Jira ticket",
         description: "## Acceptance\n- feature works\n- tests pass"
@@ -3285,7 +3303,7 @@ defmodule Arbiter.Worker.DispatchTest do
       prompt =
         Arbiter.Worker.Dispatch.prompt_for_task(task, review: true, tracker_context: context)
 
-      assert prompt =~ "Tracker context (read-only, jira:VR-18004)"
+      assert prompt =~ "Tracker context (read-only, jira:AX-18004)"
       assert prompt =~ "Some Jira ticket"
       assert prompt =~ "feature works"
       # The task has no tracker_ref, so no "Tracker ref (PR/MR to review)" line
@@ -3755,14 +3773,14 @@ defmodule Arbiter.Worker.DispatchTest do
     test "explicit repo slug resolves against a registered key differing only by _/- (bd-6rioa4)",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{
-        "leo-technologies-llc/verus-server" => repo
+        "acme-corp/apex-server" => repo
       })
 
       {:ok, task} = Ash.create(Issue, %{title: "underscore slug", workspace_id: ws.id})
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
-                 repo: "leo-technologies-llc/verus_server",
+                 repo: "acme-corp/apex_server",
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],

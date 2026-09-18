@@ -155,4 +155,151 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
   end
+
+  describe "GET /api/dependencies" do
+    test "lists every edge in the workspace, with both endpoints' status/priority", %{
+      conn: conn,
+      ws: ws,
+      a: a,
+      b: b
+    } do
+      {:ok, _} =
+        Ash.update(a, %{priority: 1}, action: :update)
+
+      {:ok, dep} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :conflicts_with})
+
+      conn = get(conn, ~p"/api/dependencies", workspace_id: ws.id)
+
+      assert %{"data" => [row]} = json_response(conn, 200)
+      assert row["id"] == dep.id
+      assert row["type"] == "conflicts_with"
+      assert row["from"]["id"] == a.id
+      assert row["from"]["status"]
+      assert row["from"]["priority"] == 1
+      assert row["to"]["id"] == b.id
+      assert row["to"]["status"]
+    end
+
+    test "filters by type", %{conn: conn, ws: ws, a: a, b: b} do
+      {:ok, _} = Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :blocks})
+
+      {:ok, kept} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :relates_to})
+
+      conn = get(conn, ~p"/api/dependencies", workspace_id: ws.id, type: "relates_to")
+
+      assert %{"data" => [row]} = json_response(conn, 200)
+      assert row["id"] == kept.id
+    end
+
+    test "requires workspace_id or issue_id", %{conn: conn} do
+      conn = get(conn, ~p"/api/dependencies")
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    test "rejects a workspace_id/issue_id pair that don't match, naming both", %{
+      conn: conn,
+      a: a
+    } do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dep-other-ws2", prefix: "dow2"})
+
+      conn = get(conn, ~p"/api/dependencies", workspace_id: other_ws.id, issue_id: a.id)
+
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    # bd-1defgu acceptance #7: reproduces the investigation that motivated this
+    # ticket — "which `conflicts_with` pairs have both sides open?" used to
+    # require opening the production SQLite file by hand. 24 seeded
+    # `conflicts_with` edges (21 closed↔closed, 3 with one side open), and one
+    # `blocks` edge that must NOT show up when filtering by type. A single
+    # `GET /api/dependencies?type=conflicts_with` has to return all 24, each
+    # carrying both sides' status, so "is there a live pair" is answerable
+    # from this one response without a second lookup.
+    test "a single GET ?type=conflicts_with returns every conflicts_with edge, both sides' status included",
+         %{conn: conn, ws: ws, a: a, b: b} do
+      {:ok, _} = Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :blocks})
+
+      closed_closed_pairs =
+        for n <- 1..21 do
+          {:ok, x} = Ash.create(Issue, %{title: "closed-x-#{n}", workspace_id: ws.id})
+          {:ok, y} = Ash.create(Issue, %{title: "closed-y-#{n}", workspace_id: ws.id})
+          {:ok, x} = Ash.update(x, %{}, action: :close)
+          {:ok, y} = Ash.update(y, %{}, action: :close)
+
+          {:ok, dep} =
+            Ash.create(Dependency, %{
+              from_issue_id: x.id,
+              to_issue_id: y.id,
+              type: :conflicts_with
+            })
+
+          dep.id
+        end
+
+      open_closed_pairs =
+        for n <- 1..3 do
+          {:ok, x} = Ash.create(Issue, %{title: "open-x-#{n}", workspace_id: ws.id})
+          {:ok, y} = Ash.create(Issue, %{title: "closed-y2-#{n}", workspace_id: ws.id})
+          {:ok, y} = Ash.update(y, %{}, action: :close)
+
+          {:ok, dep} =
+            Ash.create(Dependency, %{
+              from_issue_id: x.id,
+              to_issue_id: y.id,
+              type: :conflicts_with
+            })
+
+          dep.id
+        end
+
+      conflict_ids = closed_closed_pairs ++ open_closed_pairs
+      assert length(conflict_ids) == 24
+
+      conn = get(conn, ~p"/api/dependencies", workspace_id: ws.id, type: "conflicts_with")
+
+      %{"data" => rows} = json_response(conn, 200)
+      assert length(rows) == 24
+
+      returned_ids = Enum.map(rows, & &1["id"]) |> Enum.sort()
+      assert returned_ids == Enum.sort(conflict_ids)
+
+      assert Enum.all?(rows, fn row -> row["from"]["status"] && row["to"]["status"] end)
+
+      live_pairs =
+        Enum.count(rows, fn row ->
+          row["from"]["status"] == "open" or row["to"]["status"] == "open"
+        end)
+
+      assert live_pairs == 3
+    end
+  end
+
+  describe "GET /api/dependencies/:issue_id" do
+    test "returns the issue's edges in both directions", %{conn: conn, ws: ws, a: a, b: b} do
+      {:ok, c} = Ash.create(Issue, %{title: "c", workspace_id: ws.id})
+
+      {:ok, dep1} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :depends_on})
+
+      {:ok, dep2} =
+        Ash.create(Dependency, %{from_issue_id: c.id, to_issue_id: a.id, type: :parent_of})
+
+      # unrelated, must not appear
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: b.id, to_issue_id: c.id, type: :relates_to})
+
+      conn = get(conn, ~p"/api/dependencies/#{a.id}")
+
+      assert %{"data" => rows} = json_response(conn, 200)
+      ids = Enum.map(rows, & &1["id"]) |> Enum.sort()
+      assert ids == Enum.sort([dep1.id, dep2.id])
+    end
+
+    test "404s for an unknown issue", %{conn: conn} do
+      conn = get(conn, ~p"/api/dependencies/bd-nope")
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
 end

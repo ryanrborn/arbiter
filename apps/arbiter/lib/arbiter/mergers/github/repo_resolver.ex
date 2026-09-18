@@ -4,8 +4,8 @@ defmodule Arbiter.Mergers.Github.RepoResolver do
 
   Used by `Arbiter.Mergers.Github` when the workspace's `merge.config` does
   not pin a single `repo` — a multi-repo workspace whose repos live in
-  *different* repos (e.g. the `leotech` workspace, whose four repos are four
-  separate `leo-technologies-llc/*` repos) resolves the target repo per-repo
+  *different* repos (e.g. the `acme` workspace, whose four repos are four
+  separate `acme-corp/*` repos) resolves the target repo per-repo
   from each repo's git remote.
 
   Parses both common remote forms:

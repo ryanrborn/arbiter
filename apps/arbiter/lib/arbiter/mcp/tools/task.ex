@@ -9,6 +9,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -41,7 +42,10 @@ defmodule Arbiter.MCP.Tools.Task do
   # promotion so the rule travels with the action, not just the docs.
   @edges_before_promote "Edges before promote: Autopilot can claim this task within seconds " <>
                           "of it going Ready, so every parent_of child and depends_on edge it " <>
-                          "needs must already exist. Promote last."
+                          "needs must already exist. Promote last. If this is your bound issue " <>
+                          "in a refine session, promote it last of all — promoting it ends the " <>
+                          "session and revokes your token immediately, stranding any child not " <>
+                          "yet promoted."
 
   # ---- task_show ----------------------------------------------------------
 
@@ -70,7 +74,24 @@ defmodule Arbiter.MCP.Tools.Task do
       # bd-18vl9q: the epic cost rollup (design bd-9jj5lf §4). `nil` for a
       # non-epic issue — the field always rides along so callers don't have to
       # branch on `issue_type` to know whether to look for it.
-      {:ok, Map.put(result, :epic_rollup, Estimate.epic_cost_rollup(loaded))}
+      result = Map.put(result, :epic_rollup, Estimate.epic_cost_rollup(loaded))
+
+      # bd-1defgu: the domain-layer edge read existed (`Dependencies.list/1`)
+      # but wasn't reachable from here — full view only, same bandwidth
+      # tradeoff as every other field this branch adds.
+      result =
+        if full,
+          do: Map.put(result, :dependencies, dependency_rows(id)),
+          else: result
+
+      {:ok, result}
+    end
+  end
+
+  defp dependency_rows(issue_id) do
+    case Dependencies.list(issue_id: issue_id) do
+      {:ok, rows} -> Enum.map(rows, &Tools.serialize_dependency_edge/1)
+      {:error, _} -> []
     end
   end
 
@@ -137,7 +158,7 @@ defmodule Arbiter.MCP.Tools.Task do
   token cannot file a task outside its subtree. The parent is authorized *before*
   the task is created — a refused create leaves nothing behind. The same
   `refine_field_gate/2` that narrows `task_update` also runs here, so a refine
-  session cannot set on create (`assignee`, `tracker_ref`, `target_branch`, …)
+  session cannot set on create (`tracker_ref`, `target_branch`, …)
   what it would be refused on update.
   """
   @spec task_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -156,6 +177,7 @@ defmodule Arbiter.MCP.Tools.Task do
           issue
           |> Tools.serialize_task_summary()
           |> with_ac_warning(issue)
+          |> with_deprecation_warnings(args)
           |> attach_parent(scope, issue, parent_id)
 
         {:error, err} ->
@@ -255,6 +277,18 @@ defmodule Arbiter.MCP.Tools.Task do
   defp blank?(nil), do: true
   defp blank?(str), do: String.trim(str) == ""
 
+  # bd-1ozks5: `assignee` is still accepted for one release — the local
+  # assignee field is gone, so it's ignored and reported back as a
+  # `warnings` entry rather than rejected outright.
+  defp with_deprecation_warnings(result, args) when is_map(args) do
+    with_deprecation_warnings(result, AssigneeCompat.warnings(args))
+  end
+
+  defp with_deprecation_warnings(result, []), do: result
+
+  defp with_deprecation_warnings(result, warnings) when is_list(warnings),
+    do: Map.update(result, :warnings, warnings, &(&1 ++ warnings))
+
   # Narrow a write to the fields a `:refine` token may set (bd-3uy2hn). Rejecting
   # a disallowed field is deliberate rather than silently dropping it: a refine
   # agent that asked to close a task must be told it cannot, not told "updated"
@@ -288,15 +322,31 @@ defmodule Arbiter.MCP.Tools.Task do
   """
   @spec task_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_update(%Scope{} = scope, args) do
+    assignee_warnings = AssigneeCompat.warnings(args)
+
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, attrs} <- Tools.collect_attrs(args, task_update_spec()),
-         {:ok, attrs} <- refine_field_gate(scope, attrs),
-         :ok <- Tools.require_some(attrs, "provide at least one field to update") do
-      case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}
-        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+         {:ok, attrs} <- refine_field_gate(scope, attrs) do
+      case {map_size(attrs), assignee_warnings} do
+        {0, []} ->
+          {:error, {:invalid, "provide at least one field to update"}}
+
+        {0, warnings} ->
+          # Only a deprecated `assignee` was passed — nothing to write, but
+          # that isn't a failure: report the task back with the warning.
+          {:ok, issue |> Tools.serialize_task_summary() |> with_deprecation_warnings(warnings)}
+
+        {_, warnings} ->
+          case Ash.update(issue, attrs, action: :update) do
+            {:ok, updated} ->
+              {:ok,
+               updated |> Tools.serialize_task_summary() |> with_deprecation_warnings(warnings)}
+
+            {:error, err} ->
+              {:error, {:invalid, Tools.ash_error_message(err)}}
+          end
       end
     end
   end
@@ -514,6 +564,60 @@ defmodule Arbiter.MCP.Tools.Task do
     end
   end
 
+  # ---- dep_list -----------------------------------------------------------
+
+  @doc """
+  List dependency edges in the scope's workspace. Coordinator or worker
+  (bd-1defgu) — a worker with no `workspace` arg sees its own workspace's
+  edges, exactly like `dep_add` / `dep_remove` already scope a worker's
+  writes; naming a *different* workspace is `:unauthorized`, the same rule
+  `Tools.authorized_workspace/2` already enforces everywhere else.
+
+  With no `issue_id`, lists every edge in the resolved workspace. With
+  `issue_id`, lists that issue's edges in both directions instead (the issue
+  must resolve inside the same workspace-authorization the scope already
+  has — a cross-workspace `issue_id` is not-found, not leaked).
+
+  Routed through `Arbiter.Tasks.Dependencies.list/1` (bd-1defgu): a symmetric
+  edge (`conflicts_with`) is never doubled — it appears once, from wherever
+  you look at it.
+  """
+  @spec dep_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def dep_list(%Scope{} = scope, args) do
+    with {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()) do
+      case Tools.fetch_string(args, "issue_id") do
+        nil -> dep_list_workspace(scope, args, type)
+        issue_id -> dep_list_issue(scope, args, issue_id, type)
+      end
+    end
+  end
+
+  defp dep_list_workspace(scope, args, type) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         {:ok, rows} <- list_edges(workspace_id: ws_id, type: type) do
+      {:ok, serialize_dep_list(rows)}
+    end
+  end
+
+  defp dep_list_issue(scope, args, issue_id, type) do
+    with {:ok, _issue} <- Tools.fetch_task(scope, args, issue_id),
+         {:ok, rows} <- list_edges(issue_id: issue_id, type: type) do
+      {:ok, serialize_dep_list(rows)}
+    end
+  end
+
+  defp list_edges(opts) do
+    case Dependencies.list(opts) do
+      {:ok, rows} -> {:ok, rows}
+      {:error, reason} -> Tools.dependency_error(reason)
+    end
+  end
+
+  defp serialize_dep_list(rows) do
+    deps = Enum.map(rows, &Tools.serialize_dependency_edge/1)
+    %{dependencies: deps, count: length(deps)}
+  end
+
   # Load the child-progress rollup calcs for a task so the serializer can emit
   # `child_total` / `child_closed`. Best-effort: on any load error the task is
   # returned unchanged (the serializer then omits the progress fields).
@@ -559,7 +663,6 @@ defmodule Arbiter.MCP.Tools.Task do
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
-      {"assignee", :string},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
       {"tracker_context_ref", :string},
@@ -583,7 +686,6 @@ defmodule Arbiter.MCP.Tools.Task do
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
-      {"assignee", :string},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
       {"tracker_context_ref", :string},

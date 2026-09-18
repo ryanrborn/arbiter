@@ -10,7 +10,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   the same domain calls the CLI/MCP use:
 
     * **Edit** — the fields an operator authors: title, status (open ⇄
-      in_progress), priority, difficulty, type, assignee, target branch,
+      in_progress), priority, difficulty, type, target branch,
       description and acceptance. Deliberately NOT editable here: `notes` /
       `qa_notes` / `deployment_notes` / `pr_body` (worker-authored
       deliverables — a stray dashboard edit would clobber a run's output),
@@ -61,6 +61,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Mergers
   alias Arbiter.Messages.Message
   alias Arbiter.ReviewGate.Round
+  alias Arbiter.Sessions.Refine
   alias Arbiter.Skills.Selection
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
@@ -76,7 +77,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Worker.SessionArchive
   alias Arbiter.Workers.Run
+  alias ArbiterWeb.SessionUsage
   alias ArbiterWeb.TaskForm
   require Ash.Query
   require Logger
@@ -408,7 +411,6 @@ defmodule ArbiterWeb.TaskDetailLive do
           difficulty: difficulty,
           description: TaskForm.trimmed(params["description"]),
           acceptance: TaskForm.trimmed(params["acceptance"]),
-          assignee: TaskForm.trimmed(params["assignee"]),
           target_branch: TaskForm.trimmed(params["target_branch"]),
           repo: TaskForm.trimmed(params["repo"])
         }
@@ -473,6 +475,13 @@ defmodule ArbiterWeb.TaskDetailLive do
   # opens instead of just flashing an error, since a waiver reason is the one
   # way to actually get past that refusal. Otherwise idempotent: a
   # double-click is harmless, and the button disappears on the re-render.
+
+  # bd-1lszsc. The whole action lives in `ArbiterWeb.RefineEntry` because the
+  # board card's Refine is the same act, and "launch or reopen the one session
+  # bound to this issue" must not have two implementations.
+  def handle_event("refine", _params, socket) do
+    {:noreply, ArbiterWeb.RefineEntry.open(socket, socket.assigns.task)}
+  end
 
   def handle_event("promote_to_ready", _params, socket) do
     case socket.assigns.task do
@@ -863,6 +872,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> refresh_skills()
     |> refresh_messages()
     |> follow_messages()
+    |> refresh_refine_session()
   end
 
   defp refresh_task(socket) do
@@ -875,6 +885,36 @@ defmodule ArbiterWeb.TaskDetailLive do
     socket
     |> assign(:task, task)
     |> assign(:acceptance_items, acceptance_items(task && task.acceptance))
+  end
+
+  # bd-cvfjms: the refine session bound to this issue (if it was ever
+  # refined), plus whether its phase 9 archive exists and what it cost — the
+  # issue page's "Transcript" link + cost, so the refinement conversation
+  # stays citable once the session itself is gone. `Refine.latest_session/1`
+  # (not `live_session/1`) on purpose: by the time there's anything archived
+  # to show, the session has almost always ended.
+  defp refresh_refine_session(%{assigns: %{task: %Issue{id: id}}} = socket) when is_binary(id) do
+    session = Refine.latest_session(id)
+
+    socket
+    |> assign(:refine_session, session)
+    |> assign(:refine_session_archived?, session != nil and SessionArchive.archived?(session.id))
+    |> assign(:refine_session_usage, session && SessionUsage.for_session(session))
+  rescue
+    e ->
+      Logger.warning("Failed to resolve refine session for #{id}: #{inspect(e)}")
+
+      socket
+      |> assign(:refine_session, nil)
+      |> assign(:refine_session_archived?, false)
+      |> assign(:refine_session_usage, nil)
+  end
+
+  defp refresh_refine_session(socket) do
+    socket
+    |> assign(:refine_session, nil)
+    |> assign(:refine_session_archived?, false)
+    |> assign(:refine_session_usage, nil)
   end
 
   # bd-8j9i9p (design bd-9jj5lf §3): worker spend so far, the percentile range
@@ -1829,6 +1869,15 @@ defmodule ArbiterWeb.TaskDetailLive do
           <%!-- Operator actions. A closed issue is terminal here: reopening
                it is `arb update` territory, not a dashboard button. --%>
           <div :if={@task && @task.status != :closed} class="flex items-center gap-2">
+            <%!-- Refine (bd-1lszsc). Offered on exactly the issues
+                  `Arbiter.Sessions.Refine.eligible?/1` accepts — Backlog,
+                  not running, not closed — and it sits *before* Move to
+                  Ready because that is the order the two are meant to
+                  happen in: shape the issue, then promote it. --%>
+            <ArbiterWeb.RefineEntry.refine_button
+              :if={ArbiterWeb.RefineEntry.eligible?(@task)}
+              id="task-refine"
+            />
             <%!-- The one door out of Backlog. Gone the moment it is used —
                   there is no un-refine here, and nothing to click twice. --%>
             <ArbiterWeb.CoreComponents.Core.button
@@ -2006,6 +2055,42 @@ defmodule ArbiterWeb.TaskDetailLive do
                       {@task.acceptance_waived}
                     </p>
                   </div>
+                </div>
+              </.panel>
+
+              <%!-- bd-cvfjms: once this issue has been through a refine session
+                 (live or long since ended), a link to its archived transcript
+                 and what it cost — so the refinement conversation stays
+                 citable after the session/dock is gone. --%>
+              <.panel
+                :if={@refine_session}
+                id="panel-refine-session"
+                title="REFINEMENT SESSION"
+                class="order-7"
+              >
+                <div class="flex flex-wrap items-center gap-3 text-[12.5px] text-[var(--text-secondary)]">
+                  <span :if={@refine_session.status == :ended}>
+                    Ended:
+                    <span class="font-[family-name:var(--font-mono)]">
+                      {@refine_session.end_reason || "—"}
+                    </span>
+                  </span>
+                  <span :if={@refine_session.status != :ended}>Session in progress</span>
+                  <.link
+                    :if={@refine_session_archived?}
+                    href={~p"/sessions/#{@refine_session.id}/jsonl"}
+                    id="refine-session-transcript-link"
+                    class="link"
+                  >
+                    Transcript
+                  </.link>
+                  <span
+                    :if={@refine_session_usage}
+                    id="refine-session-cost"
+                    class="font-[family-name:var(--font-mono)]"
+                  >
+                    {ArbiterWeb.CoreComponents.Data.format_usd(@refine_session_usage.total_cost_usd)}
+                  </span>
                 </div>
               </.panel>
 
@@ -2763,9 +2848,6 @@ defmodule ArbiterWeb.TaskDetailLive do
                     </span>
                     <span :if={!@workspace} class="italic text-[var(--text-label)]">(none)</span>
                   </:item>
-                  <:item :if={present?(@task.assignee)} label="Assignee">
-                    <code class="text-xs">{@task.assignee}</code>
-                  </:item>
                   <:item :if={@task.tracker_type != :none} label="Tracker">
                     <% tracker_url = tracker_url(@workspace, @task.tracker_ref) %>
                     <a
@@ -2890,12 +2972,6 @@ defmodule ArbiterWeb.TaskDetailLive do
                   if(@task.difficulty, do: to_string(@task.difficulty), else: "")
                 )
               }
-            />
-            <.input
-              name="task[assignee]"
-              label="Assignee (optional)"
-              value={TaskForm.value(@edit_params, "assignee", @task.assignee || "")}
-              placeholder="who owns this"
             />
             <.input
               name="task[target_branch]"
@@ -3643,7 +3719,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   # Compact changeset summary for the timeline. Mirrors AuditLogLive.
   defp format_changes(changes) when is_map(changes) do
     changes
-    |> Map.take(["status", "title", "priority", "tracker_type", "assignee"])
+    |> Map.take(["status", "title", "priority", "tracker_type"])
     |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
   end
 

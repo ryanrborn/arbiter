@@ -160,6 +160,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
     |> Map.put("hasSeenAutoDefaultNotice", true)
     |> Map.put("hasSeenAutoModeEntryWarning", true)
     |> Map.put("projects", Map.put(projects, cwd, project))
+    |> put_remote_control_eligibility(opts)
   end
 
   @doc """
@@ -214,9 +215,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
     root = String.trim_trailing(checkout, "/")
 
     [
-      "Write(#{root}/**)",
-      "Edit(#{root}/**)",
-      "NotebookEdit(#{root}/**)"
+      "Edit(#{root}/**)"
     ]
   end
 
@@ -385,6 +384,56 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
       {{:ok, _}, :error} -> a
       {:error, {:ok, _}} -> b
       _ -> a
+    end
+  end
+
+  # bd-cdretj: Remote Control's own startup eligibility check
+  # (`getBridgeDisabledDiagnosis()` in the installed CLI) reads
+  # `organizationUuid` off the *cached* profile (`oauthAccount`) and a
+  # feature flag off `cachedGrowthBookFeatures` — both normally populated by
+  # a `/oauth/profile` fetch that happens once, lazily, the first time a
+  # logged-in `claude` runs against a config dir. A session's config dir is
+  # fresh every time (§9.1), so at the instant `--remote-control` is
+  # evaluated during `showSetupScreens` those keys are simply absent and the
+  # eligibility check fails — not because the account is ineligible, but
+  # because nothing ever primed the cache. `/remote-control` typed inside
+  # the running session works because its own gate is a much looser
+  # synchronous check with no `organizationUuid` requirement, and by then
+  # the profile fetch that startup kicked off in the background has landed.
+  #
+  # So this copies the *cache*, not a credential: mode A carries no
+  # `.claude.json` seed for the same reason it carries no credentials file
+  # (`seed_auth/2` — two independent refreshers rotating each other out,
+  # bd-6umoh9), and `Map.put_new` only fills gaps a fresh dir has, never
+  # overwriting a value Claude Code has since fetched and written back
+  # itself (moduledoc, "Preserving what Claude Code writes back").
+  @remote_control_eligibility_keys [
+    "oauthAccount",
+    "cachedGrowthBookFeatures",
+    "cachedGrowthBookFeaturesAt"
+  ]
+
+  defp put_remote_control_eligibility(document, opts) do
+    case Keyword.get(opts, :auth_mode, :seeded_credentials) do
+      :oauth_token ->
+        document
+
+      _ ->
+        opts
+        |> operator_eligibility_cache()
+        |> Enum.reduce(document, fn {key, value}, doc -> Map.put_new(doc, key, value) end)
+    end
+  end
+
+  defp operator_eligibility_cache(opts) do
+    case source_dir(opts) do
+      source when is_binary(source) ->
+        operator = read_json(Path.join(source, @claude_json))
+        operator = if operator == %{}, do: read_json(source <> ".json"), else: operator
+        Map.take(operator, @remote_control_eligibility_keys) |> Enum.to_list()
+
+      _ ->
+        []
     end
   end
 

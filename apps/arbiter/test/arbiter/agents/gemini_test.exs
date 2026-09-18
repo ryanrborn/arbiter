@@ -582,4 +582,261 @@ defmodule Arbiter.Agents.GeminiTest do
                ])
     end
   end
+
+  # bd-7s29yq (T6b): the agy security seam. `Gemini.Security` owns the
+  # policy -> agy vocabulary mapping and is unit-tested in
+  # `gemini/security_test.exs`; these cover the *wiring* — that the adapter
+  # actually emits it.
+  describe "agy security wiring (bd-7s29yq)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "gemini-sec-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      agy = Path.join(tmp, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, agy: agy}
+    end
+
+    test ":strict emits --sandbox and never --dangerously-skip-permissions", %{agy: agy} do
+      policy = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :strict}})
+
+      assert {:ok, argv} = Gemini.default_argv("p", security: policy)
+      assert ["sh", "-c", _exec, "sh", ^agy, "-p", "p" | rest] = argv
+      assert "--sandbox" in rest
+      refute "--dangerously-skip-permissions" in rest
+    end
+
+    test ":auto emits neither flag — the generated settings carry the posture", %{agy: agy} do
+      policy = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :auto}})
+
+      assert {:ok, argv} = Gemini.default_argv("p", security: policy)
+      assert ["sh", "-c", _exec, "sh", ^agy, "-p", "p" | rest] = argv
+      refute "--sandbox" in rest
+      refute "--dangerously-skip-permissions" in rest
+    end
+  end
+
+  describe "security_enforced?/0 (bd-7s29yq AC3)" do
+    test "is false when the isolated agy HOME is switched off — nothing is enforced then" do
+      prev = Application.get_env(:arbiter, :worker_isolate_config)
+      Application.put_env(:arbiter, :worker_isolate_config, false)
+      on_exit(fn -> Application.put_env(:arbiter, :worker_isolate_config, prev) end)
+
+      refute Gemini.security_enforced?()
+    end
+
+    test "is true only for the agy CLI with isolation on — upstream gemini has no seam" do
+      prev = Application.get_env(:arbiter, :worker_isolate_config)
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      tmp = Path.join(System.tmp_dir!(), "gemini-enf-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH")
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :worker_isolate_config, prev)
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      gemini = Path.join(tmp, "gemini")
+      File.write!(gemini, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini, 0o755)
+      System.put_env("PATH", tmp)
+      refute Gemini.security_enforced?()
+
+      agy = Path.join(tmp, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+      assert Gemini.security_enforced?()
+    end
+  end
+
+  describe "spawn_env/1 — isolated agy HOME (bd-7s29yq AC2)" do
+    test "injects HOME so the operator's ~/.gemini memory, skills and plugins cannot load" do
+      base = Path.join(System.tmp_dir!(), "gemini-home-#{System.unique_integer([:positive])}")
+      prev_enabled = Application.get_env(:arbiter, :worker_isolate_config)
+      prev_root = Application.get_env(:arbiter, :worker_agy_home_root)
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "homes"))
+
+      # home_env/1 only fires for the resolved `agy` executable — stub one onto
+      # PATH so this test doesn't depend on the host actually having agy installed.
+      bin = Path.join(base, "bin")
+      File.mkdir_p!(bin)
+      agy = Path.join(bin, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", bin <> ":" <> old_path)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :worker_isolate_config, prev_enabled)
+
+        if is_nil(prev_root),
+          do: Application.delete_env(:arbiter, :worker_agy_home_root),
+          else: Application.put_env(:arbiter, :worker_agy_home_root, prev_root)
+
+        System.put_env("PATH", old_path)
+        File.rm_rf!(base)
+      end)
+
+      env = Gemini.spawn_env(worktree: Path.join(base, "wt"))
+      assert {"HOME", home} = Enum.find(env, &match?({"HOME", _}, &1))
+      assert home != System.user_home()
+      assert File.regular?(Path.join(home, ".gemini/GEMINI.md"))
+      assert File.regular?(Path.join(home, ".gemini/antigravity-cli/settings.json"))
+    end
+
+    test "injects no HOME when isolation is off (unchanged inherited behaviour)" do
+      prev = Application.get_env(:arbiter, :worker_isolate_config)
+      Application.put_env(:arbiter, :worker_isolate_config, false)
+      on_exit(fn -> Application.put_env(:arbiter, :worker_isolate_config, prev) end)
+
+      refute Enum.any?(Gemini.spawn_env(api_key: "k"), &match?({"HOME", _}, &1))
+    end
+  end
+
+  # bd-481sz7 AC3: the preflight probe must request structured output so its
+  # usage_events row carries real token counts (previously it ran `-p ping`
+  # with no `--output-format`, so `Arbiter.Agents.Gemini.Stream` had nothing
+  # to parse and every agy preflight row landed with zero tokens).
+  describe "auth_probe_argv/1" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-probe-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    test "requests stream-json structured output for agy", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "ping" | rest] = argv
+      assert "--output-format" in rest
+
+      assert Enum.at(rest, Enum.find_index(rest, &(&1 == "--output-format")) + 1) ==
+               "stream-json"
+    end
+
+    test "requests stream-json structured output for upstream gemini", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "ping" | rest] = argv
+      assert "--output-format" in rest
+    end
+
+    test "returns {:error, ...} when neither CLI is on PATH" do
+      System.put_env("PATH", "/nonexistent-dir-for-test")
+      assert {:error, {:executable_not_found, "agy or gemini"}} = Gemini.auth_probe_argv([])
+    end
+  end
+
+  # bd-svczq4: the pre-flight probe used to be a bare `agy -p ping` — plain-text
+  # print mode with no self-timeout, tools on, rooted in the live checkout. It
+  # took 102s against a 30s harness watchdog and refused a valid dispatch.
+  # bd-481sz7 gave it `--output-format stream-json` (asserted here as a
+  # regression guard); what this ticket adds is `--print-timeout`, derived from
+  # the harness watchdog so agy yields *first* and a real exit status is always
+  # observed instead of agy's own 5-minute default.
+  describe "auth_probe_argv/1 (bd-svczq4)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-probe-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    defp stub_exec(tmp, name) do
+      path = Path.join(tmp, name)
+      File.write!(path, "#!/bin/sh\nexit 0\n")
+      File.chmod!(path, 0o755)
+      path
+    end
+
+    defp flag_value(argv, flag) do
+      case Enum.find_index(argv, &(&1 == flag)) do
+        nil -> nil
+        idx -> Enum.at(argv, idx + 1)
+      end
+    end
+
+    test "agy: asks for a structured result", %{tmp: tmp} do
+      agy = stub_exec(tmp, "agy")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert ["sh", "-c", _script, "sh", ^agy, "-p", "ping" | _rest] = argv
+      assert flag_value(argv, "--output-format") == "stream-json"
+    end
+
+    test "agy: bounds its own turn strictly inside the harness watchdog", %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv(timeout_ms: 120_000)
+      assert value = flag_value(argv, "--print-timeout")
+      assert {seconds, "s"} = Integer.parse(value)
+      assert seconds > 0
+      # Strictly inside: agy must yield and report an exit status before the
+      # harness gives up, which is the whole point of the flag.
+      assert seconds * 1000 < 120_000
+    end
+
+    test "agy: bounds itself even when the caller names no watchdog", %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert value = flag_value(argv, "--print-timeout")
+      assert {seconds, "s"} = Integer.parse(value)
+      assert seconds > 0
+      # Never agy's own 5-minute print-mode default.
+      assert seconds < 300
+    end
+
+    test "upstream gemini: structured output, but no agy-only --print-timeout", %{tmp: tmp} do
+      gemini = stub_exec(tmp, "gemini")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv(timeout_ms: 120_000)
+      assert ["sh", "-c", _script, "sh", ^gemini, "-p", "ping" | _rest] = argv
+      assert flag_value(argv, "--output-format") == "stream-json"
+      refute "--print-timeout" in argv
+    end
+  end
 end

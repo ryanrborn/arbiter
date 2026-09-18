@@ -1397,13 +1397,13 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert first_task.repo == nil
 
       # Second claim with --repo: should update the existing task
-      assert {:ok, :existing, second_task} = Claim.claim(ws, "43", repo: "server/verus")
+      assert {:ok, :existing, second_task} = Claim.claim(ws, "43", repo: "server/apex")
       assert second_task.id == first_task.id
-      assert second_task.repo == "server/verus"
+      assert second_task.repo == "server/apex"
 
       # Verify the repo persisted by fetching fresh
       {:ok, fresh_task} = Ash.get(Issue, first_task.id)
-      assert fresh_task.repo == "server/verus"
+      assert fresh_task.repo == "server/apex"
     end
 
     test "Jira: Highest priority maps to P0 — priority 0 is highest", %{jira_ws: ws} do

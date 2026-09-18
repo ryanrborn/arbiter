@@ -182,13 +182,35 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert fields.tokens_in == 17529
       assert fields.tokens_out == 118
       assert fields.cache_read_tokens == 0
+      assert fields.thinking_tokens == 110
       assert fields.duration_ms == 1103
       refute Map.has_key?(fields, :model)
       assert fields.is_error == false
       assert fields.result_status == "SUCCESS"
       assert fields.raw == event
       refute Map.has_key?(fields, :cost_usd)
-      assert fields.cost_note =~ "agy does not report which model it ran"
+      assert fields.cost_note =~ "Antigravity"
+      assert fields.cost_note =~ "no cost"
+
+      # bd-2fzwlc's live probe: thinking_tokens is a subset of output_tokens,
+      # not an addition on top of it (input + output == total, with no third
+      # bucket) — so tokens_out must NOT be inflated by adding thinking on
+      # top, or the ledger would double-count every thinking token.
+      assert fields.tokens_in + fields.tokens_out == 17647
+      assert fields.thinking_tokens <= fields.tokens_out
+    end
+
+    test "thinking_tokens is nil when agy's usage carries none" do
+      event = %{
+        "event" => "result",
+        "result" => %{
+          "status" => "SUCCESS",
+          "usage" => %{"input_tokens" => 10, "output_tokens" => 5}
+        }
+      }
+
+      fields = Stream.usage_fields(event, nil)
+      refute Map.has_key?(fields, :thinking_tokens)
     end
 
     test "result with no fallback model still records why cost is nil" do
@@ -202,7 +224,7 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
 
       fields = Stream.usage_fields(event, nil)
       refute Map.has_key?(fields, :cost_usd)
-      assert fields.cost_note =~ "agy does not report which model it ran"
+      assert fields.cost_note =~ "no cost"
     end
 
     test "non-SUCCESS status flags is_error" do
@@ -270,6 +292,117 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert [{line, false}] = Stream.format_event(%{"event" => "brand_new_thing"})
       assert line =~ "unrecognized"
       assert line =~ "brand_new_thing"
+    end
+  end
+
+  # Verbatim from a live `agy v1.2.4 --output-format stream-json` probe
+  # (bd-4gpx4a, reproduced in bd-7y3mm9) — including the `CommandLine`
+  # parameter casing agy's `run_command` tool actually uses, which is why
+  # `summarize_params/1`/`shell_activity/1` need a rename step before they
+  # can read it.
+  describe "format_event/1 — agy tool telemetry (bd-7y3mm9)" do
+    @active_tool_event %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 2,
+        "state" => "ACTIVE",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "echo hello-from-agy"}
+        }
+      }
+    }
+
+    @done_tool_event %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 2,
+        "state" => "DONE",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "duration_seconds" => 0.027,
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "echo hello-from-agy"},
+          "output" => "hello-from-agy\r\n"
+        }
+      }
+    }
+
+    test "ACTIVE tool step renders name + summarized params, never arms" do
+      assert [{line, false}] = Stream.format_event(@active_tool_event)
+      assert line == "⏵ run_command(echo hello-from-agy)"
+    end
+
+    test "DONE tool step renders a result label + truncated output, never arms" do
+      lines = Stream.format_event(@done_tool_event)
+      assert {"⏴ tool result", false} in lines
+      # agy's output carries the child shell's own \r\n; `lines/1` only
+      # splits on \n (matching the existing Claude/gemini tool_result path),
+      # so the trailing \r rides along on the line — not stripped here.
+      assert {"hello-from-agy\r", false} in lines
+      assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
+    end
+
+    @error_tool_event %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 3,
+        "state" => "ERROR",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "arb inbox bd-ci0y74"},
+          "error" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+        }
+      }
+    }
+
+    test "ERROR tool step renders a denial line, not a schema-drift warning, and never arms" do
+      lines = Stream.format_event(@error_tool_event)
+
+      refute Enum.any?(lines, fn {line, _} -> line =~ "unrecognized" end)
+      refute Enum.any?(lines, fn {line, _} -> line =~ "schema drift" end)
+      assert {"⏴ run_command denied/failed", false} in lines
+      assert Enum.any?(lines, fn {line, _} -> line =~ "permission check failed" end)
+      assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
+    end
+
+    test "ERROR tool step activity names the denied command" do
+      assert Stream.activity_for_event(@error_tool_event) == "run_command denied"
+    end
+
+    test "agy_denied_command_token extracts the base command token" do
+      params = %{"CommandLine" => "arb inbox bd-ci0y74"}
+      assert Stream.agy_denied_command_token("run_command", params) == "arb"
+    end
+
+    test "agy_denied_command_token falls back to the tool name for a non-command tool" do
+      assert Stream.agy_denied_command_token("write_file", %{"path" => "/etc/passwd"}) ==
+               "write_file"
+    end
+
+    test "a genuinely unrecognized tool step state (e.g. CANCELLED) still surfaces schema drift" do
+      cancelled = put_in(@active_tool_event, ["step_update", "state"], "CANCELLED")
+      assert [{line, false}] = Stream.format_event(cancelled)
+      assert line =~ "unrecognized tool step state CANCELLED"
+      assert line =~ "schema drift"
+    end
+
+    test "activity_for_event routes run_command through shell_activity, mix test -> running tests" do
+      assert Stream.activity_for_event(@active_tool_event) == "running: echo hello-from-agy"
+
+      mix_test_event =
+        put_in(
+          @active_tool_event,
+          ["step_update", "tool_info", "parameters", "CommandLine"],
+          "mix test"
+        )
+
+      assert Stream.activity_for_event(mix_test_event) == "running tests"
     end
   end
 

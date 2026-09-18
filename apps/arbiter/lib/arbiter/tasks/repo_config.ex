@@ -5,8 +5,8 @@ defmodule Arbiter.Tasks.RepoConfig do
   A `repo_paths` value may be either a bare string path or a map that carries
   an optional `target_branch` alongside the path:
 
-      "server" => "/path/to/leotech/server"
-      "server" => %{"path" => "/path/to/leotech/server", "target_branch" => "integration/dolphin"}
+      "server" => "/path/to/acme/server"
+      "server" => %{"path" => "/path/to/acme/server", "target_branch" => "integration/dolphin"}
 
   Callers should use these functions instead of pattern-matching directly so
   both forms are handled consistently.
@@ -24,8 +24,8 @@ defmodule Arbiter.Tasks.RepoConfig do
   @doc """
   Normalizes a repo key/slug for loose comparison: lowercased with every `_`
   turned into `-`. A GitHub org may use underscores in an actual repo name
-  (`verus_server`) while a `repo_paths` entry was registered with the more
-  common hyphenated convention (`verus-server`, or vice versa) — this lets
+  (`apex_server`) while a `repo_paths` entry was registered with the more
+  common hyphenated convention (`apex-server`, or vice versa) — this lets
   callers match the two without requiring the registered key to be an exact
   byte-for-byte match of the forge slug.
   """
@@ -39,7 +39,7 @@ defmodule Arbiter.Tasks.RepoConfig do
 
     1. Exact key match.
     2. Normalized match (see `normalize_slug/1`) so a differently-separated
-       key (`verus_server` vs `verus-server`) still resolves.
+       key (`apex_server` vs `apex-server`) still resolves.
     3. If `repo` is a forge-qualified slug (`<org>/<repo>`), the same two
        passes against just its trailing segment — `repo_paths` is keyed by
        bare rig name, but callers like PRPatrol only have the slug on hand

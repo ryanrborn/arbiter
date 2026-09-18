@@ -20,14 +20,14 @@ defmodule Arbiter.Worker.ReviewScopeTest do
 
   describe "glob_match?/2" do
     test "matches ** across directory segments" do
-      assert ReviewScope.glob_match?("**/sigv4/**", "lib/verus/sigv4/signer.ex")
-      assert ReviewScope.glob_match?("**/*auth*", "lib/verus_auth_server/session.ex")
+      assert ReviewScope.glob_match?("**/sigv4/**", "lib/apex/sigv4/signer.ex")
+      assert ReviewScope.glob_match?("**/*auth*", "lib/apex_auth_server/session.ex")
       assert ReviewScope.glob_match?("kickstart*.json", "kickstart.prod.json")
       assert ReviewScope.glob_match?("**/tasks/*.ex", "lib/arbiter/tasks/issue.ex")
     end
 
     test "does not match unrelated paths" do
-      refute ReviewScope.glob_match?("**/sigv4/**", "lib/verus/http/client.ex")
+      refute ReviewScope.glob_match?("**/sigv4/**", "lib/apex/http/client.ex")
       refute ReviewScope.glob_match?("kickstart*.json", "config/other.json")
     end
   end
@@ -40,7 +40,7 @@ defmodule Arbiter.Worker.ReviewScopeTest do
 
     test "escalates to :repo when a changed file matches a sensitive glob" do
       config = %{"review_scope" => %{"sensitive_globs" => ["**/sigv4/**"]}}
-      assert ReviewScope.resolve(config, nil, ["lib/verus/sigv4/signer.ex"]) == :repo
+      assert ReviewScope.resolve(config, nil, ["lib/apex/sigv4/signer.ex"]) == :repo
     end
 
     test "falls back to the configured default when nothing matches" do

@@ -313,12 +313,12 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
         Ash.create(Issue, %{title: "in-tonic", workspace_id: ws.id, repo: "org/tonic"})
 
       {:ok, _other} =
-        Ash.create(Issue, %{title: "in-verus", workspace_id: ws.id, repo: "org/verus"})
+        Ash.create(Issue, %{title: "in-apex", workspace_id: ws.id, repo: "org/apex"})
 
       {:ok, _view, html} = live(conn, ~p"/tasks?#{%{repo: "org/tonic"}}")
 
       assert html =~ task.id
-      refute html =~ "in-verus"
+      refute html =~ "in-apex"
     end
 
     test "parent-epic filter narrows to an epic's children", %{conn: conn, ws: ws} do

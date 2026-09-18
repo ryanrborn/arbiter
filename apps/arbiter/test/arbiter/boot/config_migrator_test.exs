@@ -30,7 +30,7 @@ defmodule Arbiter.Boot.ConfigMigratorTest do
       ws =
         create_ws!("legacy", %{
           "rig_paths" => %{
-            "verus-specs" => %{"path" => "/srv/verus-specs", "target_branch" => "develop"},
+            "apex-specs" => %{"path" => "/srv/apex-specs", "target_branch" => "develop"},
             "tonic" => "/srv/tonic"
           }
         })
@@ -38,12 +38,14 @@ defmodule Arbiter.Boot.ConfigMigratorTest do
       assert [result] = ConfigMigrator.migrate_rig_paths()
       assert result.workspace == "legacy"
       assert result.status == :migrated
-      assert result.repos == ["tonic", "verus-specs"]
+      # `:repos` is documented as the SORTED repo list (`Enum.sort` in
+      # `ConfigMigrator.plan/1`), so the order is alphabetical, not the map's.
+      assert result.repos == ["apex-specs", "tonic"]
 
       config = reload!(ws).config
 
       assert config["repo_paths"] == %{
-               "verus-specs" => %{"path" => "/srv/verus-specs", "target_branch" => "develop"},
+               "apex-specs" => %{"path" => "/srv/apex-specs", "target_branch" => "develop"},
                "tonic" => "/srv/tonic"
              }
 
@@ -101,7 +103,7 @@ defmodule Arbiter.Boot.ConfigMigratorTest do
       ws =
         create_ws!("malformed", %{
           "rig_paths" => %{"tonic" => "/srv/tonic"},
-          "repo_paths" => "/srv/verus-specs"
+          "repo_paths" => "/srv/apex-specs"
         })
 
       log =

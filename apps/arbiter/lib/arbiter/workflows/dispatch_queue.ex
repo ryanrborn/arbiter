@@ -53,19 +53,25 @@ defmodule Arbiter.Workflows.DispatchQueue do
       the held intent is dropped with exactly one coordinator page instead of
       re-draining forever. See `requeue_or_drop/4`.
 
-      The one exemption is a failure that carries a `retry_not_before` —
-      currently the quota-exhausted pre-flight refusal below. That shape
-      already has its own wall-clock backoff, so it bypasses the breaker
-      entirely and requeues unchanged: a long quota wait can never be
-      mistaken for a runaway.
+      The one exemption is a failure that carries a `retry_not_before` — the
+      quota-exhausted shape below, historical as of bd-2jgs2h (see that
+      section). That shape already has its own wall-clock backoff, so it
+      bypasses the breaker entirely and requeues unchanged: a long quota wait
+      can never be mistaken for a runaway.
 
   ## A quota-exhausted pre-flight failure is held, not redrained every cycle (bd-8lnnnt)
 
-  A gate `:allow` only means the *quota snapshot* has headroom — it says
-  nothing about whether the CLI's own cheap auth probe (`Dispatch.run_preflight/2`)
-  will actually succeed right now, since that probe can fail with a classified
-  `:quota_exhausted` `StopReason` (the account's 5h window) even when the last
-  captured snapshot looked fine. Without a hold, a held intent whose dispatch
+  Historical: this held a `{:auth_check_failed, %StopReason{category:
+  :quota_exhausted}}` shape that `Dispatch.dispatch/2`'s per-dispatch auth
+  probe (`Dispatch.run_preflight/2`) could produce even when the last
+  captured quota snapshot looked fine. bd-2jgs2h retired that probe — see
+  `Arbiter.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md` for the
+  current posture. `dispatch/2`'s own auth guard now only ever produces
+  `:auth_expired`, so this shape is currently unreachable from a real
+  dispatch through this queue; `Arbiter.Worker.PreflightHold` (which this hold
+  delegates policy to) still matches on it, and is kept in case a future
+  producer of a classified `:quota_exhausted` refusal reappears here. Without
+  a hold, a held intent whose dispatch
   fails this way gets `{:requeue, item}`'d (below) and re-attempted on the very
   next drain trigger — and `CloudProbe` broadcasts `quota_updated`
   every 5 minutes for as long as anything is held, so the doomed probe reran on

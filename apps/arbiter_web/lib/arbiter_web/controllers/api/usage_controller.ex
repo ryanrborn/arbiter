@@ -113,9 +113,14 @@ defmodule ArbiterWeb.Api.UsageController do
     %{
       group: render_group(g),
       rows: r.rows,
-      total_cost_usd: round_money(r.total_cost_usd),
+      # nil (not 0.0) when no row in the group ever priced a cost — see
+      # `Arbiter.Usage.summarize/1`'s `cost_known` (bd-481sz7). A $0.00 here
+      # would misreport an agy/Antigravity subscription (no dollar figure,
+      # ever) as a session that happened to cost nothing.
+      total_cost_usd: if(r.cost_known, do: round_money(r.total_cost_usd)),
       tokens_in: r.tokens_in,
       tokens_out: r.tokens_out,
+      thinking_tokens: r.thinking_tokens,
       cache_creation_tokens: r.cache_creation_tokens,
       cache_read_tokens: r.cache_read_tokens,
       duration_ms: r.duration_ms
@@ -169,6 +174,7 @@ defmodule ArbiterWeb.Api.UsageController do
       provider: ev.provider,
       tokens_in: ev.tokens_in,
       tokens_out: ev.tokens_out,
+      thinking_tokens: ev.thinking_tokens,
       cache_creation_tokens: ev.cache_creation_tokens,
       cache_read_tokens: ev.cache_read_tokens,
       cost_usd: ev.cost_usd,

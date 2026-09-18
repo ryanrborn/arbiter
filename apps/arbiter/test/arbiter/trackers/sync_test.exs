@@ -1,15 +1,15 @@
 defmodule Arbiter.Trackers.SyncTest do
   @moduledoc """
   Tests for the loud, escalation-raising tracker lifecycle orchestration
-  (`Arbiter.Trackers.Sync`) — the layer that drives the real VR workflow:
+  (`Arbiter.Trackers.Sync`) — the layer that drives the real AX workflow:
 
     * PR-open -> In Code Review + a PR-link comment + a remote link.
     * ReviewGate-approved-but-unmerged is a no-op by default (bd-al6v70):
-      LeoTech's "Pending Merge" means intentionally held from merging, not
+      Acme's "Pending Merge" means intentionally held from merging, not
       "review passed" — arbiter must not auto-transition into it. A
       workspace may still opt in via an explicit status_map override.
     * A genuine sync failure surfaces loudly as an escalation (the
-      VR-17911 silent-failure regression guard).
+      AX-17911 silent-failure regression guard).
 
   Jira HTTP is stubbed via `Req.Test` (`:jira_http_stub` is true in test env).
   """
@@ -20,7 +20,7 @@ defmodule Arbiter.Trackers.SyncTest do
   alias Arbiter.Messages.Message
   alias Arbiter.Trackers.Sync
 
-  @ref "VR-17585"
+  @ref "AX-17585"
   @env "GTE_TRACKER_SYNC_JIRA_TOKEN"
 
   setup do
@@ -38,8 +38,8 @@ defmodule Arbiter.Trackers.SyncTest do
           "tracker" => %{
             "type" => "jira",
             "config" => %{
-              "host" => "leotechnologies.atlassian.net",
-              "project_key" => "VR",
+              "host" => "acme.atlassian.net",
+              "project_key" => "AX",
               "credentials_ref" => "env:#{@env}",
               "email" => "tester@example.com",
               "status_map" => status_map
@@ -126,13 +126,13 @@ defmodule Arbiter.Trackers.SyncTest do
         end
       end)
 
-      url = "https://github.com/leo/voice-id-core/pull/3606"
+      url = "https://github.com/acme/voice-id-core/pull/3606"
 
       assert :ok =
                Sync.lifecycle(issue, :pr_opened, pr_url: url, pr_title: "PR #3606 (#{issue.id})")
 
       # bd-4isprn: the QA/Deployment notes fields are pushed BEFORE the
-      # transition is attempted — LeoTech's Story workflow gates "Pull
+      # transition is attempted — Acme's Story workflow gates "Pull
       # request created" on them via a workflow validator invisible to the
       # transitions-metadata detection, so they're forced regardless.
       assert_receive {:update_fields,
@@ -193,7 +193,7 @@ defmodule Arbiter.Trackers.SyncTest do
         end
       end)
 
-      url = "https://github.com/leo/voice-id-core/pull/3606"
+      url = "https://github.com/acme/voice-id-core/pull/3606"
 
       assert :ok =
                Sync.lifecycle(issue, :pr_opened, pr_url: url, pr_title: "PR #3606 (#{issue.id})")
@@ -207,7 +207,7 @@ defmodule Arbiter.Trackers.SyncTest do
   end
 
   describe "lifecycle/3 :approved_unmerged" do
-    test "is a silent no-op by default (bd-al6v70): LeoTech's Pending Merge is a human-driven hold, not a review-passed state" do
+    test "is a silent no-op by default (bd-al6v70): Acme's Pending Merge is a human-driven hold, not a review-passed state" do
       ws = jira_workspace(%{})
       issue = jira_issue(ws)
 
@@ -294,7 +294,7 @@ defmodule Arbiter.Trackers.SyncTest do
   describe "loud failure -> escalation" do
     test "an unreachable mapped status raises an escalation instead of failing silently" do
       # in_progress -> "Nowhere" is unreachable: no direct transition and no
-      # graph path. This is exactly the VR-17911 silent-failure shape.
+      # graph path. This is exactly the AX-17911 silent-failure shape.
       ws = jira_workspace(%{"in_progress" => "Nowhere"})
       issue = jira_issue(ws)
 
@@ -395,7 +395,7 @@ defmodule Arbiter.Trackers.SyncTest do
   end
 
   describe "gated transition: push produced fields before transitioning" do
-    # The VR-17958 incident: the pr_opened -> "In Code Review" transition is
+    # The AX-17958 incident: the pr_opened -> "In Code Review" transition is
     # GATED on QA Testing Notes + Deployment Notes. The worker had already
     # produced both on the bead, but arbiter escalated instead of pushing them.
     # The gate is discovered from Jira (`expand=transitions.fields`), so no
@@ -793,7 +793,7 @@ defmodule Arbiter.Trackers.SyncTest do
 
   # ---- Regression: fix version gating (bd-1924hi) ---------------------------
   #
-  # LeoTech's Jira VR workflow requires a fix version before certain transitions.
+  # Acme's Jira AX workflow requires a fix version before certain transitions.
   # Two sub-cases:
   #   A. Jira reports fixVersions as a required field via expand=transitions.fields
   #      → the gating machinery pre-resolves from workspace `fix_version_name` and
@@ -812,8 +812,8 @@ defmodule Arbiter.Trackers.SyncTest do
           "tracker" => %{
             "type" => "jira",
             "config" => %{
-              "host" => "leotechnologies.atlassian.net",
-              "project_key" => "VR",
+              "host" => "acme.atlassian.net",
+              "project_key" => "AX",
               "credentials_ref" => "env:#{@env}",
               "email" => "tester@example.com",
               "status_map" => status_map,

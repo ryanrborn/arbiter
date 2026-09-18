@@ -41,7 +41,7 @@ defmodule Arbiter.Usage.Event do
   |---|---|---|
   | `:task` | set | `Arbiter.Worker` (work / review / impl), `Arbiter.Reviews.ExternalReview` |
   | `:probe` | nil | historical: `Arbiter.Quota.RefreshProbe` — one `claude --print` per workspace to refresh the quota snapshot, deleted in bd-atyrrq once the quota poll made it unnecessary |
-  | `:preflight` | the task being dispatched, when there is one | `Arbiter.Agents.Preflight` — the per-dispatch / per-resume auth check, and the `CredentialWatchdog`'s task-less probe |
+  | `:preflight` | nil as of bd-2jgs2h (2026-09-18) | `Arbiter.Agents.Preflight` via the `CredentialWatchdog`'s task-less periodic probe — the sole live producer. Task-attributed rows predating bd-2jgs2h are historical: a per-dispatch / per-resume auth check used to write them before it was retired (see `Arbiter.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`) |
   | `:coordinator_session` | nil | a browser-hosted coordinator session (bd-cyxzvq), attributed by `session_id` |
   | `:terminal_session` | nil | an interactive terminal session, likewise by `session_id` |
   | `:maintenance` | nil | Arbiter's own internal passes (the Loop analysis pass; formerly the synthetic `loop-analyze` task id) |
@@ -101,6 +101,7 @@ defmodule Arbiter.Usage.Event do
         :provider,
         :tokens_in,
         :tokens_out,
+        :thinking_tokens,
         :cache_creation_tokens,
         :cache_read_tokens,
         :cost_usd,
@@ -176,6 +177,17 @@ defmodule Arbiter.Usage.Event do
 
     attribute :tokens_out, :integer do
       public? true
+    end
+
+    attribute :thinking_tokens, :integer do
+      public? true
+
+      description "agy/Antigravity's thinking-token count (bd-481sz7). Confirmed live: " <>
+                    "input_tokens + output_tokens == total_tokens, with no separate " <>
+                    "third bucket — thinking tokens are a subset already counted inside " <>
+                    "tokens_out, not additional spend. Kept here for visibility only; " <>
+                    "never add this to tokens_out. Nil for every non-agy provider and " <>
+                    "for agy rows predating this column."
     end
 
     attribute :cache_creation_tokens, :integer do

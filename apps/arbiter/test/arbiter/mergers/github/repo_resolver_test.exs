@@ -5,8 +5,8 @@ defmodule Arbiter.Mergers.Github.RepoResolverTest do
 
   describe "parse/1" do
     test "parses an SSH remote with .git suffix" do
-      assert {:ok, {"leo-technologies-llc", "verus_server"}} =
-               RepoResolver.parse("git@github.com:leo-technologies-llc/verus_server.git")
+      assert {:ok, {"acme-corp", "apex_server"}} =
+               RepoResolver.parse("git@github.com:acme-corp/apex_server.git")
     end
 
     test "parses an SSH remote without .git suffix" do
@@ -15,8 +15,8 @@ defmodule Arbiter.Mergers.Github.RepoResolverTest do
     end
 
     test "parses an HTTPS remote with .git suffix" do
-      assert {:ok, {"leo-technologies-llc", "verus-client"}} =
-               RepoResolver.parse("https://github.com/leo-technologies-llc/verus-client.git")
+      assert {:ok, {"acme-corp", "apex-client"}} =
+               RepoResolver.parse("https://github.com/acme-corp/apex-client.git")
     end
 
     test "parses an HTTPS remote without .git suffix" do
@@ -30,11 +30,11 @@ defmodule Arbiter.Mergers.Github.RepoResolverTest do
     end
 
     test "tolerates Enterprise GitHub hosts" do
-      assert {:ok, {"leo", "verus_server"}} =
-               RepoResolver.parse("git@github.example.com:leo/verus_server.git")
+      assert {:ok, {"acme", "apex_server"}} =
+               RepoResolver.parse("git@github.example.com:acme/apex_server.git")
 
-      assert {:ok, {"leo", "verus_server"}} =
-               RepoResolver.parse("https://github.example.com/leo/verus_server.git")
+      assert {:ok, {"acme", "apex_server"}} =
+               RepoResolver.parse("https://github.example.com/acme/apex_server.git")
     end
 
     test "parses a GitLab origin (host is not constrained to github.com)" do
@@ -79,10 +79,10 @@ defmodule Arbiter.Mergers.Github.RepoResolverTest do
           "remote",
           "add",
           "origin",
-          "git@github.com:leo-technologies-llc/verus_server.git"
+          "git@github.com:acme-corp/apex_server.git"
         ])
 
-      assert {:ok, {"leo-technologies-llc", "verus_server"}} = RepoResolver.from_remote(path)
+      assert {:ok, {"acme-corp", "apex_server"}} = RepoResolver.from_remote(path)
     end
 
     test "returns a config_missing error when origin is missing", %{path: path} do

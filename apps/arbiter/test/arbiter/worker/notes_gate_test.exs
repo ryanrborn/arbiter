@@ -90,6 +90,41 @@ defmodule Arbiter.Worker.NotesGateTest do
     :ok
   end
 
+  # Drive a REAL gemini/agy session that echoes a captured-shape `step_update`
+  # ERROR event (bd-25ivqe: a `:strict` policy auto-denying a `run_command`
+  # call — here, the worker's own `arb inbox` bootstrap call) and then exits
+  # cleanly without ever printing `arb done`, exactly as it would if every
+  # subsequent retry kept getting denied too.
+  defp exit_agy_denied_without_done(pid, tag) do
+    cwd = tmp_dir!(tag)
+
+    error_event =
+      Jason.encode!(%{
+        "event" => "step_update",
+        "step_update" => %{
+          "step_index" => 1,
+          "state" => "ERROR",
+          "step_type" => "tool",
+          "tool_name" => "run_command",
+          "tool_info" => %{
+            "name" => "run_command",
+            "parameters" => %{"CommandLine" => "arb inbox bd-ci0y74"},
+            "error" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+          }
+        }
+      })
+
+    {:ok, _port} =
+      Arbiter.Worker.ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        provider: "gemini",
+        command: ["sh", "-c", "echo '#{error_event}'; exit 0"]
+      )
+
+    :ok
+  end
+
   defp start_worker(task, extra_meta) do
     meta =
       Map.merge(
@@ -232,6 +267,29 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       assert escalation
       assert escalation.subject =~ "Notes gate"
+    end
+
+    test "a strict-denied required command reports a concrete failure reason (bd-25ivqe AC4)",
+         %{ws: ws} do
+      task = new_task(ws)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      :ok = exit_agy_denied_without_done(pid, "ng-strict-denied")
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      # Not the generic catch-all — a concrete, actionable reason naming the
+      # denied command.
+      assert snap.meta.failure_reason == "strict policy denied required command `arb`"
+      assert snap.meta.denied_command == "arb"
+
+      escalation =
+        Message.inbox("admiral", workspace_id: ws.id)
+        |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+
+      assert escalation
+      assert escalation.body =~ "strict-policy bootstrap failure"
     end
   end
 end

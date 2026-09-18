@@ -178,4 +178,159 @@ defmodule Arbiter.Worker.RunStepsTest do
 
     assert steps_for(task_id) == []
   end
+
+  # agy's tool step (bd-7y3mm9): fixture copied verbatim from a live `agy
+  # v1.2.4 --output-format stream-json` probe, including the `CommandLine`
+  # parameter casing.
+  defp agy_tool_done_event(step_index, opts \\ []) do
+    %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => step_index,
+        "state" => "DONE",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "duration_seconds" => Keyword.get(opts, :duration_seconds, 0.027),
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => Keyword.get(opts, :command, "echo hello-from-agy")},
+          "output" => Keyword.get(opts, :output, "hello-from-agy\r\n")
+        }
+      }
+    }
+  end
+
+  test "an agy tool step's DONE event writes exactly one row" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    run_id = Ash.UUID.generate()
+
+    _session =
+      new_session(task_id, run_id: run_id, provider: "gemini")
+      |> feed([agy_tool_done_event(2)])
+
+    assert [step] = steps_for(task_id)
+    assert step.run_id == run_id
+    assert step.tool_use_id == "2"
+    assert step.name == "run_command"
+    assert step.is_error == false
+    assert step.duration_ms == 27
+    assert step.input_summary == "echo hello-from-agy"
+    assert is_binary(step.input_digest)
+    assert step.output_summary =~ "hello-from-agy"
+    assert step.source == "live"
+  end
+
+  test "an agy ACTIVE tool step (no DONE yet) writes no row" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+    active_event = %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 2,
+        "state" => "ACTIVE",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "echo hello-from-agy"}
+        }
+      }
+    }
+
+    _session = new_session(task_id, provider: "gemini") |> feed([active_event])
+
+    assert steps_for(task_id) == []
+  end
+
+  defp agy_tool_error_event(step_index, opts \\ []) do
+    %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => step_index,
+        "state" => "ERROR",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "duration_seconds" => Keyword.get(opts, :duration_seconds, 0.01),
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{
+            "CommandLine" => Keyword.get(opts, :command, "arb inbox bd-ci0y74")
+          },
+          "error" =>
+            Keyword.get(opts, :error, "permission check failed for unsandboxed \"arb inbox\"")
+        }
+      }
+    }
+  end
+
+  test "an agy tool step's ERROR event writes exactly one row with is_error true (bd-25ivqe)" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    run_id = Ash.UUID.generate()
+
+    _session =
+      new_session(task_id, run_id: run_id, provider: "gemini")
+      |> feed([agy_tool_error_event(3)])
+
+    assert [step] = steps_for(task_id)
+    assert step.run_id == run_id
+    assert step.tool_use_id == "3"
+    assert step.name == "run_command"
+    assert step.is_error == true
+    assert step.input_summary == "arb inbox bd-ci0y74"
+    assert step.output_summary =~ "permission check failed"
+    assert step.source == "live"
+  end
+
+  test "an agy ERROR tool step stashes the denied command's base token on the session" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+    session =
+      new_session(task_id, provider: "gemini")
+      |> feed([agy_tool_error_event(3, command: "arb inbox bd-ci0y74")])
+
+    assert session.denied_command == "arb"
+  end
+
+  test "an agy ERROR tool step that is NOT a permission denial does not stash denied_command (bd-25ivqe finding 2)" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+    session =
+      new_session(task_id, provider: "gemini")
+      |> feed([
+        agy_tool_error_event(3,
+          command: "rm -rf ./tmp",
+          error: "no such file or directory"
+        )
+      ])
+
+    refute Map.has_key?(session, :denied_command)
+  end
+
+  test "secret-marked env values are redacted out of ERROR tool input/output summaries" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    secret = "super-secret-token-value"
+
+    _session =
+      new_session(task_id, provider: "gemini", redact_values: [secret])
+      |> feed([agy_tool_error_event(3, command: "echo #{secret}", error: secret)])
+
+    assert [step] = steps_for(task_id)
+    refute step.input_summary =~ secret
+    refute step.output_summary =~ secret
+    assert step.output_summary =~ "[REDACTED]"
+  end
+
+  test "secret-marked env values are redacted out of agy tool input/output summaries" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    secret = "super-secret-token-value"
+
+    _session =
+      new_session(task_id, provider: "gemini", redact_values: [secret])
+      |> feed([agy_tool_done_event(2, command: "echo #{secret}", output: secret)])
+
+    assert [step] = steps_for(task_id)
+    refute step.input_summary =~ secret
+    refute step.output_summary =~ secret
+    assert step.output_summary =~ "[REDACTED]"
+  end
 end

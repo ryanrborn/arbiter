@@ -18,11 +18,40 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     * **Early mark** — `Arbiter.Worker` calls `mark_expired/2` when a worker
       dies with `:auth_expired`, so the Watchdog records the failure immediately
       rather than waiting for the next periodic probe.
+    * **Usage-poll mark** — `Arbiter.Quota.CloudProbe` also calls `mark_expired/3`
+      for Claude after N consecutive `{:http_error, 401}` responses from the
+      `/api/oauth/usage` poll (bd-1pmf9h, default N=2). This is a second,
+      independent expiry signal alongside the periodic CLI probe above — the
+      original incident this closes went undetected for ~15h because the CLI
+      probe never saw trouble until the credentials file was removed outright,
+      while the usage poll had been 401ing (and, in between, hitting the
+      endpoint's own tight rate-limit bucket) the whole time.
 
   A successful probe on a previously-expired adapter clears the expired flag
   and schedules the next poll at the normal interval. While an adapter is
   known-expired the Watchdog polls at the shorter `:recovery_interval_ms` so it
   detects credential restoration promptly.
+
+  ## This is the only live probe left (bd-2jgs2h)
+
+  `Arbiter.Worker.Dispatch` used to run its own live CLI probe on every
+  dispatch and resume (`Arbiter.Worker.Dispatch.run_preflight/2`, via
+  `Arbiter.Agents.Preflight.check/2`) — ~760 billed probes/day fleet-wide
+  against 10 auth failures in 90 days, half of them mid-run and thus
+  unreachable by any pre-flight check anyway. That probe was retired
+  2026-09-18; `Dispatch`'s guard is now a free call to `expired?/1` on this
+  module's held state, never a live CLI call. See `docs/quota-and-auth.md`
+  for the full evidence and posture.
+
+  That makes this module's own periodic probe (below) the *only* live probe
+  left anywhere in the fleet, and an entirely optional one: the dispatch
+  guard, `mark_expired/2` (from a dying worker) and `mark_recovered/2` (from
+  the usage-poll signal) all keep working off held state with **no probing at
+  all**. Setting `:adapters` to `[]` — as already done for `gemini` here,
+  cutting it from ~180 probes/day to 26 — is a supported, intentional
+  low-cost posture, not a gap to route around. See "Configuration" below for
+  what you give up by doing so (organic detection + auto-recovery for
+  adapters nothing else watches).
 
   ## Configuration
 
@@ -121,6 +150,26 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @doc """
+  Clear `adapter`'s expired mark following an independent success signal.
+
+  Called by `Arbiter.Quota.CloudProbe` when a `/api/oauth/usage` poll succeeds,
+  so a usage-poll-detected expiry (`mark_expired/3`) can also recover without
+  waiting for the Watchdog's own periodic CLI probe — the symmetric
+  counterpart to that signal (bd-1pmf9h). A no-op if `adapter` isn't marked
+  expired. Fire-and-forget; best-effort. Pass a `server` pid/name to target a
+  specific instance (useful in tests).
+  """
+  @spec mark_recovered(module(), GenServer.server()) :: :ok
+  def mark_recovered(adapter, server \\ __MODULE__) when is_atom(adapter) do
+    GenServer.cast(server, {:mark_recovered, adapter})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Reset the Watchdog's per-adapter state to `:ok` (all credentials considered valid).
   Intended for test isolation only. The probe interval timer is unaffected.
   """
@@ -200,6 +249,11 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @impl true
+  def handle_cast({:mark_recovered, adapter}, state) do
+    {:noreply, on_probe_ok(state, adapter, Map.get(state.adapters, adapter, :ok))}
+  end
+
+  @impl true
   def handle_info(:check, %{enabled: false} = state) do
     schedule(self(), poll_interval_ms(state.opts))
     {:noreply, state}
@@ -242,6 +296,20 @@ defmodule Arbiter.Agents.CredentialWatchdog do
         else
           record_expiry(state, adapter, reason, :periodic_probe)
         end
+
+      # bd-svczq4: the probe outran its own watchdog. That is the one outcome
+      # that says nothing about the credentials, so it is advisory only — it
+      # must neither mark the adapter expired (which would refuse every
+      # dispatch fleet-wide off a slow probe) nor count as a healthy probe and
+      # clear a mark a dying worker just set. Leave the state exactly as it is.
+      # See the decision section in `Arbiter.Agents.Preflight`'s moduledoc.
+      {:warn, %StopReason{} = reason} ->
+        Logger.warning(
+          "CredentialWatchdog: #{adapter_name(adapter)} probe timed out, " <>
+            "leaving its state unchanged — #{reason.summary}"
+        )
+
+        state
 
       {:error, %StopReason{}} ->
         # Rate-limit, crash, or other non-auth failure — don't mark as

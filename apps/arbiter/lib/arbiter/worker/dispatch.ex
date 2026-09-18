@@ -55,7 +55,7 @@ defmodule Arbiter.Worker.Dispatch do
   """
 
   alias Arbiter.Agents
-  alias Arbiter.Agents.Preflight
+  alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.CircuitBreaker
@@ -102,7 +102,6 @@ defmodule Arbiter.Worker.Dispatch do
           security: map() | nil,
           security_mode: String.t() | atom() | nil,
           preflight: boolean(),
-          probe_command: [String.t()] | nil,
           agent_adapter: module() | nil,
           depth: non_neg_integer()
         ]
@@ -894,6 +893,52 @@ defmodule Arbiter.Worker.Dispatch do
       :ok
   end
 
+  # Antigravity's dispatch gate reads one of four sub-buckets keyed by model
+  # family (bd-7qj58o AC4) — "Claude and GPT models" vs "Gemini Models" — but
+  # the gate runs before `start_agent/4`'s own model tiering, so it doesn't
+  # otherwise know the model. Best-effort hint: an explicit `opts[:model]`
+  # override wins as-is; otherwise resolve the same routing choice the real
+  # dispatch will use and mirror `Gemini.resolve_model/2`'s own precedence —
+  # an explicit `config["model"]` pin wins over `model_tier` (routing
+  # policies such as `ByPriority`/`ByBudget` routinely set `"model"`
+  # directly). An unresolvable hint leaves `opts` untouched — the gate then
+  # falls back to its conservative worst-of-both-groups reading rather than
+  # holding on the wrong bucket.
+  defp maybe_add_gemini_model_hint(:gemini, task, workspace, opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" ->
+        opts
+
+      _ ->
+        case gemini_model_tier_hint(task, workspace) do
+          model when is_binary(model) and model != "" -> Keyword.put(opts, :model, model)
+          _ -> opts
+        end
+    end
+  end
+
+  defp maybe_add_gemini_model_hint(_provider, _task, _workspace, opts), do: opts
+
+  defp gemini_model_tier_hint(task, workspace) do
+    config = Routing.choose(task, workspace, %{}).config
+
+    case config["model"] do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        overrides =
+          ((workspace && workspace.config["agent"]["config"]) || %{})
+          |> Arbiter.Agents.ProviderConfig.apply_overrides("gemini")
+          |> Map.get("tier_models", %{})
+
+        base = GeminiConfig.default_tier_models(:agy)
+        Map.get(overrides, config["model_tier"]) || Map.get(base, config["model_tier"])
+    end
+  rescue
+    _ -> nil
+  end
+
   # Which provider this dispatch will run on. Mirrors `start_agent/4`'s
   # resolution order so the gate reads the same provider the worker is spawned
   # with: the `:agent_adapter` test seam, then an explicit `:agent_type`
@@ -917,8 +962,14 @@ defmodule Arbiter.Worker.Dispatch do
   defp apply_quota_gate(%Issue{} = task, workspace, provider, ws_id, opts) do
     gate = Arbiter.Quota.gate_for_workspace(workspace)
     quota = safe_quota_latest(ws_id, provider)
+    # The model hint (bd-7qj58o AC4) is scoped to this `gate.check/4` call
+    # only — `opts` itself (used below for `DispatchQueue.hold/5`, replayed
+    # verbatim on drain) must stay exactly what the caller passed, or a
+    # best-effort Antigravity bucket guess would silently override the real
+    # dispatch's model resolution later.
+    gate_opts = maybe_add_gemini_model_hint(provider, task, workspace, opts)
 
-    case gate.check(task, quota, workspace, opts) do
+    case gate.check(task, quota, workspace, gate_opts) do
       :allow ->
         :ok
 
@@ -1247,8 +1298,8 @@ defmodule Arbiter.Worker.Dispatch do
   # repos: read each registered repo's `origin` remote and match its derived
   # slug. This only runs on the miss path (both direct lookups returned nil)
   # and only for slug-shaped repos, so a normal repo-name dispatch never pays
-  # the git cost. Covers client↔verus-client, server↔verus_server, and the
-  # other leotech repos where repo name ≠ slug.
+  # the git cost. Covers client↔apex-client, server↔apex_server, and the
+  # other acme repos where repo name ≠ slug.
   defp slug_repo_path(_ws_id, repo) when not is_binary(repo), do: nil
 
   defp slug_repo_path(ws_id, repo) do
@@ -1336,8 +1387,8 @@ defmodule Arbiter.Worker.Dispatch do
   # Exact key match first (the common case). When that misses, fall back to a
   # normalized match (case-insensitive, underscore/hyphen-insensitive) — a
   # forge slug derived from a repo's actual GitHub name (e.g.
-  # "owner/verus_server") must still resolve against a `repo_paths` entry
-  # registered under a differently-separated key (e.g. "owner/verus-server").
+  # "owner/apex_server") must still resolve against a `repo_paths` entry
+  # registered under a differently-separated key (e.g. "owner/apex-server").
   # See bd-6rioa4.
   defp find_repo_path(map, repo), do: RepoConfig.find_path(map, repo)
 
@@ -1452,17 +1503,26 @@ defmodule Arbiter.Worker.Dispatch do
     IssueRepo.configured_repos(ws_id)
   end
 
-  # Pre-flight auth check (bd-awi4nw): before transitioning the task and
-  # dispatching a (paid, autonomous) worker, verify the agent CLI can
-  # authenticate with a single cheap probe. If it can't — the confirmed
-  # OAuth-expiry case where every spawn 401s — REFUSE to dispatch, escalate to the
-  # coordinator with a re-auth remediation, and abort before any task/worktree state
-  # is mutated.
+  # Pre-flight auth guard (bd-awi4nw, retired to a guard-only check by bd-2jgs2h):
+  # before transitioning the task and dispatching a (paid, autonomous) worker,
+  # refuse immediately if `CredentialWatchdog` already knows this adapter's
+  # credentials are expired.
   #
-  # Only runs on the real-agent path: skipped unless `start_claude: true`, and
-  # skipped when a `:claude_command` test override is in play (no real CLI to
-  # probe) unless the caller injects a `:probe_command`. Opt out entirely with
-  # `preflight: false`.
+  # THIS NO LONGER RUNS A LIVE PROBE. Measured 2026-09-18: 10 auth-failed worker
+  # runs in 90 days (half of them mid-run, where no pre-flight probe could have
+  # helped anyway) against ~760 billed probes/day (~$23/week for Claude alone)
+  # spent asking "are you logged in?" before every single dispatch and resume.
+  # A rejected spawn bills nothing at the provider and the CLI exits in 3-5s, so
+  # the cheaper policy is: dispatch, and let a dead credential fail fast. What
+  # still has to be bounded is a *wave* of those fast failures against the same
+  # dead credential — that is what this guard does, for free, off state
+  # `Arbiter.Worker.fail_stopped/2` already writes via `CredentialWatchdog.mark_expired/2`
+  # when a worker dies with `:auth_expired`. See `Arbiter.Agents.CredentialWatchdog`'s
+  # moduledoc for the full posture, including how (and whether) an expired mark
+  # ever clears without a live probe.
+  #
+  # Only runs on the real-agent path: skipped unless `start_claude: true`.
+  # Opt out entirely with `preflight: false`.
   defp maybe_preflight(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :preflight, true) == false ->
@@ -1471,54 +1531,24 @@ defmodule Arbiter.Worker.Dispatch do
       not Keyword.get(opts, :start_claude, false) ->
         :ok
 
-      Keyword.has_key?(opts, :claude_command) and not Keyword.has_key?(opts, :probe_command) ->
-        :ok
-
       true ->
-        run_preflight(task, opts)
+        guard_known_expired(task, opts)
     end
   end
 
-  defp run_preflight(%Issue{} = task, opts) do
+  defp guard_known_expired(%Issue{} = task, opts) do
     workspace = load_workspace(task)
-    :ok = Agents.prepare(workspace, :agent)
     adapter = preflight_adapter(task, workspace, opts)
 
     # bd-5wchp1: if the CredentialWatchdog already knows this adapter's creds are
-    # expired, refuse immediately without re-running the expensive probe. The
+    # expired, refuse immediately — a plain state lookup, no process spawn. The
     # guard is skipped when the watchdog isn't running (returns false by default).
     if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
       reason = known_expired_stop_reason()
       escalate_preflight_failure(preflight_snapshot(task, opts), reason)
       {:error, {:auth_check_failed, reason}}
     else
-      # bd-bw3466: thread the workspace through as well. `Preflight.check/2`
-      # defaults the probe env to the adapter's `spawn_env/1`, which resolves
-      # CLAUDE_CODE_OAUTH_TOKEN from the workspace's encrypted `worker_env` —
-      # `preflight_opts/1`'s Keyword.take used to drop `:workspace`, so the
-      # probe ran unauthenticated whenever the install-wide fallback couldn't
-      # answer (several workspaces with different tokens), failing every
-      # dispatch with {:auth_check_failed, ...} before a worker ever spawned.
-      # The workspace is loaded right here at :1456 — there is no reason to
-      # lean on the install-wide fallback for this call site.
-      # bd-adyhvn: `:usage_task_id` so the pre-flight's own spend (~39K
-      # cache-read tokens a call, once per dispatch and once per resume) lands
-      # in the ledger attributed to the task it was gating. `:workspace` already
-      # carries the workspace the row is attributed to.
-      probe_opts =
-        preflight_opts(opts) ++ [workspace: workspace, usage_task_id: task.id]
-
-      case Preflight.check(adapter, probe_opts) do
-        :ok ->
-          :ok
-
-        :skipped ->
-          :ok
-
-        {:error, reason} ->
-          escalate_preflight_failure(preflight_snapshot(task, opts), reason)
-          {:error, {:auth_check_failed, reason}}
-      end
+      :ok
     end
   end
 
@@ -1552,22 +1582,17 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp preflight_opts(opts) do
-    opts
-    |> Keyword.take([:probe_command, :probe_env, :timeout_ms, :api_key, :model, :model_tier])
-  end
-
   @doc """
-  Page the coordinator about a refused pre-flight auth probe, behind the shared
+  Page the coordinator about a refused pre-flight auth guard, behind the shared
   circuit breaker (bd-5jr49o).
 
-  Both `run_preflight/2` refusal paths — the CredentialWatchdog's
-  known-expired short circuit and a live `Preflight.check/2` failure — funnel
-  through here, which is the choke point bd-8lnnnt's own fix picked for the
-  same reason: the breaker must be independent of *which* caller retried.
-  `Arbiter.Workflows.DispatchQueue`'s held-intent drain re-runs the doomed
-  probe on `CloudProbe`'s ~5-minute cadence, so one task stuck behind an
-  exhausted 5h window produced 14 identical pages in 75 minutes.
+  `guard_known_expired/2`'s refusal — the CredentialWatchdog's known-expired
+  short circuit — funnels through here, which is the choke point bd-8lnnnt's
+  own fix picked for the same reason: the breaker must be independent of
+  *which* caller retried. `Arbiter.Workflows.DispatchQueue`'s held-intent
+  drain would otherwise re-run this same refusal on `CloudProbe`'s ~5-minute
+  cadence, so one task stuck behind a known-expired credential produced 14
+  identical pages in 75 minutes.
 
   The breaker is keyed on task + refusal category, NOT on the reason summary,
   which carries the elapsed time and attempt number. Returns `:ok` when the
@@ -1585,9 +1610,9 @@ defmodule Arbiter.Worker.Dispatch do
           workspace_id: Map.get(snapshot, :workspace_id),
           task_ref: Map.get(snapshot, :task_id),
           detail:
-            "Pre-flight auth probe kept refusing dispatch for this task. Only an " <>
-              "operator or the clock can clear it — re-authenticate the agent CLI, or " <>
-              "wait for the usage window to reset."
+            "The CredentialWatchdog's known-expired guard kept refusing dispatch for " <>
+              "this task. Only an operator can clear it — re-authenticate the agent " <>
+              "CLI, then re-dispatch."
         ],
         fn -> CoordinatorNotifier.preflight_failed(snapshot, reason) end
       )
@@ -1926,8 +1951,15 @@ defmodule Arbiter.Worker.Dispatch do
         # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
         # the worker OAuth token from this workspace's `worker_env` before
         # falling back to the server env (bd-bw3466).
+        #
+        # `worktree_path:` is carried for the same reason on the agy side: it
+        # keys the per-spawn isolated `$HOME`
+        # (`Arbiter.Agents.Gemini.ConfigDir`, bd-7s29yq). It must be the SAME
+        # value `maybe_write_mcp_config/3` above was given, or the spawn would
+        # read a different HOME than the one the MCP config was written into.
         agent_opts =
-          agent_opts_from_choice(choice) ++ [security: policy, workspace: workspace]
+          agent_opts_from_choice(choice) ++
+            [security: policy, workspace: workspace, worktree_path: worktree_path]
 
         tracker_context = fetch_tracker_context(task, workspace)
 

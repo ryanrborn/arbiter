@@ -21,7 +21,7 @@ defmodule Arbiter.Worker.PRTemplate do
     * `{{task.issue_type}}` — `"task"`, `"bug"`, etc.
     * `{{tracker.link}}` — resolved via `Arbiter.Trackers.link_for/1`. Empty
       string for `Tracker.None`.
-    * `{{tracker.ref}}` — `issue.tracker_ref` (e.g. `"VR-17585"` or `""`).
+    * `{{tracker.ref}}` — `issue.tracker_ref` (e.g. `"AX-17585"` or `""`).
     * `{{tracker.type}}` — `"jira" | "shortcut" | "linear" | "github" | "gitlab" | "none"`.
     * `{{tracker.closes}}` — `"Closes #N"` for `:github`/`:gitlab` tasks with a
       bare numeric `tracker_ref`; `""` (line-dropped) for all others.

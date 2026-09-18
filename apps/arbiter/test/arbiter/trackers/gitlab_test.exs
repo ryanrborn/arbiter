@@ -341,22 +341,16 @@ defmodule Arbiter.Trackers.GitlabTest do
                })
     end
 
-    test "resolves an assignee username to a numeric id via /users" do
+    test "ignores an assignee input on create (no /users lookup, no assignee_ids)" do
       stub(fn conn ->
-        case {conn.method, conn.request_path} do
-          {"GET", "/api/v4/users"} ->
-            assert URI.decode_query(conn.query_string)["username"] == "alice"
-            Req.Test.json(conn, [%{"id" => 9, "username" => "alice"}])
+        assert conn.method == "POST"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        refute Map.has_key?(decoded, "assignee_ids")
 
-          {"POST", _} ->
-            {:ok, body, conn} = Plug.Conn.read_body(conn)
-            decoded = Jason.decode!(body)
-            assert decoded["assignee_ids"] == [9]
-
-            conn
-            |> Plug.Conn.put_status(201)
-            |> Req.Test.json(%{"iid" => 79})
-        end
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"iid" => 79})
       end)
 
       assert {:ok, "79"} = Gitlab.create(%{title: "Assigned", assignee: "alice"})

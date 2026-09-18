@@ -55,12 +55,12 @@ defmodule Arbiter.Tasks.IssueTest do
         Ash.create(Issue, %{
           title: "with-jira-ref",
           tracker_type: :jira,
-          tracker_ref: "VR-17585",
+          tracker_ref: "AX-17585",
           workspace_id: ws.id
         })
 
       assert issue.tracker_type == :jira
-      assert issue.tracker_ref == "VR-17585"
+      assert issue.tracker_ref == "AX-17585"
     end
 
     test "rich-content fields round-trip Markdown", %{ws: ws} do

@@ -265,7 +265,7 @@ defmodule Arbiter.Loop.CorpusTest do
       {:ok, _run} =
         Ash.create(Run, %{
           task_id: "lt-6glz4n",
-          repo: "verus_server",
+          repo: "apex_server",
           task_title: "PR #3701: chore: merge integration/dolphin i…",
           status: :completed,
           started_at: DateTime.utc_now()

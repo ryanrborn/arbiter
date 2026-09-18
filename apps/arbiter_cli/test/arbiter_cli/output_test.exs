@@ -51,6 +51,42 @@ defmodule ArbiterCli.OutputTest do
       refute out =~ "Notes:"
     end
 
+    # bd-1defgu: `arb issue show` gains a Dependencies section — the edge was
+    # only visible via `arb dep add`'s own output before.
+    test "renders a Dependencies section when the issue carries edges" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "status" => "open",
+        "dependencies" => [
+          %{
+            "id" => "d1",
+            "from_issue_id" => "x",
+            "to_issue_id" => "y",
+            "type" => "conflicts_with",
+            "from" => %{"id" => "x", "title" => "T", "status" => "open", "priority" => 1},
+            "to" => %{"id" => "y", "title" => "the other", "status" => "closed", "priority" => 2}
+          }
+        ]
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Dependencies:"
+      assert out =~ "conflicts_with"
+      assert out =~ "the other"
+      assert out =~ "closed"
+    end
+
+    test "omits the Dependencies section when there are no edges" do
+      issue = %{"id" => "x", "title" => "T", "status" => "open", "dependencies" => []}
+      refute Output.format_issue_detail(issue) =~ "Dependencies:"
+    end
+
+    test "omits the Dependencies section when the field is absent" do
+      issue = %{"id" => "x", "title" => "T", "status" => "open"}
+      refute Output.format_issue_detail(issue) =~ "Dependencies:"
+    end
+
     # bd-3j4ch4 AC5: the cost estimate renders in the header, as a range with
     # its basis, so a coarse estimate can't be mistaken for a precise one.
     test "renders the cost estimate range, basis and sample size" do
@@ -118,9 +154,9 @@ defmodule ArbiterCli.OutputTest do
     end
 
     test "renders tracker label only when tracker is meaningful" do
-      issue = %{"id" => "x", "title" => "T", "tracker_type" => "jira", "tracker_ref" => "VR-1"}
+      issue = %{"id" => "x", "title" => "T", "tracker_type" => "jira", "tracker_ref" => "AX-1"}
       assert Output.format_issue_detail(issue) =~ "Tracker:"
-      assert Output.format_issue_detail(issue) =~ "jira:VR-1"
+      assert Output.format_issue_detail(issue) =~ "jira:AX-1"
     end
 
     test "skips tracker line when type is none or nil" do

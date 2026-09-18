@@ -113,6 +113,7 @@ defmodule Arbiter.Worker do
 
   require Logger
 
+  alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewVerification
@@ -1456,6 +1457,7 @@ defmodule Arbiter.Worker do
       provider: provider,
       tokens_in: Map.get(usage, :tokens_in),
       tokens_out: Map.get(usage, :tokens_out),
+      thinking_tokens: Map.get(usage, :thinking_tokens),
       cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
       cache_read_tokens: Map.get(usage, :cache_read_tokens),
       cost_usd: Map.get(usage, :cost_usd),
@@ -2225,6 +2227,13 @@ defmodule Arbiter.Worker do
           |> maybe_put(:result_subtype, Map.get(usage, :result_subtype))
           |> maybe_put(:result_is_error, Map.get(usage, :result_is_error))
           |> maybe_put(:result_message, Map.get(usage, :result_message))
+          # bd-25ivqe: the base command token of the most recent agy ERROR
+          # (headless-denial) tool step, stashed by
+          # `ClaudeSession.capture_steps/2` — read by `notes_gate_failure_reason/1`
+          # so a run that died because `:strict` denied a required command (e.g.
+          # `arb`) reports that concretely instead of the generic
+          # `:blank_notes_at_completion`.
+          |> maybe_put(:denied_command, Map.get(session, :denied_command))
 
         new_state = %State{state | meta: meta}
 
@@ -2475,19 +2484,13 @@ defmodule Arbiter.Worker do
       end
 
     if is_integer(os_pid) do
-      # bd-bmmj4w: enumerate the agent's descendants BEFORE killing it. The
-      # process actually holding the worktree open is usually not `claude`
-      # itself but what it spawned (`mix test`, `git`, ...); once the parent
-      # dies those are reparented to init and `pgrep -P` can no longer reach
-      # them, so they would outlive teardown and keep writing into a directory
-      # `CleanupWorktree` is about to remove.
-      descendants = descendant_os_pids(os_pid)
-
-      Enum.each([os_pid | descendants], fn pid ->
-        _ = System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
-      end)
-
-      case Enum.reject([os_pid | descendants], &os_process_gone?/1) do
+      # bd-bmmj4w: `OsProcess.kill_tree/1` enumerates the agent's descendants
+      # BEFORE killing it. The process actually holding the worktree open is
+      # usually not `claude` itself but what it spawned (`mix test`, `git`, ...);
+      # once the parent dies those are reparented to init and `pgrep -P` can no
+      # longer reach them, so they would outlive teardown and keep writing into a
+      # directory `CleanupWorktree` is about to remove.
+      case OsProcess.kill_tree(os_pid) do
         [] ->
           :ok
 
@@ -2521,69 +2524,6 @@ defmodule Arbiter.Worker do
     end
   rescue
     _ -> :error
-  end
-
-  # Every OS process descended from the agent, breadth-first, depth-bounded.
-  # `pgrep -P` is present on both Linux and macOS; when it is missing or the
-  # probe blows up we return [] and fall back to killing the agent alone —
-  # best-effort, never a teardown crash. The BEAM shares its process group
-  # with the port's children, so a group kill is not an option here: the
-  # descendants have to be enumerated and signalled individually.
-  @max_descendant_depth 5
-
-  defp descendant_os_pids(root_os_pid) do
-    collect_descendants([root_os_pid], MapSet.new(), @max_descendant_depth)
-  end
-
-  defp collect_descendants([], acc, _depth), do: MapSet.to_list(acc)
-  defp collect_descendants(_frontier, acc, 0), do: MapSet.to_list(acc)
-
-  defp collect_descendants(frontier, acc, depth) do
-    next =
-      frontier
-      |> Enum.flat_map(&child_os_pids/1)
-      |> Enum.reject(&MapSet.member?(acc, &1))
-      |> Enum.uniq()
-
-    collect_descendants(next, Enum.into(next, acc), depth - 1)
-  end
-
-  defp child_os_pids(os_pid) do
-    case System.cmd("pgrep", ["-P", Integer.to_string(os_pid)], stderr_to_stdout: true) do
-      {out, 0} ->
-        out
-        |> String.split(~r/\s+/, trim: true)
-        |> Enum.flat_map(fn token ->
-          case Integer.parse(token) do
-            {pid, ""} -> [pid]
-            _ -> []
-          end
-        end)
-
-      # exit 1 == "no matching processes", i.e. a leaf.
-      _ ->
-        []
-    end
-  rescue
-    _ -> []
-  end
-
-  # Poll `kill -0` until the OS process is gone (SIGKILL is prompt, so this
-  # usually returns on the first probe). Bounded so a wedged/zombie pid can't
-  # block worker teardown indefinitely.
-  defp os_process_gone?(os_pid, attempts \\ 25) do
-    Enum.reduce_while(1..attempts, false, fn _i, _acc ->
-      case System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true) do
-        {_, 0} ->
-          Process.sleep(20)
-          {:cont, false}
-
-        _ ->
-          {:halt, true}
-      end
-    end)
-  rescue
-    _ -> true
   end
 
   # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the
@@ -4188,7 +4128,27 @@ defmodule Arbiter.Worker do
     escalate_notes_gate(state, summary)
 
     meta = Map.put(state.meta || %{}, :notes_gate_detail, why)
-    fail_now(%State{state | meta: meta}, :blank_notes_at_completion)
+    fail_now(%State{state | meta: meta}, notes_gate_failure_reason(meta))
+  end
+
+  # bd-25ivqe AC4: blank notes at `arb done` is usually a genuine missing
+  # deliverable, but under `:strict` it can also mean the worker never got to
+  # write anything — every `run_command` it tried (starting with reading its
+  # own mailbox) was auto-denied because the policy's `permissions.allow`
+  # didn't name it. `:denied_command` (synced from the session by
+  # `sync_session_meta/2`, stamped by `ClaudeSession.capture_steps/2` off an
+  # agy ERROR tool step) distinguishes the two: when present, the run failed
+  # because a required command was denied, not because the agent simply
+  # forgot to write findings — report that concretely rather than folding it
+  # into the generic `:blank_notes_at_completion` catch-all.
+  defp notes_gate_failure_reason(meta) do
+    case Map.get(meta || %{}, :denied_command) do
+      cmd when is_binary(cmd) and cmd != "" ->
+        "strict policy denied required command `#{cmd}`"
+
+      _ ->
+        :blank_notes_at_completion
+    end
   end
 
   defp notes_gate_summary(%State{task_id: task_id, meta: meta}, why) do
@@ -4213,13 +4173,26 @@ defmodule Arbiter.Worker do
     directive whose deliverable is a findings summary in `notes`, but `notes`
     is blank and `arb done` was signalled.
 
-    #{detail_blurb}
+    #{detail_blurb}#{notes_gate_denial_blurb(meta)}
 
     The directive cannot close without its findings. Re-dispatch it and ensure
     the worker writes its results to `notes` via the `task_update_progress` MCP
     tool before completing.
     """
     |> String.trim()
+  end
+
+  defp notes_gate_denial_blurb(meta) do
+    case Map.get(meta || %{}, :denied_command) do
+      cmd when is_binary(cmd) and cmd != "" ->
+        "\n\nbd-25ivqe: this looks like a strict-policy bootstrap failure, not a " <>
+          "missing deliverable — the worker's `#{cmd}` call was auto-denied under " <>
+          ":strict permissions before it could do any work. Check the workspace's " <>
+          "`permissions.allow` for a `command(#{cmd})` rule."
+
+      _ ->
+        ""
+    end
   end
 
   defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary)
@@ -4262,7 +4235,7 @@ defmodule Arbiter.Worker do
   end
 
   # The PR/MR title to open with. Formats according to the workspace's
-  # pr_title_format convention (e.g. conventional commits for leotech), falling
+  # pr_title_format convention (e.g. conventional commits for acme), falling
   # back to the internal merge_title stashed in meta when the task can't be
   # loaded (bd-7d5smn: strip the "Merge <id>:" prefix from outbound PRs).
   defp pr_title_for(task_id, meta) do
@@ -6158,9 +6131,9 @@ defmodule Arbiter.Worker do
 
   defp record_mr_ref_on_run(_state, _mr_ref, _merger_url), do: :ok
 
-  # PR-open: drive the task's external tracker forward (e.g. Jira VR ->
+  # PR-open: drive the task's external tracker forward (e.g. Jira AX ->
   # In Code Review) and attach the PR as a comment + remote link. The original
-  # incident (VR-17911) opened a PR but never transitioned the ticket and left
+  # incident (AX-17911) opened a PR but never transitioned the ticket and left
   # 0 comments / no remote-link; this fires that hook. Best-effort and
   # loud-on-failure inside `Arbiter.Trackers.Sync` — a missing/unreadable task
   # here just skips. (bd-c4cfuv)

@@ -2,7 +2,7 @@ defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
   `arb create <title> [--description ...] [--priority N] [--difficulty N]
                        [--type T] [--deps id1,id2] [--labels a,b]
-                       [--assignee a] [--tracker-ref REF] [--no-tracker]
+                       [--tracker-ref REF] [--no-tracker]
                        [--target-branch NAME] [--repo owner/name]
                        [--parent <parent-id>] [--ticket-only]`
 
@@ -81,9 +81,10 @@ defmodule ArbiterCli.Cmd.Create do
       shared tracker; anyone can pick it up via `arb claim <ref>`. The workspace
       must have a tracker configured. Mutually exclusive with `--no-tracker` /
       `--local-only` (opposite intent).
-      Honored: `--title`, `--description`, `--priority`, `--type`, `--assignee`.
+      Honored: `--title`, `--description`, `--priority`, `--type`.
       Not honored (warning emitted): `--difficulty`, `--deps`, `--parent`,
-      `--tracker-ref`, `--target-branch`, `--repo`, `--labels`.
+      `--tracker-ref`, `--target-branch`, `--repo`, `--labels`, `--assignee`
+      (deprecated — bd-1ozks5).
 
   `--deps id1,id2` is a convenience that creates `blocks` dependencies for
   each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
@@ -113,6 +114,12 @@ defmodule ArbiterCli.Cmd.Create do
   `--labels` is accepted for interface parity with `bd` but the current Issue
   resource has no `labels` field; the value is reported back in a warning
   unless `--json` is set. The `labels` field is not yet part of the Issue resource.
+
+  `--assignee` is deprecated (bd-1ozks5): Arbiter is a local single-user app
+  and no longer tracks an assignee locally, so the flag is accepted and
+  ignored with a stderr warning (unless `--json` is set) rather than
+  rejected outright — for one release, so an existing script that still
+  passes it doesn't break.
   """
 
   alias ArbiterCli.{Client, Output, Workspace}
@@ -201,12 +208,13 @@ defmodule ArbiterCli.Cmd.Create do
       )
     end
 
+    warn_deprecated_assignee(opts[:assignee], mode)
+
     payload =
       %{"title" => title}
       |> maybe_put("description", opts[:description])
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("issue_type", opts[:type])
-      |> maybe_put("assignee", opts[:assignee])
 
     ticket =
       case Client.post("/api/workspaces/#{workspace_id}/tracker/tickets", payload) do
@@ -229,7 +237,6 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("issue_type", opts[:type])
-      |> maybe_put("assignee", opts[:assignee])
       |> maybe_put("tracker_ref", opts[:tracker_ref])
       |> maybe_put("target_branch", opts[:target_branch])
       |> maybe_put("repo", opts[:repo])
@@ -244,6 +251,8 @@ defmodule ArbiterCli.Cmd.Create do
         "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
       )
     end
+
+    warn_deprecated_assignee(opts[:assignee], mode)
 
     issue =
       case Client.post("/api/issues", payload) do
@@ -281,6 +290,20 @@ defmodule ArbiterCli.Cmd.Create do
   end
 
   defp print_acceptance_warnings(_issue, _mode), do: :ok
+
+  # bd-1ozks5: the local assignee field is gone — accept and ignore
+  # `--assignee` for one release rather than breaking an existing script.
+  defp warn_deprecated_assignee(nil, _mode), do: :ok
+
+  defp warn_deprecated_assignee(_value, :text) do
+    IO.puts(
+      :stderr,
+      "arb: warning: --assignee is deprecated and ignored — Arbiter is a local " <>
+        "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
+    )
+  end
+
+  defp warn_deprecated_assignee(_value, _mode), do: :ok
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, ""), do: map

@@ -270,7 +270,7 @@ defmodule Arbiter.Worker.Watchdog do
   #
   # auto_merge OFF (human-merge lanes): :infinity — a human reviewer may take
   # hours or overnight. Failing the worker after 30 min was a false negative
-  # (bd-akr4il, VR-17739). The Watchdog polls indefinitely until the MR is
+  # (bd-akr4il, AX-17739). The Watchdog polls indefinitely until the MR is
   # merged or closed. Override via workspace config["merge"]["watchdog_max_polls"].
   @default_max_polls_auto 30
   @default_max_polls_manual :infinity
@@ -956,7 +956,7 @@ defmodule Arbiter.Worker.Watchdog do
         last_escalated_poll: 0,
         # Fired once when an approved MR is parked without auto-merge, so the
         # external tracker moves to its "approved, awaiting merge" status
-        # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
+        # (e.g. Jira AX -> Pending Merge) instead of every poll. (bd-c4cfuv)
         pending_merge_synced: false,
         # Fired once when an approved + mergeable MR is parked on an
         # auto_merge:false lane, so the coordinator inbox is paged that the PR
@@ -1384,7 +1384,7 @@ defmodule Arbiter.Worker.Watchdog do
     # for the human merge (the next poll that sees :merged completes):
     #
     #   * `sync_tracker_pending_merge` moves the external tracker to its parked-
-    #     but-approved status (Jira VR -> Pending Merge). (bd-c4cfuv)
+    #     but-approved status (Jira AX -> Pending Merge). (bd-c4cfuv)
     #   * `notify_awaiting_manual_merge` pages the coordinator INBOX that the PR
     #     is ready for a manual merge decision. Without this, an approved+done
     #     PR on an auto_merge:false lane parked *silently* — nothing was ever
@@ -2526,7 +2526,7 @@ defmodule Arbiter.Worker.Watchdog do
   #   - auto_merge ON  → fail the worker (auto-merge should fire quickly; a 30-
   #                       min timeout means something is broken on the forge side)
   #   - auto_merge OFF → park the worker (a human reviewer may take overnight or
-  #                       longer; failing here was a false negative — VR-17739).
+  #                       longer; failing here was a false negative — AX-17739).
   #                       The Watchdog stops polling to free resources, and the
   #                       worker stays in :awaiting_review so a boot-resume or
   #                       webhook can re-attach it later.

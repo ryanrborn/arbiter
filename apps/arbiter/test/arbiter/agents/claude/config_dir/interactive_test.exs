@@ -164,9 +164,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       settings = config |> Path.join("settings.json") |> File.read!() |> Jason.decode!()
       deny = settings["permissions"]["deny"]
 
-      assert "Write(#{checkout}/**)" in deny
       assert "Edit(#{checkout}/**)" in deny
-      assert "NotebookEdit(#{checkout}/**)" in deny
 
       # the install-wide hardened floor is still there
       assert "Bash(rm -rf:*)" in deny
@@ -227,6 +225,76 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
                )
 
       refute File.exists?(Path.join(config, ".credentials.json"))
+    end
+  end
+
+  describe "Remote Control eligibility cache (bd-cdretj)" do
+    test "mode B copies the operator's oauthAccount and GrowthBook cache so --remote-control's startup check has something to read",
+         %{config: config, source: source, tmp: tmp} do
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{
+          "oauthAccount" => %{"organizationUuid" => "org-123"},
+          "cachedGrowthBookFeatures" => %{"tengu_ccr_bridge" => true},
+          "cachedGrowthBookFeaturesAt" => 1_789_659_549_691
+        })
+      )
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: source,
+                 auth_mode: :seeded_credentials
+               )
+
+      json = claude_json!(config)
+      assert json["oauthAccount"] == %{"organizationUuid" => "org-123"}
+      assert json["cachedGrowthBookFeatures"] == %{"tengu_ccr_bridge" => true}
+      assert json["cachedGrowthBookFeaturesAt"] == 1_789_659_549_691
+    end
+
+    test "mode A never seeds the eligibility cache alongside no credentials", %{
+      config: config,
+      source: source,
+      tmp: tmp
+    } do
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{"oauthAccount" => %{"organizationUuid" => "org-123"}})
+      )
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: source,
+                 auth_mode: :oauth_token
+               )
+
+      refute Map.has_key?(claude_json!(config), "oauthAccount")
+    end
+
+    test "never overwrites what Claude Code has already fetched and written back on a live session",
+         %{config: config, source: source, tmp: tmp} do
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{"oauthAccount" => %{"organizationUuid" => "operator-org"}})
+      )
+
+      File.mkdir_p!(config)
+
+      File.write!(
+        Path.join(config, ".claude.json"),
+        Jason.encode!(%{"oauthAccount" => %{"organizationUuid" => "session-live-org"}})
+      )
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: source,
+                 auth_mode: :seeded_credentials
+               )
+
+      assert claude_json!(config)["oauthAccount"] == %{"organizationUuid" => "session-live-org"}
     end
   end
 
@@ -329,7 +397,6 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       assert "Read(**/.env)" in deny
       assert "Bash(gh pr create:*)" in deny
       assert "Bash(glab mr create:*)" in deny
-      assert "Write(#{checkout}/**)" in deny
       assert "Edit(#{checkout}/**)" in deny
     end
 

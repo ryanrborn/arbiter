@@ -39,7 +39,7 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
   def parse_priority(_), do: 2
 
   @doc """
-  Parse a Dolt `external_ref` like `"jira-VR-17585"` into a
+  Parse a Dolt `external_ref` like `"jira-AX-17585"` into a
   `{tracker_type, tracker_ref}` tuple.
 
   Returns `{:none, nil}` for missing / empty / unknown formats.
@@ -143,7 +143,6 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
       status: Atom.to_string(map_status(row["status"])),
       priority: parse_priority(row["priority"]),
       issue_type: Atom.to_string(map_issue_type(row["issue_type"])),
-      assignee: nonempty(row["assignee"]),
       tracker_type: Atom.to_string(tracker_type),
       tracker_ref: tracker_ref,
       created_at: parse_dt(row["created_at"]) || now,

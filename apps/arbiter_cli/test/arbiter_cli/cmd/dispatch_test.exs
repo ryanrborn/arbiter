@@ -40,7 +40,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       })
 
       {out, _err, code} =
-        capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "verus_server"]) end)
+        capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "apex_server"]) end)
 
       assert code == 0
       assert out =~ "Dispatch:"

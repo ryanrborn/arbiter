@@ -7,17 +7,17 @@ defmodule ArbiterCli.WorkspaceTest do
 
   describe "take_flag/1" do
     test "extracts `--workspace <name>` and returns the remaining argv" do
-      assert {"leotech", ["list", "--tracker"]} =
-               Workspace.take_flag(["list", "--workspace", "leotech", "--tracker"])
+      assert {"acme", ["list", "--tracker"]} =
+               Workspace.take_flag(["list", "--workspace", "acme", "--tracker"])
     end
 
     test "supports the `--workspace=<name>` form" do
-      assert {"leotech", ["list"]} = Workspace.take_flag(["list", "--workspace=leotech"])
+      assert {"acme", ["list"]} = Workspace.take_flag(["list", "--workspace=acme"])
     end
 
     test "supports the `-w <name>` and `-w=<name>` short forms" do
-      assert {"leotech", ["list"]} = Workspace.take_flag(["list", "-w", "leotech"])
-      assert {"leotech", ["list"]} = Workspace.take_flag(["list", "-w=leotech"])
+      assert {"acme", ["list"]} = Workspace.take_flag(["list", "-w", "acme"])
+      assert {"acme", ["list"]} = Workspace.take_flag(["list", "-w=acme"])
     end
 
     test "returns {nil, argv} when no flag is present" do
@@ -52,10 +52,10 @@ defmodule ArbiterCli.WorkspaceTest do
     test "falls back to the sole workspace when none is named \"default\"" do
       stub_routes([
         {{"get", "/api/workspaces"},
-         {%{"data" => [%{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}]}, 200}}
+         {%{"data" => [%{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}]}, 200}}
       ])
 
-      assert {:ok, %{"name" => "leotech"}} = Workspace.resolve()
+      assert {:ok, %{"name" => "acme"}} = Workspace.resolve()
     end
 
     test "still prefers a workspace literally named \"default\" when multiple exist" do
@@ -64,7 +64,7 @@ defmodule ArbiterCli.WorkspaceTest do
          {%{
             "data" => [
               %{"id" => "ws-default", "name" => "default", "prefix" => "bd"},
-              %{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}
+              %{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}
             ]
           }, 200}}
       ])
@@ -102,7 +102,7 @@ defmodule ArbiterCli.WorkspaceTest do
 
       stub_routes([
         {{"get", "/api/workspaces"},
-         {%{"data" => [%{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}]}, 200}}
+         {%{"data" => [%{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}]}, 200}}
       ])
 
       assert {:error, msg} = Workspace.resolve()
@@ -132,24 +132,24 @@ defmodule ArbiterCli.WorkspaceTest do
          {%{
             "data" => [
               %{"id" => "ws-default", "name" => "default", "prefix" => "bd"},
-              %{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}
+              %{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}
             ]
           }, 200}},
-        # Only the leotech workspace's tracker endpoint is stubbed; if the flag
+        # Only the acme workspace's tracker endpoint is stubbed; if the flag
         # were ignored, the default workspace's endpoint would be hit instead
         # and this route would 500 (unmatched).
-        {{"get", "/api/workspaces/ws-leo/tracker/issues"},
+        {{"get", "/api/workspaces/ws-acme/tracker/issues"},
          {%{
             "supported" => true,
-            "data" => [%{"ref" => "VR-1", "title" => "Upstream", "status" => "open"}]
+            "data" => [%{"ref" => "AX-1", "title" => "Upstream", "status" => "open"}]
           }, 200}}
       ])
 
       {out, _err, code} =
-        capture(fn -> Issue.run(["list", "--tracker", "--workspace", "leotech"]) end)
+        capture(fn -> Issue.run(["list", "--tracker", "--workspace", "acme"]) end)
 
       assert code == 0
-      assert out =~ "VR-1"
+      assert out =~ "AX-1"
       assert out =~ "Upstream"
     end
   end

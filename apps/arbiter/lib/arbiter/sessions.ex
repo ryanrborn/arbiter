@@ -71,6 +71,7 @@ defmodule Arbiter.Sessions do
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Provider
   alias Arbiter.Sessions.Provisioning
+  alias Arbiter.Sessions.RepoCheckout
   alias Arbiter.Sessions.Runner
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Terminal
@@ -127,6 +128,11 @@ defmodule Arbiter.Sessions do
       pointed at an existing checkout.
     * `:provider` — default `:claude_code`.
     * `:workspace_id` — `nil` (default) means cross-workspace.
+    * `:issue_id` — binds the session to one issue, which makes it a **refine
+      session** (bd-1lszsc): its MCP token is minted at the `:refine` tier
+      bound to that issue rather than at the coordinator tier, and at most one
+      live session may carry a given `issue_id`. Set by
+      `Arbiter.Sessions.Refine.open/2`, which is the supported way in.
     * `:config_dir` — override the session's `CLAUDE_CONFIG_DIR`; defaults to
       the scaffolded one.
     * `:name` — an operator-supplied display name (bd-o2vtsz). Passed through
@@ -297,6 +303,12 @@ defmodule Arbiter.Sessions do
   single place that archives the session's own JSONL (§11, phase 9) — the
   CLI prunes its session store at ~21 days, so this is the last reliable
   moment to copy it out.
+
+  It is also where a refine session's read-only repo checkout goes
+  (bd-1lszsc). Putting it here rather than beside the Kill button is what
+  makes "removed when the session ends" true for *every* way a session ends,
+  including the ones nobody clicked: the idle reaper, the adoption sweep
+  finding a vanished scope, and the agent simply exiting.
   """
   @spec mark_ended(Session.t(), String.t()) :: {:ok, Session.t()} | {:error, term()}
   def mark_ended(%Session{} = session, reason) when is_binary(reason) do
@@ -316,6 +328,7 @@ defmodule Arbiter.Sessions do
       _ = final_usage_ingest(ended)
       _ = archive_session_jsonl(ended)
       _ = purge_transcript_pipe(ended)
+      _ = RepoCheckout.teardown(ended)
       {:ok, ended}
     end
   end
@@ -393,12 +406,41 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
-  The PubSub topic session lifecycle changes (currently just `mark_ended/2`)
-  are published on — the fleet-wide counterpart to `usage_topic/1`'s
-  per-session one (bd-bsdeb2).
+  The PubSub topic session lifecycle changes (`mark_ended/2`, and
+  `request_open/1`'s open request) are published on — the fleet-wide
+  counterpart to `usage_topic/1`'s per-session one (bd-bsdeb2).
   """
   @spec lifecycle_topic() :: String.t()
   def lifecycle_topic, do: "sessions:lifecycle"
+
+  @doc """
+  Ask whatever session docks are listening to open `session_id` and expand it
+  (bd-1lszsc).
+
+  The dock is a **sticky nested LiveView** with its own process, and the pages
+  that need to put something in it — the issue detail page's Refine button, the
+  board card's — are separate processes holding no reference to it. A page
+  cannot `send/2` the dock, and `send_update/2` is for LiveComponents, not
+  LiveViews. So the request goes over the same lifecycle topic the dock is
+  already subscribed to for its own reasons.
+
+  Broadcast rather than addressed: the dashboard is loopback-only and
+  single-operator (§10.4), so "every dock this operator has open" and "the dock
+  that asked" differ only if they have two tabs up — in which case both showing
+  the session they just asked for is the right answer, not a bug.
+
+  Advisory, not a command. `ArbiterWeb.SessionDockLive` re-validates the id
+  against the sessions that actually exist before opening anything, exactly as
+  it does with the `localStorage` payload a browser hands it.
+  """
+  @spec request_open(String.t()) :: :ok | {:error, term()}
+  def request_open(session_id) when is_binary(session_id) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      lifecycle_topic(),
+      {:session_open_requested, session_id}
+    )
+  end
 
   @doc "Mark a session's scope confirmed live (launch, or re-adoption)."
   @spec mark_running(Session.t()) :: {:ok, Session.t()} | {:error, term()}
@@ -451,6 +493,35 @@ defmodule Arbiter.Sessions do
   @spec rename(Session.t(), String.t() | nil) :: {:ok, Session.t()} | {:error, term()}
   def rename(%Session{} = session, name) when is_binary(name) or is_nil(name) do
     Ash.update(session, %{name: name}, action: :rename)
+  end
+
+  @doc """
+  Persist that §8.3's bridge-verification poll never found a `bridge-session`
+  record (bd-cdretj).
+
+  `verify_bridge/2` already calls `broadcast_error/2` on this outcome, but
+  that is fire-and-forget over `Phoenix.PubSub`: a session with no attached
+  client at that moment never sees it, and the usual case is exactly that —
+  verification runs in the ~15s right after launch, before an operator has
+  opened the session. This gives a client that attaches *after* the fact
+  something durable to check instead of a plain terminal indistinguishable
+  from a healthy one.
+  """
+  @spec mark_bridge_unavailable(Session.t()) :: {:ok, Session.t()} | {:error, term()}
+  def mark_bridge_unavailable(%Session{} = session) do
+    Ash.update(session, %{}, action: :mark_bridge_unavailable)
+  end
+
+  @doc """
+  Clear a `bridge_status: :unavailable` once a `bridge-session` record is
+  actually observed (bd-cdretj round 2) — an operator who fixed the bridge
+  by hand after the fact (`/remote-control` retried in the session) leaves
+  no other trace on this row, so the badge and list label would otherwise
+  keep reporting a failure that already resolved itself.
+  """
+  @spec mark_bridge_available(Session.t()) :: {:ok, Session.t()} | {:error, term()}
+  def mark_bridge_available(%Session{} = session) do
+    Ash.update(session, %{}, action: :mark_bridge_available)
   end
 
   @doc """
@@ -563,6 +634,7 @@ defmodule Arbiter.Sessions do
     Ash.create(Session, %{
       provider: Keyword.get(opts, :provider, :claude_code),
       workspace_id: Keyword.get(opts, :workspace_id),
+      issue_id: Keyword.get(opts, :issue_id),
       config_dir: Keyword.get(opts, :config_dir),
       cwd: Keyword.get(opts, :cwd),
       name: Keyword.get(opts, :name),
@@ -659,48 +731,63 @@ defmodule Arbiter.Sessions do
   defp verify_bridge(session, opts) do
     if Keyword.get(opts, :verify_bridge, true) do
       verify_fun = Keyword.get(opts, :bridge_verify_fun, &BridgeVerification.verify/2)
-
-      # `:bridge_verify_timeout_ms` / `:bridge_verify_poll_interval_ms` fall
-      # through to application config — same resolution `Provisioning`'s
-      # `agent_command/2` uses for `:sessions_agent_command` — so a caller
-      # that never sees `launch/1`'s opts (a LiveView `handle_event`) can
-      # still pin this down for a test without threading options through it.
-      verify_opts = [
-        timeout_ms:
-          Keyword.get(opts, :bridge_verify_timeout_ms) ||
-            Application.get_env(
-              :arbiter,
-              :sessions_bridge_verify_timeout_ms,
-              @default_bridge_verify_timeout_ms
-            ),
-        poll_interval_ms:
-          Keyword.get(opts, :bridge_verify_poll_interval_ms) ||
-            Application.get_env(
-              :arbiter,
-              :sessions_bridge_verify_poll_interval_ms,
-              @default_bridge_verify_poll_interval_ms
-            )
-      ]
+      verify_opts = bridge_verify_opts(opts)
 
       Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn ->
-        case verify_fun.(session.config_dir, verify_opts) do
-          :ok ->
-            :ok
-
-          {:error, :bridge_unavailable} ->
-            Logger.warning(
-              "Arbiter.Sessions: remote control bridge never came up for #{session.id}"
-            )
-
-            broadcast_error(session.id, %{
-              code: "bridge_unavailable",
-              detail: "no bridge-session record within #{verify_opts[:timeout_ms]}ms"
-            })
-        end
+        handle_bridge_verification(
+          session,
+          verify_fun.(session.config_dir, verify_opts),
+          verify_opts
+        )
       end)
     end
 
     :ok
+  end
+
+  # `:bridge_verify_timeout_ms` / `:bridge_verify_poll_interval_ms` fall
+  # through to application config — same resolution `Provisioning`'s
+  # `agent_command/2` uses for `:sessions_agent_command` — so a caller
+  # that never sees `launch/1`'s opts (a LiveView `handle_event`) can
+  # still pin this down for a test without threading options through it.
+  defp bridge_verify_opts(opts) do
+    [
+      timeout_ms:
+        Keyword.get(opts, :bridge_verify_timeout_ms) ||
+          Application.get_env(
+            :arbiter,
+            :sessions_bridge_verify_timeout_ms,
+            @default_bridge_verify_timeout_ms
+          ),
+      poll_interval_ms:
+        Keyword.get(opts, :bridge_verify_poll_interval_ms) ||
+          Application.get_env(
+            :arbiter,
+            :sessions_bridge_verify_poll_interval_ms,
+            @default_bridge_verify_poll_interval_ms
+          )
+    ]
+  end
+
+  defp handle_bridge_verification(_session, :ok, _verify_opts), do: :ok
+
+  defp handle_bridge_verification(session, {:error, :bridge_unavailable}, verify_opts) do
+    Logger.warning("Arbiter.Sessions: remote control bridge never came up for #{session.id}")
+
+    case mark_bridge_unavailable(session) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Arbiter.Sessions: could not persist bridge_status for #{session.id}: #{inspect(reason)}"
+        )
+    end
+
+    broadcast_error(session.id, %{
+      code: "bridge_unavailable",
+      detail: "no bridge-session record within #{verify_opts[:timeout_ms]}ms"
+    })
   end
 
   defp summarize(out) when is_binary(out) do

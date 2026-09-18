@@ -68,6 +68,27 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       refute Map.has_key?(body, "warnings")
     end
 
+    # bd-1ozks5: the local assignee field is gone, but an existing coordinator
+    # script/prompt may still pass it — accept and ignore, with a warning,
+    # rather than failing the create.
+    test "accepts and ignores a deprecated `assignee` param, with a warning", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "still has assignee",
+          workspace_id: ws.id,
+          issue_type: "task",
+          assignee: "alice"
+        })
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "assignee")
+      assert [warning] = body["warnings"]
+      assert warning =~ "assignee"
+    end
+
     test "accepts and persists `difficulty` (0..5)", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/issues", %{
@@ -449,6 +470,33 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
 
+    # bd-1defgu: `arb issue show` was write-only for dependency edges — you
+    # could `arb dep add` one onto this task and never see it again short of
+    # opening the DB.
+    test "includes the issue's dependency edges", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show me", workspace_id: ws.id})
+      {:ok, other} = Ash.create(Issue, %{title: "the other one", workspace_id: ws.id})
+
+      {:ok, dep} =
+        Arbiter.Tasks.Dependencies.add(issue.id, other.id, :conflicts_with)
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert [row] = body["dependencies"]
+      assert row["id"] == dep.id
+      assert row["type"] == "conflicts_with"
+      assert row["to"]["id"] == other.id
+      assert row["to"]["title"] == "the other one"
+    end
+
+    test "dependencies is an empty list when the issue has no edges", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "lonely", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert body["dependencies"] == []
+    end
+
     # bd-3j4ch4 AC5: `arb issue show` renders the cost estimate, and this is
     # where it gets the numbers from.
     test "carries the cost estimate when the ledger has enough history", %{conn: conn, ws: ws} do
@@ -619,6 +667,22 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert body["pr_body"] == "## Summary\nWorker-authored writeup."
 
       assert Ash.get!(Issue, issue.id).pr_body == "## Summary\nWorker-authored writeup."
+    end
+
+    # bd-1ozks5: accept and ignore a deprecated `assignee` on update too.
+    test "accepts and ignores a deprecated `assignee` param, with a warning", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} = Ash.create(Issue, %{title: "before", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{title: "after", assignee: "bob"})
+
+      body = json_response(conn, 200)
+      assert body["title"] == "after"
+      refute Map.has_key?(body, "assignee")
+      assert [warning] = body["warnings"]
+      assert warning =~ "assignee"
     end
   end
 

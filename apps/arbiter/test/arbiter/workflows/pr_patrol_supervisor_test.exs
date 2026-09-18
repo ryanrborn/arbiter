@@ -126,12 +126,12 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
     end
   end
 
-  describe "start_patrol/2 — multi-repo workspace (leotech shape)" do
+  describe "start_patrol/2 — multi-repo workspace (acme shape)" do
     test "starts one patrol per repo, keyed by workspace_id:owner/repo" do
       # owner is set but repo is absent — the per-repo repo is derived from each
-      # repo checkout's origin remote, exactly the leotech jira+github shape.
-      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+      # repo checkout's origin remote, exactly the acme jira+github shape.
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -141,42 +141,42 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
             "merge" => %{
               "strategy" => "github",
               "config" => %{
-                "owner" => "leo-technologies-llc",
+                "owner" => "acme-corp",
                 "credentials_ref" => "env:GITHUB_TOKEN"
               }
             },
-            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
+            "repo_paths" => %{"apex_server" => repo_a, "apex_web" => repo_b}
           }
         })
 
-      open_pr_task!(ws, "leo-technologies-llc/verus_server#1")
-      open_pr_task!(ws, "leo-technologies-llc/verus_web#1")
+      open_pr_task!(ws, "acme-corp/apex_server#1")
+      open_pr_task!(ws, "acme-corp/apex_web#1")
 
       assert {:ok, _pid} = start(ws)
 
       assert keys_for_workspace(ws.id) ==
                Enum.sort([
-                 "#{ws.id}:leo-technologies-llc/verus_server",
-                 "#{ws.id}:leo-technologies-llc/verus_web"
+                 "#{ws.id}:acme-corp/apex_server",
+                 "#{ws.id}:acme-corp/apex_web"
                ])
 
       # Each patrol carries its own derived slug.
-      [{pid_a, _}] = Registry.lookup(@registry, "#{ws.id}:leo-technologies-llc/verus_server")
-      [{pid_b, _}] = Registry.lookup(@registry, "#{ws.id}:leo-technologies-llc/verus_web")
-      assert PRPatrol.state(pid_a).repo == "leo-technologies-llc/verus_server"
-      assert PRPatrol.state(pid_b).repo == "leo-technologies-llc/verus_web"
+      [{pid_a, _}] = Registry.lookup(@registry, "#{ws.id}:acme-corp/apex_server")
+      [{pid_b, _}] = Registry.lookup(@registry, "#{ws.id}:acme-corp/apex_web")
+      assert PRPatrol.state(pid_a).repo == "acme-corp/apex_server"
+      assert PRPatrol.state(pid_b).repo == "acme-corp/apex_web"
     end
 
     test "repos that resolve to the same repo collapse to a single patrol" do
-      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_server.git")
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_server.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "dedupe-#{System.unique_integer([:positive])}",
           prefix: "dd#{System.unique_integer([:positive])}",
           config: %{
-            "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo-technologies-llc"}},
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme-corp"}},
             "repo_paths" => %{"a" => repo_a, "b" => repo_b}
           }
         })
@@ -188,7 +188,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       # Collapsed to one repo → registered under the bare workspace id, exactly
       # like a single-repo workspace (the `length(repos) == 1` registry key).
       assert keys_for_workspace(ws.id) == [ws.id]
-      assert PRPatrol.state(pid).repo == "leo-technologies-llc/verus_server"
+      assert PRPatrol.state(pid).repo == "acme-corp/apex_server"
     end
   end
 
@@ -352,8 +352,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
     end
 
     test "returns all pids for a multi-repo workspace" do
-      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -362,14 +362,14 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           config: %{
             "merge" => %{
               "strategy" => "github",
-              "config" => %{"owner" => "leo-technologies-llc"}
+              "config" => %{"owner" => "acme-corp"}
             },
-            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
+            "repo_paths" => %{"apex_server" => repo_a, "apex_web" => repo_b}
           }
         })
 
-      open_pr_task!(ws, "leo-technologies-llc/verus_server#1")
-      open_pr_task!(ws, "leo-technologies-llc/verus_web#1")
+      open_pr_task!(ws, "acme-corp/apex_server#1")
+      open_pr_task!(ws, "acme-corp/apex_web#1")
 
       assert {:ok, _} = start(ws)
       pairs = PRPatrolSupervisor.whereis_all(ws.id)
@@ -378,8 +378,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
 
       assert keys ==
                Enum.sort([
-                 "#{ws.id}:leo-technologies-llc/verus_server",
-                 "#{ws.id}:leo-technologies-llc/verus_web"
+                 "#{ws.id}:acme-corp/apex_server",
+                 "#{ws.id}:acme-corp/apex_web"
                ])
     end
   end
@@ -422,25 +422,25 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
     end
 
     test "in a multi-repo workspace starts only the repo(s) with an open fleet PR" do
-      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "lazy-multi-#{System.unique_integer([:positive])}",
           prefix: "lm#{System.unique_integer([:positive])}",
           config: %{
-            "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo-technologies-llc"}},
-            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme-corp"}},
+            "repo_paths" => %{"apex_server" => repo_a, "apex_web" => repo_b}
           }
         })
 
-      # Only verus_server has an open fleet PR (qualified ref names its repo).
-      open_pr_task!(ws, "leo-technologies-llc/verus_server#1")
+      # Only apex_server has an open fleet PR (qualified ref names its repo).
+      open_pr_task!(ws, "acme-corp/apex_server#1")
 
       assert {:ok, _} = start(ws)
 
-      assert keys_for_workspace(ws.id) == ["#{ws.id}:leo-technologies-llc/verus_server"]
+      assert keys_for_workspace(ws.id) == ["#{ws.id}:acme-corp/apex_server"]
     end
   end
 

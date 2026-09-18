@@ -14,16 +14,16 @@ defmodule Arbiter.Mergers.PRTitleTest do
 
   describe "format/2 with nil workspace" do
     test "returns the raw task title unchanged" do
-      i = issue(%{title: "VS: fix something (VR-123)", tracker_ref: "VR-123"})
-      assert PRTitle.format(i, nil) == "VS: fix something (VR-123)"
+      i = issue(%{title: "VS: fix something (AX-123)", tracker_ref: "AX-123"})
+      assert PRTitle.format(i, nil) == "VS: fix something (AX-123)"
     end
   end
 
   describe "format/2 with raw workspace" do
     test "passes the title through unchanged" do
-      i = issue(%{title: "VS: fix something (VR-123)", tracker_ref: "VR-123"})
+      i = issue(%{title: "VS: fix something (AX-123)", tracker_ref: "AX-123"})
       ws = workspace_with_format("raw")
-      assert PRTitle.format(i, ws) == "VS: fix something (VR-123)"
+      assert PRTitle.format(i, ws) == "VS: fix something (AX-123)"
     end
   end
 
@@ -32,26 +32,26 @@ defmodule Arbiter.Mergers.PRTitleTest do
       i =
         issue(%{
           issue_type: :bug,
-          title: "VS: fix tenant_timezone (VR-17958)",
-          tracker_ref: "VR-17958"
+          title: "VS: fix tenant_timezone (AX-17958)",
+          tracker_ref: "AX-17958"
         })
 
       ws = workspace_with_format("conventional_commit")
-      assert PRTitle.format(i, ws) == "fix: [VR-17958] fix tenant_timezone"
+      assert PRTitle.format(i, ws) == "fix: [AX-17958] fix tenant_timezone"
     end
 
     test "feature with Jira tracker ref produces feat: [TICKET] desc" do
       i =
         issue(%{
           issue_type: :feature,
-          title: "VS: support new lea_reports object in conversational AI response (VR-17892)",
-          tracker_ref: "VR-17892"
+          title: "VS: support new lea_reports object in conversational AI response (AX-17892)",
+          tracker_ref: "AX-17892"
         })
 
       ws = workspace_with_format("conventional_commit")
 
       assert PRTitle.format(i, ws) ==
-               "feat: [VR-17892] support new lea_reports object in conversational AI response"
+               "feat: [AX-17892] support new lea_reports object in conversational AI response"
     end
 
     test "strips leading all-caps team prefix (VS:)" do
@@ -70,15 +70,15 @@ defmodule Arbiter.Mergers.PRTitleTest do
     end
 
     test "strips trailing (TICKET) parenthetical that matches tracker_ref" do
-      i = issue(%{issue_type: :chore, title: "clean up deps (VR-999)", tracker_ref: "VR-999"})
+      i = issue(%{issue_type: :chore, title: "clean up deps (AX-999)", tracker_ref: "AX-999"})
       ws = workspace_with_format("conventional_commit")
-      assert PRTitle.format(i, ws) == "chore: [VR-999] clean up deps"
+      assert PRTitle.format(i, ws) == "chore: [AX-999] clean up deps"
     end
 
     test "keeps trailing parenthetical when it does NOT match tracker_ref" do
-      i = issue(%{issue_type: :chore, title: "clean up deps (other)", tracker_ref: "VR-999"})
+      i = issue(%{issue_type: :chore, title: "clean up deps (other)", tracker_ref: "AX-999"})
       ws = workspace_with_format("conventional_commit")
-      assert PRTitle.format(i, ws) == "chore: [VR-999] clean up deps (other)"
+      assert PRTitle.format(i, ws) == "chore: [AX-999] clean up deps (other)"
     end
 
     test "no tracker_ref: omits bracket" do
@@ -97,8 +97,8 @@ defmodule Arbiter.Mergers.PRTitleTest do
       i =
         issue(%{
           issue_type: :feature,
-          title: "VS: CAI support new lea_reports object (VR-17892)",
-          tracker_ref: "VR-17892"
+          title: "VS: CAI support new lea_reports object (AX-17892)",
+          tracker_ref: "AX-17892"
         })
 
       ws = workspace_with_format("conventional_commit")

@@ -11,9 +11,9 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   `"workspace_id:owner/repo"`. The repo list is derived from the workspace's
   `repo_paths` map: each locally-checked-out repo's `origin` remote
   is resolved to an `"owner/repo"` slug via `RepoResolver`, the same mechanism
-  the worker dispatch path uses. This covers the leotech workspace shape, whose
-  repos are separate `leo-technologies-llc/*` repos that must each be patrolled
-  independently — without this, leotech (a jira-tracker + github-merger
+  the worker dispatch path uses. This covers the acme workspace shape, whose
+  repos are separate `acme-corp/*` repos that must each be patrolled
+  independently — without this, acme (a jira-tracker + github-merger
   workspace) got no patrol at all and Copilot review comments went unaddressed.
 
   Patrols are registered under `Arbiter.Workflows.PRPatrolRegistry`. Duplicate
@@ -357,7 +357,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   #     with each repo's "owner/repo" derived from its `origin` remote. The repo
   #     list comes from the workspace's repo_paths map — the same
   #     source the worker dispatch path resolves worktrees from. Used by
-  #     workspaces like leotech, whose repos are distinct leo-technologies-llc/*
+  #     workspaces like acme, whose repos are distinct acme-corp/*
   #     repos.
   # Pre-existing complexity 13 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new

@@ -4,9 +4,9 @@ defmodule Arbiter.Trackers.JiraTest do
   alias Arbiter.Trackers.Jira
   alias Arbiter.Trackers.Jira.{Config, Error}
 
-  @host "leotechnologies.atlassian.net"
-  @project "VR"
-  @ref "VR-17585"
+  @host "acme.atlassian.net"
+  @project "AX"
+  @ref "AX-17585"
   @env_var "GTE_JIRA_TEST_TOKEN"
 
   setup do
@@ -340,10 +340,10 @@ defmodule Arbiter.Trackers.JiraTest do
       assert {"Code Complete", ["51", "61"]} = Agent.get(agent, & &1)
     end
 
-    test "shipped defaults dispatch a Task out of Backlog (VR replay, bd-bwwkvr)" do
+    test "shipped defaults dispatch a Task out of Backlog (AX replay, bd-bwwkvr)" do
       # End-to-end replay of the reported failure: no workspace transition_graph
       # override, so the SHIPPED default graph is in play, and the live
-      # /transitions payloads are the Task-flavoured ones observed on VR-18639.
+      # /transitions payloads are the Task-flavoured ones observed on AX-18639.
       # Before the destination-status fix this halted in Backlog.
       {:ok, agent} = Agent.start_link(fn -> {"Backlog", []} end)
       on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
@@ -852,8 +852,8 @@ defmodule Arbiter.Trackers.JiraTest do
 
   describe "add_remote_link/3" do
     test "POSTs a remote link with the url, title, and an idempotent globalId" do
-      url = "https://github.com/leo/voice-id-core/pull/42"
-      title = "PR leo/voice-id-core#42 (task bd-abc)"
+      url = "https://github.com/acme/voice-id-core/pull/42"
+      title = "PR acme/voice-id-core#42 (task bd-abc)"
 
       stub(fn conn ->
         assert conn.method == "POST"
@@ -899,7 +899,7 @@ defmodule Arbiter.Trackers.JiraTest do
   end
 
   describe "parse_ref/1" do
-    test "accepts \"VR-17585\" when project_key matches the active workspace" do
+    test "accepts \"AX-17585\" when project_key matches the active workspace" do
       assert Jira.parse_ref(@ref) == {:ok, @ref}
     end
 
@@ -912,8 +912,8 @@ defmodule Arbiter.Trackers.JiraTest do
     end
 
     test "extracts the key from a full Atlassian URL" do
-      url = "https://leotechnologies.atlassian.net/browse/VR-17585"
-      assert Jira.parse_ref(url) == {:ok, "VR-17585"}
+      url = "https://acme.atlassian.net/browse/AX-17585"
+      assert Jira.parse_ref(url) == {:ok, "AX-17585"}
     end
 
     test "returns :error for unrecognised strings" do
@@ -972,7 +972,7 @@ defmodule Arbiter.Trackers.JiraTest do
         |> Req.Test.json(%{"id" => "10100"})
       end)
 
-      assert :ok = Jira.add_comment(@ref, "Opened PR https://github.com/leo/x/pull/9")
+      assert :ok = Jira.add_comment(@ref, "Opened PR https://github.com/acme/x/pull/9")
     end
 
     test "propagates an HTTP error" do
@@ -1015,7 +1015,7 @@ defmodule Arbiter.Trackers.JiraTest do
         Req.Test.json(conn, %{
           "issues" => [
             %{
-              "key" => "VR-42",
+              "key" => "AX-42",
               "fields" => %{
                 "summary" => "Open ticket",
                 "assignee" => %{"accountId" => "account-123"},
@@ -1027,7 +1027,7 @@ defmodule Arbiter.Trackers.JiraTest do
       end)
 
       assert {:ok, [summary]} = Jira.list_open([])
-      assert summary.ref == "VR-42"
+      assert summary.ref == "AX-42"
       assert summary.title == "Open ticket"
       assert summary.status == :open
       assert summary.assignees == ["account-123"]
@@ -1042,19 +1042,19 @@ defmodule Arbiter.Trackers.JiraTest do
           nil ->
             # Page 1 hands back a token for page 2.
             Req.Test.json(conn, %{
-              "issues" => [issue("VR-1")],
+              "issues" => [issue("AX-1")],
               "nextPageToken" => "tok-2"
             })
 
           "tok-2" ->
             # Page 2 is the last page (no token).
-            Req.Test.json(conn, %{"issues" => [issue("VR-2")]})
+            Req.Test.json(conn, %{"issues" => [issue("AX-2")]})
         end
       end)
 
       assert {:ok, [first, second]} = Jira.list_open([])
-      assert first.ref == "VR-1"
-      assert second.ref == "VR-2"
+      assert first.ref == "AX-1"
+      assert second.ref == "AX-2"
     end
 
     test "accepts an explicit assignee id" do
@@ -1107,10 +1107,10 @@ defmodule Arbiter.Trackers.JiraTest do
 
         conn
         |> Plug.Conn.put_status(201)
-        |> Req.Test.json(%{"id" => "10042", "key" => "VR-999"})
+        |> Req.Test.json(%{"id" => "10042", "key" => "AX-999"})
       end)
 
-      assert {:ok, "VR-999"} =
+      assert {:ok, "AX-999"} =
                Jira.create(%{
                  title: "Wire the thing",
                  description: "Do the **thing**.",
@@ -1125,10 +1125,10 @@ defmodule Arbiter.Trackers.JiraTest do
 
         conn
         |> Plug.Conn.put_status(201)
-        |> Req.Test.json(%{"key" => "VR-1000"})
+        |> Req.Test.json(%{"key" => "AX-1000"})
       end)
 
-      assert {:ok, "VR-1000"} = Jira.create(%{title: "No type"})
+      assert {:ok, "AX-1000"} = Jira.create(%{title: "No type"})
     end
 
     test "requires a non-empty title" do
@@ -1372,21 +1372,21 @@ defmodule Arbiter.Trackers.JiraTest do
         |> Req.Test.json(%{
           "issues" => [
             %{
-              "key" => "VR-10",
+              "key" => "AX-10",
               "fields" => %{"summary" => "Fix the Thing"}
             },
             %{
-              "key" => "VR-11",
+              "key" => "AX-11",
               "fields" => %{"summary" => "Fix the Thing and more"}
             }
           ]
         })
       end)
 
-      assert {:ok, [%{ref: "VR-10", title: "Fix the Thing", url: url}]} =
+      assert {:ok, [%{ref: "AX-10", title: "Fix the Thing", url: url}]} =
                Jira.search_by_title("fix the thing")
 
-      assert url == "https://#{@host}/browse/VR-10"
+      assert url == "https://#{@host}/browse/AX-10"
     end
 
     test "returns empty list when no exact match" do
@@ -1395,7 +1395,7 @@ defmodule Arbiter.Trackers.JiraTest do
         |> Plug.Conn.put_status(200)
         |> Req.Test.json(%{
           "issues" => [
-            %{"key" => "VR-20", "fields" => %{"summary" => "Something else entirely"}}
+            %{"key" => "AX-20", "fields" => %{"summary" => "Something else entirely"}}
           ]
         })
       end)

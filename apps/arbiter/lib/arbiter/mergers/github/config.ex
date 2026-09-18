@@ -31,8 +31,8 @@ defmodule Arbiter.Mergers.Github.Config do
 
   Both `owner` and `repo` are optional: a workspace can omit both and let the
   adapter derive them per repo from each repo's `origin` remote via
-  `Arbiter.Mergers.Github.RepoResolver` (the leotech workspace does this for
-  all four of its `leo-technologies-llc/*` repos). A single-repo workspace may
+  `Arbiter.Mergers.Github.RepoResolver` (the acme workspace does this for
+  all four of its `acme-corp/*` repos). A single-repo workspace may
   still pin `repo` here for the legacy bare-ref shape, but this is deprecated —
   repo is a per-repo concern.
 

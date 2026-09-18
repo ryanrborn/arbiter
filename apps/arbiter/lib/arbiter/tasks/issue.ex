@@ -5,7 +5,7 @@ defmodule Arbiter.Tasks.Issue do
   optional external-tracker reference.
 
   IDs are human-friendly strings: `"{workspace.prefix}-{short_id}"`, e.g. `"bd-3o8"`,
-  `"verus-VR17575"`. The short_id is a 6-char base36 random; collisions are
+  `"apex-AX17575"`. The short_id is a 6-char base36 random; collisions are
   negligible at our scale.
 
   ## Status FSM
@@ -114,7 +114,6 @@ defmodule Arbiter.Tasks.Issue do
         :difficulty,
         :issue_type,
         :auto_close,
-        :assignee,
         :tracker_type,
         :tracker_ref,
         :tracker_context_type,
@@ -192,7 +191,6 @@ defmodule Arbiter.Tasks.Issue do
         :issue_type,
         :auto_close,
         :verify_after_deploy,
-        :assignee,
         :tracker_type,
         :tracker_ref,
         :tracker_context_type,
@@ -489,10 +487,23 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria, []}
       change set_attribute(:refined, true)
 
-      change after_action(fn _, issue, _ ->
-               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
-               {:ok, issue}
-             end)
+      # `after_transaction` (post-commit), not `after_action`: bd-cvfjms's
+      # `Arbiter.Sessions.RefineLifecycle` reacts to this broadcast from a
+      # separate process/connection to end the bound refine session, and
+      # writes a fallback summary onto this same issue row if the agent left
+      # `notes` blank. Reading (and writing) that row from a separate
+      # connection before this transaction commits is exactly the race
+      # `:close`'s own `after_transaction` above exists to avoid.
+      change fn changeset, _context ->
+        Ash.Changeset.after_transaction(changeset, fn
+          _changeset, {:ok, issue} ->
+            Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+            {:ok, issue}
+
+          _changeset, error ->
+            error
+        end)
+      end
     end
   end
 
@@ -520,7 +531,7 @@ defmodule Arbiter.Tasks.Issue do
       allow_nil? false
       public? true
       # Pattern allows uppercase to accommodate phase markers (gte-P1),
-      # Verus-style mixed-case IDs from the Dolt import, AND legacy IDs
+      # Apex-style mixed-case IDs from the Dolt import, AND legacy IDs
       # with underscores or multiple hyphens (e.g. `ac-access_control-merge_queue`,
       # `vs-server-worker-chrome`). Without that tolerance,
       # AshPaperTrail's Version row creation rejects those IDs and any
@@ -670,11 +681,6 @@ defmodule Arbiter.Tasks.Issue do
       """
     end
 
-    attribute :assignee, :string do
-      public? true
-      constraints max_length: 255, trim?: true
-    end
-
     attribute :tracker_type, :atom do
       allow_nil? false
       public? true
@@ -685,7 +691,7 @@ defmodule Arbiter.Tasks.Issue do
     attribute :tracker_ref, :string do
       public? true
       constraints max_length: 255, trim?: true
-      description "External tracker's ID for this task (e.g. \"VR-17585\" for Jira)."
+      description "External tracker's ID for this task (e.g. \"AX-17585\" for Jira)."
     end
 
     attribute :tracker_context_type, :atom do
@@ -707,7 +713,7 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 255, trim?: true
 
       description """
-      Tracker issue ref for context-only use on a review task (e.g. \"VR-18004\").
+      Tracker issue ref for context-only use on a review task (e.g. \"AX-18004\").
       Paired with `tracker_context_type`. The referenced ticket's description is
       fetched at dispatch and injected into the reviewer's prompt. No assignment
       check, no write-back (no status transition, no assignee change).

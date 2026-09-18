@@ -71,8 +71,8 @@ defmodule Arbiter.Tasks.RepoConfigTest do
     end
 
     test "falls back to a normalized (underscore/hyphen-insensitive) match" do
-      map = %{"verus_server" => "/home/dev/verus_server"}
-      assert RepoConfig.find_path(map, "verus-server") == "/home/dev/verus_server"
+      map = %{"apex_server" => "/home/dev/apex_server"}
+      assert RepoConfig.find_path(map, "apex-server") == "/home/dev/apex_server"
     end
 
     test "returns nil when the repo isn't registered" do
@@ -89,8 +89,8 @@ defmodule Arbiter.Tasks.RepoConfigTest do
     end
 
     test "matches a forge-qualified slug against a normalized bare key" do
-      map = %{"verus_server" => "/home/dev/verus_server"}
-      assert RepoConfig.find_path(map, "some-org/verus-server") == "/home/dev/verus_server"
+      map = %{"apex_server" => "/home/dev/apex_server"}
+      assert RepoConfig.find_path(map, "some-org/apex-server") == "/home/dev/apex_server"
     end
 
     test "does not match a slug whose owner segment happens to equal the key" do
@@ -105,13 +105,13 @@ defmodule Arbiter.Tasks.RepoConfigTest do
     end
 
     test "returns the configured spelling on a normalized match" do
-      map = %{"verus_server" => "/home/dev/verus_server"}
-      assert RepoConfig.find_key(map, "verus-server") == "verus_server"
+      map = %{"apex_server" => "/home/dev/apex_server"}
+      assert RepoConfig.find_key(map, "apex-server") == "apex_server"
     end
 
     test "returns the bare key a forge-qualified slug matched" do
-      map = %{"verus_server" => "/home/dev/verus_server"}
-      assert RepoConfig.find_key(map, "some-org/verus-server") == "verus_server"
+      map = %{"apex_server" => "/home/dev/apex_server"}
+      assert RepoConfig.find_key(map, "some-org/apex-server") == "apex_server"
     end
 
     # The reason this exists rather than mapping `find_entry/2`'s result back

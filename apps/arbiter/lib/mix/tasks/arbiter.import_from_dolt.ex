@@ -48,8 +48,8 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
     "access_control" => "ac",
     "admin_server" => "ad",
     "auth_server" => "as",
-    "verus_client" => "vc",
-    "voice_biometrics" => "vb"
+    "apex_client" => "vc",
+    "apex_audio" => "vb"
   }
 
   @impl Mix.Task

@@ -596,7 +596,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
   describe "gated forward transition on a jira-tracked task" do
     @jira_env "GTE_SYNC_TRACKER_JIRA_TOKEN"
-    @jira_ref "VR-17585"
+    @jira_ref "AX-17585"
 
     defp jira_workspace do
       {:ok, ws} =
@@ -607,8 +607,8 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
             "tracker" => %{
               "type" => "jira",
               "config" => %{
-                "host" => "leotechnologies.atlassian.net",
-                "project_key" => "VR",
+                "host" => "acme.atlassian.net",
+                "project_key" => "AX",
                 "credentials_ref" => "env:#{@jira_env}",
                 "email" => "tester@example.com",
                 # closed -> target STATUS "Code Complete" (reached single-hop

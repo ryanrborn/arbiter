@@ -11,11 +11,11 @@ defmodule Arbiter.Mergers.PRTitle do
       type(scope): [TICKET] description   (if scope is derived)
 
   - `type` is derived from `issue.issue_type` (see @commit_types).
-  - `[TICKET]` is the task's `tracker_ref` (e.g. `VR-17892`) when present.
+  - `[TICKET]` is the task's `tracker_ref` (e.g. `AX-17892`) when present.
   - `description` is the raw title with internal-prefix noise stripped:
     - Leading all-caps team prefix: e.g. `VS: `, `AC: `.
     - Trailing tracker parenthetical that duplicates the bracket ticket:
-      e.g. `(VR-17892)` is removed once the ticket appears in `[VR-17892]`.
+      e.g. `(AX-17892)` is removed once the ticket appears in `[AX-17892]`.
 
   ## Config
 
@@ -71,7 +71,7 @@ defmodule Arbiter.Mergers.PRTitle do
     end
   end
 
-  # Strip leading all-caps team prefix ("VS: ", "AC: ", "LEO: ", …) and
+  # Strip leading all-caps team prefix ("VS: ", "AC: ", "AX: ", …) and
   # strip the trailing tracker parenthetical that duplicates the bracket ticket.
   defp clean_description(title, tracker_ref) do
     title

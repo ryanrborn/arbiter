@@ -77,8 +77,15 @@ defmodule Arbiter.Usage do
           required(:group) => term(),
           required(:rows) => non_neg_integer(),
           required(:total_cost_usd) => float(),
+          # bd-481sz7: false when every row in the group carries `cost_usd:
+          # nil` (agy/Antigravity permanently does — a subscription metered
+          # by quota %, not a priced API). Distinguishes "we know this cost
+          # $0.00" from "we cannot price this at all" — callers must render
+          # the latter as n/a, never as a dollar figure.
+          required(:cost_known) => boolean(),
           required(:tokens_in) => non_neg_integer(),
           required(:tokens_out) => non_neg_integer(),
+          required(:thinking_tokens) => non_neg_integer(),
           required(:cache_creation_tokens) => non_neg_integer(),
           required(:cache_read_tokens) => non_neg_integer(),
           required(:duration_ms) => non_neg_integer(),
@@ -366,28 +373,40 @@ defmodule Arbiter.Usage do
       group: group,
       rows: 0,
       total_cost_usd: 0.0,
+      cost_known: false,
       tokens_in: 0,
       tokens_out: 0,
+      thinking_tokens: 0,
       cache_creation_tokens: 0,
       cache_read_tokens: 0,
       duration_ms: 0,
       estimated: false
     }
 
-    Enum.reduce(events, init, fn ev, acc ->
-      %{
-        acc
-        | rows: acc.rows + 1,
-          total_cost_usd: acc.total_cost_usd + (ev.cost_usd || 0.0),
-          tokens_in: acc.tokens_in + (ev.tokens_in || 0),
-          tokens_out: acc.tokens_out + (ev.tokens_out || 0),
-          cache_creation_tokens: acc.cache_creation_tokens + (ev.cache_creation_tokens || 0),
-          cache_read_tokens: acc.cache_read_tokens + (ev.cache_read_tokens || 0),
-          duration_ms: acc.duration_ms + (ev.duration_ms || 0),
-          estimated: acc.estimated or estimated_event?(ev)
-      }
-    end)
+    Enum.reduce(events, init, &merge_event/2)
   end
+
+  defp merge_event(ev, acc) do
+    %{
+      acc
+      | rows: acc.rows + 1,
+        total_cost_usd: add(acc.total_cost_usd, ev.cost_usd),
+        cost_known: acc.cost_known || known?(ev.cost_usd),
+        tokens_in: add(acc.tokens_in, ev.tokens_in),
+        tokens_out: add(acc.tokens_out, ev.tokens_out),
+        thinking_tokens: add(acc.thinking_tokens, ev.thinking_tokens),
+        cache_creation_tokens: add(acc.cache_creation_tokens, ev.cache_creation_tokens),
+        cache_read_tokens: add(acc.cache_read_tokens, ev.cache_read_tokens),
+        duration_ms: add(acc.duration_ms, ev.duration_ms),
+        estimated: acc.estimated || estimated_event?(ev)
+    }
+  end
+
+  defp add(total, nil), do: total
+  defp add(total, n), do: total + n
+
+  defp known?(nil), do: false
+  defp known?(_), do: true
 
   # `Sessions.UsageIngest` stamps `raw["arb_usage_source"]["cost_source"]`
   # with the same `:cost_state | :estimated | none` provenance

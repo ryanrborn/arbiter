@@ -449,7 +449,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   ## Examples
 
       <.toast>Worker dispatched to <span class="font-mono">bd-3o8mq1</span></.toast>
-      <.toast tone="error" action="retry">Upstream close failed — ticket VR-17585 still open</.toast>
+      <.toast tone="error" action="retry">Upstream close failed — ticket AX-17585 still open</.toast>
       <.toast tone="attention" dismiss_key="">Quota pacing to exhaust before reset</.toast>
       <.toast tone="live">Socket reconnected</.toast>
 

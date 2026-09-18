@@ -77,11 +77,41 @@ defmodule ArbiterWeb.SessionDockLive do
   everything else in that payload, and a pane rebuilt frozen opens no socket at
   all — it is painted from the kept text and says the styling is gone.
 
-  This is the one thing the dock cannot serve alone. A session that ended in a
-  *previous* browser session has no scrollback here to show and none to fetch
-  until transcript persistence lands (bd-5pelo2, phase 9). Its window says so
-  and points at `/sessions`, rather than rendering an empty terminal that reads
-  like a live one with nothing on it: the two cases are named, never blurred.
+  ## Windows whose session ended before this browser session (bd-3tf4oo)
+
+  A frozen pane is scrollback this browser still holds. A session that ended in
+  a *previous* browser session has none — and used to get an empty panel for it
+  (#1818). It now gets the **persisted transcript**: phase 9's raw capture
+  (`Arbiter.Sessions.Transcript`) replayed into the same xterm, read-only.
+
+  The replay is not a second viewer. `assign_transcript/1` asks
+  `Arbiter.Sessions.TranscriptReplay` whether there is a file; if there is, the
+  window mounts the *same* `.SessionTerminal` hook with `data-transcript`, the
+  hook builds the *same* `SessionStream` with `mode: "transcript"`, and the
+  server replays the file's tail as the *same* `snapshot` event a live attach
+  sends (`ArbiterWeb.SessionChannel`). One channel, one renderer, one repaint
+  path; what differs is the join params and that the stream hangs up once the
+  bytes are on screen.
+
+  Three things keep it honest:
+
+    * It is never live. No status strip is rendered for it (that strip is the
+      live HUD), the pane is read-only from its first frame, the channel
+      refuses stdin/resize/redraw/kill with `read_only`, and the client does
+      not reconnect — an ended session has nothing to reconnect to.
+    * It says what it is showing. A transcript over
+      `TranscriptReplay.max_bytes/0` is replayed as a tail, and the window's
+      chrome says "showing last N of M" and links the whole file
+      (`ArbiterWeb.SessionTranscriptController`). Note the replayed bytes were
+      laid out by the pane at *its* geometry, not this window's, which is the
+      other reason the chrome says "transcript" rather than passing it off as a
+      live screen.
+    * When there is nothing to replay it says which nothing it is:
+      `retention_deleted`, `never_captured`, `empty`, or `loopback_only` — and
+      links the archived session JSONL when one exists. Never a blank terminal.
+
+  A frozen pane still wins over a replay while it exists: it holds the real
+  screen, styling and all, and the file holds the same bytes.
 
   Nothing about the transport changed. `ArbiterWeb.SessionSocket`'s topic was
   already keyed to the session id rather than to a LiveView process
@@ -124,7 +154,10 @@ defmodule ArbiterWeb.SessionDockLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Sessions
+  alias Arbiter.Sessions.BridgeVerification
   alias Arbiter.Sessions.DisplayName
+  alias Arbiter.Sessions.Transcript
+  alias Arbiter.Sessions.TranscriptReplay
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.SessionIndexLive
   alias ArbiterWeb.SessionUsage
@@ -151,6 +184,14 @@ defmodule ArbiterWeb.SessionDockLive do
   # catches the next sweep". The timer only exists while the panel does.
   @usage_refresh_ms 30_000
 
+  # The expanded window's size presets (bd-covojz). Three, not a drag handle:
+  # the epic (bd-1hdg5b) rejected free-floating windows partly because a
+  # continuous drag-resize is the worst case for terminal refit, and each of
+  # these is a single discrete geometry change phase 2's refit path already
+  # handles. `"compact"` is today's bottom-docked window and the default.
+  @sizes ~w(compact side max)
+  @default_size "compact"
+
   @impl true
   def mount(_params, session, socket) do
     if connected?(socket) do
@@ -162,6 +203,17 @@ defmodule ArbiterWeb.SessionDockLive do
      |> assign(:roster_open?, false)
      |> assign(:open_ids, [])
      |> assign(:expanded_id, nil)
+     # The per-session size preset (bd-covojz), keyed by session id. Like
+     # `open_ids` it is a *browser* preference the client hands back on
+     # `restore`, so a design session reopens as a side panel and a quick one
+     # stays Compact. Entries are only kept for open windows.
+     |> assign(:sizes, %{})
+     # The client's answer to "does a side panel actually fit here?". Only it
+     # knows the viewport and the pane's cell, so it measures and says so; this
+     # is what turns a Side panel into a Maximized one on a narrow screen, with
+     # the title bar saying why. Never a rewrite of the operator's choice —
+     # the preference stays `"side"` and comes back when there is room.
+     |> assign(:size_fallback?, false)
      |> assign(:exited, MapSet.new())
      # Windows whose pane is mounted but whose session has since ended: the
      # xterm stays, read-only, holding the scrollback it had when the agent
@@ -241,7 +293,40 @@ defmodule ArbiterWeb.SessionDockLive do
     socket =
       if expanded_id, do: expand_window(socket, expanded_id), else: collapse_window(socket)
 
-    {:noreply, socket |> assign(:open_ids, open_ids) |> assign(:frozen, frozen) |> persist()}
+    {:noreply,
+     socket
+     |> assign(:open_ids, open_ids)
+     |> assign(:frozen, frozen)
+     |> assign(:sizes, restored_sizes(params, open_ids))
+     |> persist()}
+  end
+
+  # The size preset of the expanded window (bd-covojz). A discrete geometry
+  # change, so the pane is told once, after the layout has settled — which is
+  # `persist/1`'s `session-dock:size` push and the terminal hook's `reclaim`,
+  # phase 2's one refit path rather than a second one.
+  #
+  # A `size_fallback?` left over from a narrow viewport is cleared here: the
+  # claim was about the *previous* size, and the client re-measures and says so
+  # again if it still holds.
+  def handle_event("set_size", %{"id" => id, "size" => size}, socket) do
+    if id in socket.assigns.open_ids and size in @sizes do
+      {:noreply,
+       socket
+       |> assign(:sizes, Map.put(socket.assigns.sizes, id, size))
+       |> assign(:size_fallback?, false)
+       |> persist()}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # "This viewport cannot fit a usable page *and* 80 columns" — the one part of
+  # the size decision the server cannot make, since it knows neither the
+  # viewport nor the pane's measured cell. It only ever means "render the
+  # Maximized geometry instead"; it never edits the stored preference.
+  def handle_event("size_fallback", %{"fallback" => fallback}, socket) do
+    {:noreply, assign(socket, :size_fallback?, fallback == true)}
   end
 
   def handle_event("toggle_roster", _params, socket) do
@@ -299,6 +384,7 @@ defmodule ArbiterWeb.SessionDockLive do
         {:noreply,
          socket
          |> assign(:open_ids, open_ids)
+         |> prune_sizes(open_ids)
          |> expand_window(session.id)
          |> assign(:launch_open?, false)
          |> assign(:launch_error, nil)
@@ -319,7 +405,7 @@ defmodule ArbiterWeb.SessionDockLive do
   end
 
   def handle_event("open", %{"id" => id}, socket) do
-    socket = load_sessions(socket)
+    socket = socket |> load_sessions() |> recheck_bridge(id)
 
     if Enum.any?(socket.assigns.sessions, &(&1.id == id)) do
       open_ids = open_window_ids(socket.assigns.open_ids, id)
@@ -327,6 +413,7 @@ defmodule ArbiterWeb.SessionDockLive do
       {:noreply,
        socket
        |> assign(:open_ids, open_ids)
+       |> prune_sizes(open_ids)
        |> expand_window(id)
        |> assign(:roster_open?, false)
        |> persist()}
@@ -503,6 +590,9 @@ defmodule ArbiterWeb.SessionDockLive do
      # (bd-a292yj): the final scrollback is thrown out by an explicit act,
      # rather than by the session merely having ended.
      |> assign(:frozen, MapSet.delete(socket.assigns.frozen, id))
+     # ...and so does its size preset. Re-opening it later is a new window,
+     # and a new window is Compact (bd-covojz).
+     |> assign(:sizes, Map.delete(socket.assigns.sizes, id))
      |> close_menu()
      |> then(&if &1.assigns.info_id == id, do: close_info(&1), else: &1)
      |> push_event("session-dock:forget", %{id: id})
@@ -516,6 +606,33 @@ defmodule ArbiterWeb.SessionDockLive do
   @impl true
   def handle_info({:session_ended, session_id}, socket) do
     {:noreply, socket |> freeze_pane(session_id) |> load_sessions()}
+  end
+
+  # Another view — the issue detail page's Refine button, a board card's —
+  # asking for a session to be put on screen here (`Sessions.request_open/1`,
+  # bd-1lszsc). This is the only way into the dock from a process that is not
+  # the dock: it is a sticky nested LiveView, so the page that rendered it
+  # holds no handle on it.
+  #
+  # Treated exactly like a click on that session's roster row, which is what it
+  # is: re-read (the session may have been launched a millisecond ago and have
+  # no lifecycle broadcast of its own), validate the id against what exists,
+  # then open and expand. An id for a session that is gone is dropped in
+  # silence — the requester reports its own failures, and a dock that popped an
+  # error for a message it merely overheard would be wrong on every other tab.
+  def handle_info({:session_open_requested, session_id}, socket) do
+    socket = load_sessions(socket)
+
+    if Enum.any?(socket.assigns.sessions, &(&1.id == session_id)) do
+      {:noreply,
+       socket
+       |> assign(:open_ids, open_window_ids(socket.assigns.open_ids, session_id))
+       |> expand_window(session_id)
+       |> assign(:roster_open?, false)
+       |> persist()}
+    else
+      {:noreply, socket}
+    end
   end
 
   # Nothing mounted a `.SessionTerminal` in time. The likeliest cause has no
@@ -546,6 +663,28 @@ defmodule ArbiterWeb.SessionDockLive do
 
   # -- state ------------------------------------------------------------------
 
+  # bd-cdretj round 2: `mark_bridge_unavailable` is a one-way durable flag —
+  # nothing clears it once written, so an operator who retries
+  # `/remote-control` by hand and gets a working bridge is met with a badge
+  # that keeps insisting it's still broken. Opening the window is the one
+  # moment a client is guaranteed to be about to look at this session, so
+  # it's also the cheapest place to re-run the same one-shot check
+  # `BridgeVerification.verify/2` polls with and clear the flag if it now
+  # finds a bridge.
+  defp recheck_bridge(socket, id) do
+    session = Enum.find(socket.assigns.sessions, &(&1.id == id))
+
+    if session && session.remote_control && session.bridge_status == :unavailable &&
+         BridgeVerification.present?(session.config_dir) do
+      case Sessions.mark_bridge_available(session) do
+        {:ok, _updated} -> load_sessions(socket)
+        {:error, _reason} -> socket
+      end
+    else
+      socket
+    end
+  end
+
   defp load_sessions(socket) do
     sessions = Sessions.list()
     by_id = Map.new(sessions, &{&1.id, &1})
@@ -566,6 +705,13 @@ defmodule ArbiterWeb.SessionDockLive do
     (open_ids ++ [id]) |> Enum.uniq() |> Enum.take(-@max_open)
   end
 
+  # A window evicted at the cap is as gone as a dismissed one, so its size
+  # preset goes with it rather than lingering to surprise the next time that
+  # session is opened.
+  defp prune_sizes(socket, open_ids) do
+    assign(socket, :sizes, Map.take(socket.assigns.sizes, open_ids))
+  end
+
   # Expanding is what mounts a terminal, so it is also what re-arms the watch
   # for one that never connects.
   defp expand_window(socket, id) do
@@ -573,6 +719,10 @@ defmodule ArbiterWeb.SessionDockLive do
 
     socket
     |> assign(:expanded_id, id)
+    # The narrow-viewport claim was about the window that was expanded a moment
+    # ago. The client re-measures on every `session-dock:size` and says so
+    # again if it still holds (bd-covojz).
+    |> assign(:size_fallback?, false)
     |> assign(:terminal_live?, false)
     |> assign(:terminal_stalled?, false)
     |> close_menu()
@@ -581,6 +731,7 @@ defmodule ArbiterWeb.SessionDockLive do
   defp collapse_window(socket) do
     socket
     |> assign(:expanded_id, nil)
+    |> assign(:size_fallback?, false)
     |> assign(:terminal_live?, false)
     |> assign(:terminal_stalled?, false)
     |> close_menu()
@@ -668,10 +819,87 @@ defmodule ArbiterWeb.SessionDockLive do
   end
 
   defp persist(socket) do
-    push_event(socket, "session-dock:persist", %{
+    socket
+    |> push_event("session-dock:persist", %{
       open: socket.assigns.open_ids,
-      expanded: socket.assigns.expanded_id
+      expanded: socket.assigns.expanded_id,
+      sizes: socket.assigns.sizes
     })
+    # Said separately from the storage write because it has a second audience:
+    # the *terminal* hook listens for it too and answers with `reclaim()`, which
+    # is phase 2's forced refit — fit after the layout settles, send cols/rows
+    # to the pane, redraw when the geometry moved. The dock cannot reach into
+    # the pane, so a size change is announced rather than applied.
+    |> push_event("session-dock:size", %{
+      id: socket.assigns.expanded_id,
+      size: requested_size(socket.assigns)
+    })
+  end
+
+  # Which size the *expanded* window is asking for. Nothing expanded is
+  # `"compact"`: there is no panel, so the page owes it no room.
+  defp requested_size(%{expanded_id: nil}), do: @default_size
+
+  defp requested_size(%{expanded_id: id, sizes: sizes}),
+    do: Map.get(sizes, id, @default_size)
+
+  # What actually gets rendered, which is the requested size except when the
+  # client has reported that a side panel does not fit here.
+  defp effective_size("side", true), do: "max"
+  defp effective_size(size, _fallback?), do: size
+
+  # Same treatment as every other half of a `restore` payload: storage holds
+  # whatever a previous version of this code, a half-written write or a
+  # devtools console left there. An entry has to name an open window and one of
+  # the three presets, or it is not a size.
+  defp restored_sizes(params, open_ids) do
+    case Map.get(params, "sizes") do
+      sizes when is_map(sizes) ->
+        for id <- open_ids,
+            size = Map.get(sizes, id),
+            size in @sizes,
+            size != @default_size,
+            into: %{},
+            do: {id, size}
+
+      _other ->
+        %{}
+    end
+  end
+
+  # The title-bar control's three options, in the order they widen.
+  defp size_presets do
+    [
+      {"compact", "Compact", "Compact — docked to the bottom of the page"},
+      {"side", "Side", "Side panel — docked right at full height, page still readable"},
+      {"max", "Max", "Maximized — nearly the whole page"}
+    ]
+  end
+
+  # The geometry of one window, by preset. Collapsed windows are a strip of
+  # title bars and have no size of their own.
+  #
+  # Side panel and Maximized leave the dock's flex row entirely (`fixed`), so
+  # the strip below keeps the roster and every other window's title bar —
+  # acceptance 6 — while the expanded window's own title bar travels with the
+  # panel it controls. Both stop at the strip rather than covering it.
+  #
+  # "Stops at the strip" is about *space*, not about paint order: a `fixed`
+  # window has no z-index of its own but is still a positioned descendant, so
+  # inside `#session-dock-root`'s stacking context it paints over anything
+  # in-flow below it. The roster's panels open upward into exactly the band a
+  # Maximized window covers, which is why `roster/1` carries `relative z-40`.
+  defp window_size_class(false, _size), do: "basis-[11rem] max-w-[11rem] min-w-[5rem]"
+
+  defp window_size_class(true, "compact"), do: "basis-[44rem] max-w-[44rem] min-w-[16rem]"
+
+  defp window_size_class(true, "side") do
+    "fixed top-[var(--nav-height)] right-0 bottom-[var(--session-dock-strip-height)] " <>
+      "w-[var(--session-dock-side-width)]"
+  end
+
+  defp window_size_class(true, "max") do
+    "fixed top-[var(--nav-height)] left-3 right-3 bottom-[var(--session-dock-strip-height)]"
   end
 
   defp open_sessions(assigns) do
@@ -687,7 +915,10 @@ defmodule ArbiterWeb.SessionDockLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :open_sessions, open_sessions(assigns))
+    assigns =
+      assigns
+      |> assign(:open_sessions, open_sessions(assigns))
+      |> assign(:default_size, @default_size)
 
     ~H"""
     <div
@@ -750,6 +981,8 @@ defmodule ArbiterWeb.SessionDockLive do
         menu_open?={@menu_id == session.id}
         info_open?={@info_id == session.id}
         usage={@info_usage}
+        size={Map.get(@sizes, session.id, @default_size)}
+        size_fallback?={@expanded_id == session.id and @size_fallback?}
       />
     </div>
 
@@ -781,7 +1014,9 @@ defmodule ArbiterWeb.SessionDockLive do
         live: "live",
         reconnecting: "reconnecting…",
         detached: "detached",
-        ended: "agent exited"
+        ended: "agent exited",
+        transcript: "transcript (read-only)",
+        unavailable: "transcript unavailable"
       }
 
       function formatTokens(n) {
@@ -795,18 +1030,26 @@ defmodule ArbiterWeb.SessionDockLive do
           this.sessionId = this.el.dataset.sessionId
           this.statusEl = document.getElementById(`session-dock-status-${this.sessionId}`)
 
-          // The server already knows this window is a record rather than a
-          // client: its session ended under a previous xterm and a LiveView
-          // rejoin has just rebuilt the element. Opening a `/session` socket
-          // for it would only sit at "reconnecting…" against a dead session,
-          // so this one is built read-only, painted from what the previous
-          // xterm left behind, and never connects.
-          const frozen = !!this.el.dataset.readonly
-          this.state = frozen ? "ended" : "connecting"
+          // Two kinds of read-only pane, and they are not the same kind.
+          //
+          // `data-transcript` is a session that ended *before this browser
+          // session* (bd-3tf4oo): nothing was kept in memory for it, so the
+          // pane joins the channel in transcript mode and is painted from the
+          // persisted raw capture the server replays.
+          //
+          // `data-readonly` on its own is the frozen pane of a session that
+          // ended under a previous xterm here and was rebuilt by a LiveView
+          // rejoin. It opens no socket at all — there is nothing on the other
+          // end of one — and is painted from what that xterm left behind.
+          const transcript = this.el.dataset.transcript === "true"
+          const frozen = !!this.el.dataset.readonly && !transcript
+          this.transcript = transcript
+          this.state = transcript ? "transcript" : frozen ? "ended" : "connecting"
           if (frozen) markFrozen(this.sessionId)
 
           this.terminal = createSessionTerminal(this.el, {
             sessionId: this.sessionId,
+            transcript,
             readOnly: frozen,
             restoredText: frozen ? finalScreenFor(this.sessionId) : null,
             // The resume point the *previous* xterm for this session left
@@ -870,6 +1113,25 @@ defmodule ArbiterWeb.SessionDockLive do
           // offset nothing on screen was painted at.
           this.onForget = this.handleEvent("session-dock:forget", ({ id }) => forgetResume(id))
 
+          // A size preset changed (bd-covojz). This is the seam the pane
+          // cannot see for itself: the window's box moves because the *server*
+          // re-rendered its classes, and the refit has to happen after that
+          // patch has been laid out, not while it is still being applied.
+          //
+          // Two frames — one for LiveView's DOM patch, one for the browser to
+          // lay it out — then `reclaim()`, which is phase 2's one refit path
+          // under `force` (fit the settled box, send the new cols/rows to the
+          // pane, and clear the renderer when the geometry actually moved).
+          // Not a second refit path: the `ResizeObserver` will also see this
+          // move, and the debounce inside `reclaim` coalesces the two into one.
+          this.onResize = this.handleEvent("session-dock:size", () => {
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                if (this.terminal) this.terminal.reclaim()
+              })
+            )
+          })
+
           // Exposed on the element the same way, and for the same reason,
           // `app.js` exposes `window.liveSocket`: a terminal is the one thing
           // on this page with no DOM to read when something looks wrong — the
@@ -879,7 +1141,7 @@ defmodule ArbiterWeb.SessionDockLive do
           // xterm rather than about a stand-in.
           this.el.__arbTerminal = this.terminal
 
-          if (!frozen) this.terminal.focus()
+          if (!frozen && !transcript) this.terminal.focus()
         },
 
         // LiveView merges `data-*` attributes onto a `phx-update="ignore"`
@@ -891,7 +1153,12 @@ defmodule ArbiterWeb.SessionDockLive do
           if (!this.terminal || !this.el.dataset.readonly) return
 
           this.terminal.setReadOnly()
-          markFrozen(this.sessionId)
+
+          // A replayed transcript is not this browser's scrollback: there is
+          // no final screen of ours to keep, and claiming the window is frozen
+          // would make a rejoin rebuild it from an empty one instead of
+          // replaying the file again.
+          if (this.el.dataset.transcript !== "true") markFrozen(this.sessionId)
         },
 
         // A LiveView rejoin re-runs `mount/3` — the strip is server-rendered as
@@ -911,17 +1178,26 @@ defmodule ArbiterWeb.SessionDockLive do
         destroyed() {
           window.removeEventListener("phx:navigate", this.onNavigate)
           if (this.onForget) this.removeHandleEvent(this.onForget)
+          if (this.onResize) this.removeHandleEvent(this.onResize)
           if (!this.terminal) return
 
           // A dead pane has no stream to replay, so what it leaves behind is
           // its screen rather than an offset (bd-a292yj). A LiveView rejoin —
           // which re-renders the dock from an empty mount — is the one thing
           // that gets here with a window still open.
-          if (this.terminal.readOnly()) {
-            rememberFinalScreen(this.sessionId, this.terminal.snapshot())
+          //
+          // A *replayed* pane keeps neither: the file it was painted from is
+          // still on disk and is replayed again from scratch, so a kept screen
+          // would only be a staler copy of it, and its `lastSeq` is an offset
+          // into that file rather than into any live stream (bd-3tf4oo).
+          if (!this.transcript) {
+            if (this.terminal.readOnly()) {
+              rememberFinalScreen(this.sessionId, this.terminal.snapshot())
+            }
+
+            rememberResume(this.sessionId, this.terminal.stream.lastSeq)
           }
 
-          rememberResume(this.sessionId, this.terminal.stream.lastSeq)
           this.terminal.dispose()
           this.terminal = null
           this.el.__arbTerminal = null
@@ -1013,7 +1289,17 @@ defmodule ArbiterWeb.SessionDockLive do
 
   defp roster(assigns) do
     ~H"""
-    <div class="pointer-events-auto flex flex-col justify-end shrink basis-[268px] min-w-[8.5rem] max-w-[268px]">
+    <%!-- `relative z-40` so the roster and launch panels, which open upward
+          from the strip, paint *above* a Maximized window (bd-covojz).
+          `window_size_class(true, "max")` is `fixed` with no z-index of its
+          own, which still puts it ahead of this column's in-flow content
+          inside the root's `z-30` stacking context — and its frame is opaque,
+          so without this the toggle would look like it did nothing.
+          Acceptance 6: the roster stays reachable in every size. --%>
+    <div
+      id="session-dock-roster-column"
+      class="pointer-events-auto relative z-40 flex flex-col justify-end shrink basis-[268px] min-w-[8.5rem] max-w-[268px]"
+    >
       <%!-- New session (bd-cdut29): the exact same options `/sessions`
             launches with, opened without navigating away from wherever the
             operator is. See `SessionIndexLive.launch_form/1`. --%>
@@ -1155,27 +1441,112 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :info_open?, :boolean, required: true
   attr :usage, :any, required: true, doc: "the info panel's rollup, or nil"
 
+  attr :size, :string,
+    required: true,
+    doc: "the window's size preset (bd-covojz) — compact, side or max"
+
+  attr :size_fallback?, :boolean,
+    required: true,
+    doc: "the client reported this viewport cannot fit a side panel and a usable page"
+
+  # What a window whose session is over has to show (bd-3tf4oo).
+  #
+  # Only asked for the one case that needs it: an *expanded* window with
+  # nothing to attach to and no frozen pane from this browser session. A live
+  # window never stats the filesystem, and a frozen one keeps the scrollback
+  # it already has — styling and all — rather than swapping it for a replay of
+  # the same bytes.
+  #
+  # `transcript?` — "replay this file into an xterm" — additionally needs a
+  # loopback peer, for the same reason a live pane does (§10.4): the bytes are
+  # the session's screen, and `ArbiterWeb.SessionTranscriptController` refuses
+  # them off-box too.
+  defp assign_transcript(assigns) do
+    transcript =
+      if assigns.expanded? and not assigns.attachable? and not assigns.frozen? do
+        TranscriptReplay.describe(assigns.session)
+      end
+
+    assigns
+    |> assign(:transcript, transcript)
+    |> assign(:transcript?, !!transcript and transcript.available? and assigns.loopback?)
+  end
+
+  # Why an ended window is showing no transcript. `loopback_only` is not a
+  # property of the file — the transcript is there, this browser is just not
+  # on the box — and saying "never captured" for it would be a lie.
+  defp unavailable_reason(nil, _loopback?), do: "never_captured"
+  defp unavailable_reason(%{available?: true}, false), do: "loopback_only"
+  defp unavailable_reason(%{reason: reason}, _loopback?), do: to_string(reason)
+
+  defp unavailable_detail("retention_deleted") do
+    "Its transcript was deleted by the retention sweep, which keeps a session's raw output for " <>
+      "#{Transcript.retention_days()} days after it ends."
+  end
+
+  defp unavailable_detail("empty") do
+    "Its transcript was captured but holds nothing — the pane printed no output that survived."
+  end
+
+  defp unavailable_detail("loopback_only") do
+    "Its transcript is on the box but is served to a loopback peer only. Forward the port over " <>
+      "SSH to read it."
+  end
+
+  defp unavailable_detail(_never_captured) do
+    "No transcript was captured for it — it ended before Arbiter recorded session output, or " <>
+      "its reader never started."
+  end
+
+  # Byte figures an operator reads, not a number of bytes. Deliberately terse:
+  # this sits in a 10px line inside a terminal's chrome.
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576 do
+    "#{Float.round(bytes / 1_048_576, 1)} MB"
+  end
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1024 do
+    "#{Float.round(bytes / 1024, 1)} KB"
+  end
+
+  defp format_bytes(bytes) when is_integer(bytes), do: "#{bytes} B"
+
+  defp format_ended_at(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp format_ended_at(_), do: nil
+
   defp window(assigns) do
     assigns =
       assigns
       # A *live* pane: an xterm with a `/session` socket under it. Only the
       # expanded window ever has one, and only on loopback.
       |> assign(:live?, assigns.expanded? and assigns.attachable? and assigns.loopback?)
-      # Any pane at all — live, or frozen at the last thing the agent printed.
+      |> assign_transcript()
+
+    assigns =
+      assigns
+      # Any pane at all — live, frozen at the last thing the agent printed, or
+      # a replay of a finished session's persisted transcript (bd-3tf4oo).
       # A frozen pane outlives collapsing on purpose: the acceptance is "until
       # explicitly dismissed", and a collapse is not that. It holds no socket,
       # so eight of them cost eight xterms and zero connections.
       |> assign(
         :pane?,
-        (assigns.expanded? and assigns.attachable? and assigns.loopback?) or assigns.frozen?
+        (assigns.expanded? and assigns.attachable? and assigns.loopback?) or assigns.frozen? or
+          assigns.transcript?
       )
       |> assign(:name, DisplayName.resolve(assigns.session))
       |> assign(:running?, assigns.session.status == :running and not assigns.frozen?)
+      # What is actually rendered: the operator's choice, unless the client has
+      # reported that a side panel does not fit on this viewport.
+      # A fallback is a thing that happened to a *side panel*. It has nothing to
+      # say about a Compact or Maximized window, and must not label one.
+      |> assign(:size_fallback?, assigns.size_fallback? and assigns.size == "side")
+      |> assign(:effective_size, effective_size(assigns.size, assigns.size_fallback?))
 
     ~H"""
     <div
       id={"session-dock-window-#{@session.id}"}
       data-expanded={to_string(@expanded?)}
+      data-size={@effective_size}
       data-status={@session.status}
       class={
         [
@@ -1188,11 +1559,9 @@ defmodule ArbiterWeb.SessionDockLive do
           #
           # The expanded basis is wider than phase 1's empty frame needed: a
           # terminal cannot reflow meaningfully below ~80 columns (§6.3), and
-          # 28rem of pane was about 60 of them.
-          if(@expanded?,
-            do: "basis-[44rem] max-w-[44rem] min-w-[16rem]",
-            else: "basis-[11rem] max-w-[11rem] min-w-[5rem]"
-          )
+          # 28rem of pane was about 60 of them. The other two presets leave the
+          # row entirely — see `window_size_class/2`.
+          window_size_class(@expanded?, @effective_size)
         ]
       }
     >
@@ -1205,23 +1574,47 @@ defmodule ArbiterWeb.SessionDockLive do
         id={"session-dock-frame-#{@session.id}"}
         role="region"
         aria-label={"Session #{@name}"}
-        class={[
-          "relative flex flex-col h-[min(52vh,380px)] overflow-hidden",
-          "border border-b-0 border-solid border-[var(--border-default)]",
-          "rounded-t-[var(--radius-panel)] bg-[var(--surface-panel)] shadow-lg",
-          not @expanded? && "hidden"
-        ]}
+        class={
+          [
+            "relative flex flex-col overflow-hidden",
+            # Compact keeps phase 2's bottom-docked height; the other two are
+            # sized by the window's own `fixed` box and just fill it.
+            if(@expanded? and @effective_size != "compact",
+              do: "grow min-h-0",
+              else: "h-[min(52vh,380px)]"
+            ),
+            "border border-b-0 border-solid border-[var(--border-default)]",
+            "rounded-t-[var(--radius-panel)] bg-[var(--surface-panel)] shadow-lg",
+            not @expanded? && "hidden"
+          ]
+        }
       >
         <%!-- The status strip is chrome, pinned outside the xterm element so
               it can never fight the fit for rows (§6.3). Its contents are
               hook-owned — so LiveView is told to keep out of them, and so it
               is only rendered when there is a hook to own it. A frozen pane
               has no channel and no live state to paint, so it gets the ended
-              banner below instead. --%>
+              banner below instead.
+
+              `phx-update="ignore"` protects the *children* and nothing else:
+              for an ignored node LiveView merges the server's `data-*` on and
+              **removes every one the server did not render**. `data-state` is
+              written here by the terminal hook and by nothing on the server,
+              so without `ignore_attributes` any patch that reaches this window
+              silently erases it — a live terminal whose strip claims no state
+              at all, and whose `data-state` seam (`verify_session_dock_*.mjs`,
+              and anything reading it) goes blind. bd-covojz found this the
+              hard way: adding a size-derived class to the window turned a
+              previously-empty diff into a patch, and the state vanished two
+              milliseconds after it first read "live". The hook cannot put it
+              back itself — `updated()` fires only when an element's own
+              dataset differs from the server's, which for the *pane* it is
+              attached to it never does. --%>
         <div
           :if={@live?}
           id={"session-dock-status-#{@session.id}"}
           phx-update="ignore"
+          phx-mounted={JS.ignore_attributes("data-state")}
           class={[
             "flex shrink-0 items-center gap-2 px-2.5 py-1",
             "border-b border-solid border-[var(--border-default)]",
@@ -1247,14 +1640,17 @@ defmodule ArbiterWeb.SessionDockLive do
           </span>
         </div>
 
-        <%!-- The session ended under this window (bd-a292yj). The pane below
-              stays exactly as the agent left it, read-only; this says so, says
-              why it ended, and offers the one act that throws it away. --%>
+        <%!-- The session ended under this window (bd-a292yj), or ended before
+              this browser session and is being replayed from its persisted
+              transcript (bd-3tf4oo). Either way the pane below is a record,
+              not a client: this says so, says why the session ended, and — for
+              a replay — how much of the file is on screen and where the whole
+              of it is. --%>
         <div
-          :if={@frozen?}
+          :if={@frozen? or @transcript?}
           id={"session-dock-ended-#{@session.id}"}
           class={[
-            "flex shrink-0 items-center gap-2 px-2.5 py-1",
+            "flex shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-2.5 py-1",
             "border-b border-solid border-[var(--border-default)]",
             "bg-[var(--surface-field)]",
             "text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-body)]"
@@ -1265,7 +1661,33 @@ defmodule ArbiterWeb.SessionDockLive do
           <span :if={@session.end_reason} class="text-[var(--text-label)] truncate">
             {@session.end_reason}
           </span>
-          <span class="ml-auto shrink-0 text-[var(--text-label)]">read-only</span>
+          <span :if={@transcript? and @transcript.truncated?} class="text-[var(--text-label)]">
+            ·
+          </span>
+          <%!-- The replay is a *tail* once the file is over the cap: say which
+                part of it this is, rather than let it read as the whole
+                session (AC 2). --%>
+          <span
+            :if={@transcript? and @transcript.truncated?}
+            id={"session-dock-transcript-truncated-#{@session.id}"}
+            class="text-[var(--text-label)]"
+          >
+            showing last {format_bytes(@transcript.replay_bytes)} of {format_bytes(
+              @transcript.total_bytes
+            )}
+          </span>
+          <.link
+            :if={@transcript?}
+            id={"session-dock-transcript-download-#{@session.id}"}
+            href={~p"/sessions/#{@session.id}/transcript"}
+            download={"#{@session.id}.raw"}
+            class="text-[var(--text-link)] no-underline hover:underline"
+          >
+            download full transcript
+          </.link>
+          <span class="ml-auto shrink-0 text-[var(--text-label)]">
+            {if @transcript?, do: "transcript · read-only", else: "read-only"}
+          </span>
         </div>
 
         <%!-- Not inside the status strip: that is `phx-update="ignore"` and
@@ -1311,7 +1733,8 @@ defmodule ArbiterWeb.SessionDockLive do
             phx-hook=".SessionTerminal"
             phx-update="ignore"
             data-arb-terminal
-            data-readonly={if @frozen?, do: "true"}
+            data-readonly={if @frozen? or @transcript?, do: "true"}
+            data-transcript={if @transcript?, do: "true"}
             data-session-id={@session.id}
             class="grow min-w-[640px] p-1.5"
           >
@@ -1363,24 +1786,38 @@ defmodule ArbiterWeb.SessionDockLive do
           </p>
         </div>
 
-        <%!-- Ended, and this dock never held its pane: either it ended before
-              this browser session, or its window was dismissed and re-opened.
-              Either way there is no scrollback here to show and none to fetch
-              until transcript persistence lands (bd-5pelo2, phase 9) — so it
-              says so and points at the index, rather than rendering an empty
-              terminal that reads like a live one with nothing on it. --%>
+        <%!-- Ended, this dock never held its pane, and there is no transcript
+              to replay either (bd-3tf4oo). That is three different situations
+              and they are named as three, because "nothing here" with no
+              reason is what made this window read as broken (#1818): the
+              retention sweep took it, it was never captured, or the capture is
+              empty. Never a blank terminal — and when the session's JSONL was
+              archived, that is linked, because it is the other half of the
+              record. --%>
         <div
           :if={not @pane? and not @attachable?}
           id={"session-dock-unavailable-#{@session.id}"}
+          data-reason={unavailable_reason(@transcript, @loopback?)}
           class="grow min-h-0 flex flex-col items-center justify-center gap-1.5 px-4 text-center text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
         >
           <.icon name="hero-power" class="size-5" />
           <p class="text-[var(--text-body)]">
-            This session has ended{if @session.end_reason, do: " (#{@session.end_reason})"}.
+            This session has ended{if @session.end_reason, do: " (#{@session.end_reason})"}<span :if={
+              format_ended_at(@session.ended_at)
+            }>, {format_ended_at(@session.ended_at)}</span>.
           </p>
           <p>
-            Its output is not available here — the dock was not watching it when it ended.
+            {unavailable_detail(unavailable_reason(@transcript, @loopback?))}
           </p>
+          <.link
+            :if={@transcript && @transcript.archived?}
+            id={"session-dock-jsonl-#{@session.id}"}
+            href={~p"/sessions/#{@session.id}/jsonl"}
+            download={"#{@session.id}.jsonl"}
+            class="text-[var(--text-link)] no-underline hover:underline"
+          >
+            Download the archived session JSONL
+          </.link>
           <.link
             navigate={~p"/sessions"}
             class="text-[var(--text-link)] no-underline hover:underline"
@@ -1510,6 +1947,23 @@ defmodule ArbiterWeb.SessionDockLive do
           {@name}
         </button>
 
+        <%!-- §8.3's bridge-verification result, persisted (bd-cdretj) rather
+              than only broadcast live: the usual case is that nobody is
+              attached in the ~15s after launch when verification finishes,
+              so a live-only signal is gone by the time an operator opens
+              this window. Shown in the title bar — collapsed or expanded —
+              so it survives a fresh mount, unlike the hook-owned status
+              strip's `data-role="meta"`, which only ever reflects a signal
+              that arrived while a client was already connected. --%>
+        <span
+          :if={@session.remote_control and @session.bridge_status == :unavailable}
+          id={"session-dock-bridge-unavailable-#{@session.id}"}
+          title="Remote Control's bridge never came up — /remote-control in the session to retry."
+          class="shrink-0 px-1.5 h-[18px] flex items-center rounded-[var(--radius-field)] text-[10px] font-medium bg-[var(--arb-danger-bg,#3a1d1d)] text-[var(--arb-danger,#f87171)]"
+        >
+          bridge unavailable
+        </span>
+
         <%!-- Why it is over, in the title bar, where a collapsed window can
               still say it (bd-a292yj). Truncated by design; the whole reason
               is in the tooltip and in the info side. --%>
@@ -1520,6 +1974,67 @@ defmodule ArbiterWeb.SessionDockLive do
           class="shrink min-w-0 max-w-[7rem] truncate text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
         >
           {@session.end_reason || "ended"}
+        </span>
+
+        <%!-- When it ended, next to why (bd-3tf4oo AC 1). Expanded only: a
+              collapsed title bar is 11rem wide and the reason is the half an
+              operator scanning the strip needs. --%>
+        <span
+          :if={not @running? and @expanded? and @session.ended_at}
+          id={"session-dock-ended-at-#{@session.id}"}
+          title={format_ended_at(@session.ended_at)}
+          class="shrink-0 text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+        >
+          {format_ended_at(@session.ended_at)}
+        </span>
+
+        <%!-- The size control (bd-covojz). Only the expanded window has a size
+              to choose, so a collapsed title bar 11rem wide never has to find
+              room for this. Three discrete presets, not a drag handle: see
+              `window_size_class/2`. --%>
+        <div
+          :if={@expanded?}
+          id={"session-dock-size-#{@session.id}"}
+          role="group"
+          aria-label={"Window size for #{@name}"}
+          class={[
+            "shrink-0 flex items-center gap-px p-px",
+            "rounded-[var(--radius-field)] border border-solid border-[var(--border-default)]",
+            "bg-[var(--surface-field)]"
+          ]}
+        >
+          <button
+            :for={{size, label, hint} <- size_presets()}
+            type="button"
+            id={"session-dock-size-#{size}-#{@session.id}"}
+            phx-click="set_size"
+            phx-value-id={@session.id}
+            phx-value-size={size}
+            aria-pressed={to_string(@size == size)}
+            title={hint}
+            class={[
+              "px-1.5 h-[18px] flex items-center rounded-[var(--radius-chip)] cursor-pointer",
+              "border-0 text-[10px] font-medium transition-colors duration-100",
+              if(@size == size,
+                do: "bg-[var(--surface-card)] text-[var(--text-title)]",
+                else: "bg-transparent text-[var(--text-label)] hover:text-[var(--text-primary)]"
+              )
+            ]}
+          >
+            {label}
+          </button>
+        </div>
+
+        <%!-- The narrow-viewport answer, said where the choice was made. The
+              preference is still Side panel — this is what happened to it
+              here, and it goes away by itself when the window has room. --%>
+        <span
+          :if={@size_fallback?}
+          id={"session-dock-size-fallback-#{@session.id}"}
+          title="This viewport cannot fit a side panel and a usable page at once, so the window is maximized."
+          class="shrink-0 px-1.5 h-[18px] flex items-center rounded-[var(--radius-field)] text-[10px] font-[family-name:var(--font-mono)] bg-[var(--surface-field)] text-[var(--text-label)]"
+        >
+          too narrow — maximized
         </span>
 
         <.window_menu

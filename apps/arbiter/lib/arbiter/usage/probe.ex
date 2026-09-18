@@ -5,8 +5,12 @@ defmodule Arbiter.Usage.Probe do
   One caller spends real plan quota without ever going through
   `Arbiter.Worker` — which is the only other path that writes `usage_events`:
 
-    * `Arbiter.Agents.Preflight` — one `claude --print "ping"` per dispatch
-      **and** per resume, plus the `CredentialWatchdog`'s periodic check.
+    * `Arbiter.Agents.Preflight` — as of bd-2jgs2h (2026-09-18), the
+      `CredentialWatchdog`'s periodic check is its only live caller; the
+      per-dispatch and per-resume auth probe was retired (see
+      `Arbiter.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`).
+      Task-attributed `:preflight` rows in `usage_events` predating that date
+      are historical.
 
   (A second caller, `Arbiter.Quota.RefreshProbe` — one `claude --print "ok"`
   per workspace whenever the quota snapshot needed refreshing — was deleted in
@@ -78,7 +82,9 @@ defmodule Arbiter.Usage.Probe do
           optional(:tokens_out) => integer() | nil,
           optional(:cache_creation_tokens) => integer() | nil,
           optional(:cache_read_tokens) => integer() | nil,
+          optional(:thinking_tokens) => integer() | nil,
           optional(:cost_usd) => float() | nil,
+          optional(:cost_note) => String.t() | nil,
           optional(:duration_ms) => integer() | nil,
           optional(:session_id) => String.t() | nil,
           optional(:model) => String.t() | nil,
@@ -86,6 +92,11 @@ defmodule Arbiter.Usage.Probe do
         }
 
   @no_usage_note "no structured usage in probe output (CLI returned no `--output-format json` result object)"
+
+  # Mirrors `Arbiter.Agents.Gemini.Stream`'s note verbatim (bd-481sz7):
+  # agy/Antigravity is a subscription metered by quota percentage, not a
+  # per-call priced API, so an agy probe row's cost stays nil permanently.
+  @agy_cost_unavailable_note "agy/Antigravity reports no cost: it's a subscription metered by Antigravity quota percentage, not a per-call priced API"
 
   @doc """
   Split a probe's captured output into `{usage_or_nil, lines_for_the_classifier}`.
@@ -144,8 +155,9 @@ defmodule Arbiter.Usage.Probe do
       tokens_out: Map.get(usage, :tokens_out),
       cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
       cache_read_tokens: Map.get(usage, :cache_read_tokens),
+      thinking_tokens: Map.get(usage, :thinking_tokens),
       cost_usd: Map.get(usage, :cost_usd),
-      cost_note: cost_note(usage),
+      cost_note: Map.get(usage, :cost_note) || cost_note(usage),
       duration_ms: Map.get(usage, :duration_ms) || Keyword.get(opts, :duration_ms),
       exit_status: Keyword.get(opts, :exit_status),
       session_id: Map.get(usage, :session_id) || Keyword.get(opts, :session_id),
@@ -173,16 +185,19 @@ defmodule Arbiter.Usage.Probe do
     if Map.get(usage, :cost_usd), do: nil, else: @no_usage_note
   end
 
-  # A line is a probe result payload only when it decodes to a JSON object
-  # tagged `"type": "result"` that is NOT an error. Everything else — plain
-  # text, a JSON array, an `is_error: true` result — is diagnostic output and
-  # must survive into the classifier's haystack.
+  # A line is a probe result payload when it decodes to either:
+  #   * Claude's `{"type": "result"}` object (not an `is_error: true` one), or
+  #   * agy's `{"event": "result", "result": {...}}` object (not a failed
+  #     `"status"`, see `Arbiter.Agents.Gemini.Stream`'s moduledoc for the
+  #     wire schema).
+  # Everything else — plain text, a JSON array, an error payload — is
+  # diagnostic output and must survive into the classifier's haystack.
   defp decode_result(line) when is_binary(line) do
     trimmed = String.trim(line)
 
     with true <- String.starts_with?(trimmed, "{"),
-         {:ok, %{"type" => "result"} = event} <- Jason.decode(trimmed),
-         false <- truthy?(event["is_error"]) do
+         {:ok, decoded} <- Jason.decode(trimmed),
+         {:ok, event} <- success_result(decoded) do
       {:ok, event}
     else
       _ -> :error
@@ -191,8 +206,38 @@ defmodule Arbiter.Usage.Probe do
 
   defp decode_result(_), do: :error
 
+  defp success_result(%{"type" => "result"} = event) do
+    if truthy?(event["is_error"]), do: :error, else: {:ok, event}
+  end
+
+  defp success_result(%{"event" => "result", "result" => %{} = result}) do
+    if result["status"] in [nil, "SUCCESS"], do: {:ok, result}, else: :error
+  end
+
+  defp success_result(_), do: :error
+
   defp truthy?(true), do: true
   defp truthy?(_), do: false
+
+  # agy's `result` payload (`"usage" => {..., "thinking_tokens" => _,
+  # "cache_read_tokens" => _}`, `"duration_seconds"`, no `"model"`/cost) is
+  # distinguished from Claude's (`"total_cost_usd"`, `"duration_ms"`,
+  # `"model"`, no `thinking_tokens`/`cache_read_tokens`) by the presence of
+  # `"thinking_tokens"` — agy always reports the bucket (possibly `0`),
+  # Claude's `result` object never carries that key at all.
+  defp from_result(%{"usage" => %{} = usage} = event) when is_map_key(usage, "thinking_tokens") do
+    %{
+      tokens_in: number(usage["input_tokens"]),
+      tokens_out: number(usage["output_tokens"]),
+      cache_read_tokens: number(usage["cache_read_tokens"]),
+      thinking_tokens: number(usage["thinking_tokens"]),
+      cost_usd: nil,
+      cost_note: @agy_cost_unavailable_note,
+      duration_ms: agy_duration_ms(event["duration_seconds"]),
+      session_id: string(event["conversation_id"]),
+      raw: event
+    }
+  end
 
   defp from_result(%{} = event) do
     usage = event["usage"] || %{}
@@ -209,6 +254,9 @@ defmodule Arbiter.Usage.Probe do
       raw: event
     }
   end
+
+  defp agy_duration_ms(seconds) when is_number(seconds), do: round(seconds * 1000)
+  defp agy_duration_ms(_), do: nil
 
   defp number(n) when is_integer(n), do: n
   defp number(n) when is_float(n), do: trunc(n)

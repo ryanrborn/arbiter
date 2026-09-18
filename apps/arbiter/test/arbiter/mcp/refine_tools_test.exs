@@ -137,9 +137,12 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "refuses a field outside the refine write set", ctx do
       assert {:rpc_error, -32_003, message} =
-               call(ctx.refine, "task_update", %{"id" => ctx.root.id, "assignee" => "someone"})
+               call(ctx.refine, "task_update", %{
+                 "id" => ctx.root.id,
+                 "tracker_ref" => "someone/42"
+               })
 
-      assert message =~ "assignee"
+      assert message =~ "tracker_ref"
     end
 
     test "accepts the documented refine field set", ctx do
@@ -353,7 +356,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "refuses fields the refine field gate refuses on update", ctx do
       for {field, value} <- [
-            {"assignee", "someone"},
+            {"tracker_context_type", "github"},
             {"tracker_type", "github"},
             {"tracker_ref", "org/repo#1"},
             {"target_branch", "release"},

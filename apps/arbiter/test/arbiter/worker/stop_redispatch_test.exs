@@ -2,7 +2,7 @@ defmodule Arbiter.Worker.StopRedispatchTest do
   @moduledoc """
   Regression tests for bd-cgmidt: `worker_stop` followed by an immediate
   re-`worker_dispatch` must not leave a live worker attached to a `:closed`
-  task (the 2026-07-08 verus-client#3266 / lt-c9td4r orphan).
+  task (the 2026-07-08 apex-client#3266 / lt-c9td4r orphan).
 
   Root cause: `Dispatch.dispatch/2` guards `:closed` only ONCE, at the front of
   the pipeline (`ensure_not_closed/1`), then transitions to `:in_progress`,

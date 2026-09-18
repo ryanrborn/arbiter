@@ -205,6 +205,27 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Map.has_key?(data, :created_at)
       assert Map.has_key?(data, :updated_at)
     end
+
+    # bd-1defgu: the domain-layer read (`Dependencies.list/1`) existed but
+    # wasn't reachable from `task_show` — a worker/coordinator had to open the
+    # DB to see an edge it could already create/delete via dep_add/dep_remove.
+    test "full: true includes the task's dependency edges", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "conflicts with me", workspace_id: ctx.ws.id})
+      {:ok, dep} = Arbiter.Tasks.Dependencies.add(ctx.task.id, other.id, :conflicts_with)
+
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+
+      assert [row] = data.dependencies
+      assert row.id == dep.id
+      assert row.type == "conflicts_with"
+      assert row.to.id == other.id
+    end
+
+    test "slim payload omits dependency edges", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
+      refute Map.has_key?(data, :dependencies)
+    end
   end
 
   describe "inbox_check/2" do
@@ -962,14 +983,32 @@ defmodule Arbiter.MCP.ToolsTest do
                  "title" => "review context task",
                  "tracker_type" => "none",
                  "tracker_context_type" => "jira",
-                 "tracker_context_ref" => "VR-18004"
+                 "tracker_context_ref" => "AX-18004"
                })
 
       {:ok, reloaded} = Ash.get(Issue, data.id)
       assert reloaded.tracker_context_type == :jira
-      assert reloaded.tracker_context_ref == "VR-18004"
+      assert reloaded.tracker_context_ref == "AX-18004"
       # tracker_type stays none — context ref is read-only and never claimed
       assert reloaded.tracker_type == :none
+    end
+
+    # bd-1ozks5: the local assignee field is gone; an existing coordinator
+    # prompt/script may still pass it — accept and ignore, with a warning.
+    test "accepts and ignores a deprecated `assignee`, with a warning", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "still has assignee",
+                 "issue_type" => "task",
+                 "assignee" => "alice"
+               })
+
+      refute Map.has_key?(data, :assignee)
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      refute Map.has_key?(reloaded, :assignee)
     end
   end
 
@@ -1079,6 +1118,31 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "requires at least one field to update", ctx do
       assert {:error, {:invalid, _}} = Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id})
+    end
+
+    # bd-1ozks5: the local assignee field is gone; an existing coordinator
+    # prompt/script may still pass it — accept and ignore, with a warning,
+    # rather than failing (even when it's the only field passed).
+    test "a deprecated `assignee`-only update succeeds as a no-op, with a warning", ctx do
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id, "assignee" => "alice"})
+
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
+    end
+
+    test "a deprecated `assignee` alongside a real field still applies the field, with a warning",
+         ctx do
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "priority" => 0,
+                 "assignee" => "alice"
+               })
+
+      assert data.priority == 0
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
     end
 
     test "cannot update a task in another workspace (not-found)", ctx do
@@ -1328,6 +1392,68 @@ defmodule Arbiter.MCP.ToolsTest do
                  "to_issue_id" => ctx.task.id,
                  "type" => "relates_to"
                })
+    end
+  end
+
+  describe "dep_list/2" do
+    setup ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
+
+      {:ok, dep} =
+        Arbiter.Tasks.Dependencies.add(ctx.task.id, other.id, :conflicts_with)
+
+      {:ok, other: other, dep: dep}
+    end
+
+    test "a coordinator lists a workspace's edges (naming the workspace)", ctx do
+      assert {:ok, %{dependencies: [row], count: 1}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id})
+
+      assert row.id == ctx.dep.id
+      assert row.type == "conflicts_with"
+      assert row.from.id == ctx.task.id
+      assert row.to.id == ctx.other.id
+      assert row.to.status
+      assert row.to.priority == ctx.other.priority
+    end
+
+    test "a coordinator lists edges scoped to one issue", ctx do
+      assert {:ok, %{dependencies: [row], count: 1}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.task.id})
+
+      assert row.id == ctx.dep.id
+    end
+
+    test "filters by type", ctx do
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(ctx.task.id, ctx.other.id, :relates_to)
+
+      assert {:ok, %{dependencies: rows}} =
+               Tools.dep_list(ctx.coordinator, %{
+                 "workspace" => ctx.ws.id,
+                 "type" => "relates_to"
+               })
+
+      assert [%{type: "relates_to"}] = rows
+    end
+
+    test "a worker lists its own workspace's edges with no `workspace` arg", ctx do
+      assert {:ok, %{dependencies: [row]}} = Tools.dep_list(ctx.worker, %{})
+      assert row.id == ctx.dep.id
+    end
+
+    test "a worker naming a different workspace is unauthorized", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dep-list-other", prefix: "dlo"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.dep_list(ctx.worker, %{"workspace" => other_ws.id})
+    end
+
+    test "a symmetric edge appears exactly once whether queried from a or b", ctx do
+      assert {:ok, %{dependencies: [_]}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.task.id})
+
+      assert {:ok, %{dependencies: [_]}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.other.id})
     end
   end
 
@@ -2490,12 +2616,12 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:ok, ack} =
                Tools.worker_review(coordinator, %{
-                 "pr" => "https://github.com/leo/verus_sigv4/pull/5"
+                 "pr" => "https://github.com/acme/apex_sigv4/pull/5"
                })
 
       assert ack.external == true
       assert ack.status == "dispatched"
-      assert ack.mr_ref == "leo/verus_sigv4#5"
+      assert ack.mr_ref == "acme/apex_sigv4#5"
       assert ack.strategy == :github
     end
 
@@ -2511,7 +2637,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:ok, ack} =
                Tools.worker_review(coordinator, %{
-                 "pr" => "https://github.com/leo/verus_sigv4/pull/6",
+                 "pr" => "https://github.com/acme/apex_sigv4/pull/6",
                  "scope" => "repo"
                })
 
@@ -2545,14 +2671,14 @@ defmodule Arbiter.MCP.ToolsTest do
       _result =
         Tools.worker_review(ctx.coordinator, %{
           "task_id" => task.id,
-          "tracker_context_ref" => "VR-18004",
+          "tracker_context_ref" => "AX-18004",
           "tracker_context_type" => "jira",
           "with_claude" => false
         })
 
       # The tracker context must be persisted on the task regardless of dispatch outcome.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.tracker_context_ref == "VR-18004"
+      assert reloaded.tracker_context_ref == "AX-18004"
       assert reloaded.tracker_context_type == :jira
       # tracker_type must remain :none — no claim, no write-back.
       assert reloaded.tracker_type == :none
@@ -2561,12 +2687,12 @@ defmodule Arbiter.MCP.ToolsTest do
     test "task_show includes tracker_context_ref and tracker_context_type in full view (bd-2eo4cg)",
          ctx do
       {:ok, task} =
-        Ash.update(ctx.task, %{tracker_context_type: :jira, tracker_context_ref: "VR-18004"},
+        Ash.update(ctx.task, %{tracker_context_type: :jira, tracker_context_ref: "AX-18004"},
           action: :update
         )
 
       {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => task.id, "full" => true})
-      assert full.tracker_context_ref == "VR-18004"
+      assert full.tracker_context_ref == "AX-18004"
       assert full.tracker_context_type == "jira"
     end
 
@@ -4706,6 +4832,7 @@ defmodule Arbiter.MCP.ToolsTest do
           finding_count: 1,
           reviewer_model: "claude-sonnet-5",
           reviewer_tier: "standard",
+          reviewer_provider: "gemini",
           cost_usd: 0.12,
           converged: false
         })
@@ -4733,6 +4860,10 @@ defmodule Arbiter.MCP.ToolsTest do
       # bd-3xultf: the resolved reviewer tier is exposed alongside
       # reviewer_model so analysis can control for the judge.
       assert round1.reviewer_tier == "standard"
+      # bd-3hb4ih: and the provider that actually ran it, so a reviewer that
+      # rotated off a print-timeout is readable without the transcript.
+      assert round1.reviewer_provider == "gemini"
+      assert round2.reviewer_provider == nil
       assert round2.round == 2
       assert round2.verdict == :approve
       assert round2.converged == true

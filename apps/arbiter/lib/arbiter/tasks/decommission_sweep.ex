@@ -32,9 +32,9 @@ defmodule Arbiter.Tasks.DecommissionSweep do
     * `gte-026`, `gte-027`, `gte-028` — arbiter cutover process tasks,
       intentionally open during the 7-day rollback window.
     * `hq-109` — UUIDv7 regression test, may still apply to Ash.
-    * `hq-3be` — VR-17575, a real outstanding Verus Server task with a
+    * `hq-3be` — AX-17575, a real outstanding Apex Server task with a
       Jira ticket.
-    * `vs-sy5` — real Verus product bug.
+    * `vs-sy5` — real Apex product bug.
   """
 
   alias Arbiter.Tasks.Issue

@@ -40,6 +40,7 @@ defmodule ArbiterWeb.Api.ReviewGateRoundControllerTest do
         findings: "VERDICT: APPROVE",
         finding_count: 0,
         reviewer_model: "claude-sonnet-5",
+        reviewer_provider: "claude",
         cost_usd: 0.2,
         converged: true
       })
@@ -57,6 +58,11 @@ defmodule ArbiterWeb.Api.ReviewGateRoundControllerTest do
       assert r2["verdict"] == "approve"
       assert r2["converged"] == true
       assert r2["reviewer_model"] == "claude-sonnet-5"
+      # bd-3hb4ih: which provider ran the pass, so a reviewer print-timeout
+      # rotation is readable off this endpoint (the only REST surface for a
+      # gate's rounds) without re-reading the transcript.
+      assert r2["reviewer_provider"] == "claude"
+      assert r1["reviewer_provider"] == nil
       assert r2["cost_usd"] == 0.2
     end
 

@@ -1,11 +1,17 @@
 defmodule ArbiterCli.Cmd.List do
   @moduledoc """
   `arb list [--status ...] [--type ...] [--priority N] [--labels ...]
-            [--tracker] [--workspace-id ID] [--assignee USER] [--json]`
+            [--tracker] [--workspace-id ID] [--json]`
 
   Filters are passed through to `GET /api/issues` as query params. `--labels`
   is accepted for interface parity with `bd`, but the current Issue resource
   has no labels field — the flag is ignored with a stderr warning.
+
+  `--assignee` is deprecated (bd-1ozks5): it filtered the local `assignee`
+  column, which no longer exists (Arbiter is a local single-user app). The
+  flag is still accepted for interface parity, but is ignored with a stderr
+  warning rather than sent as a filter. Use `--tracker` to see who a tracker
+  issue is assigned to upstream.
 
   With `--tracker`, the workspace's external tracker is also queried (e.g.
   open GitHub issues assigned to the workspace user) and merged into the
@@ -39,19 +45,13 @@ defmodule ArbiterCli.Cmd.List do
       {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
       mode = if opts[:json], do: :json, else: :text
 
-      if opts[:labels] && mode == :text do
-        IO.puts(
-          :stderr,
-          "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
-        )
-      end
+      warn_deprecated_flags(opts, mode)
 
       params =
         []
         |> put_if(:status, opts[:status])
         |> put_if(:issue_type, opts[:type])
         |> put_if(:priority, opts[:priority])
-        |> put_if(:assignee, opts[:assignee])
         |> put_if(:workspace_id, opts[:workspace_id])
 
       case fetch_tasks(params) do
@@ -65,6 +65,25 @@ defmodule ArbiterCli.Cmd.List do
         {:error, err} ->
           Output.die(err)
       end
+    end
+  end
+
+  defp warn_deprecated_flags(_opts, :json), do: :ok
+
+  defp warn_deprecated_flags(opts, :text) do
+    if opts[:labels] do
+      IO.puts(
+        :stderr,
+        "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
+      )
+    end
+
+    if opts[:assignee] do
+      IO.puts(
+        :stderr,
+        "arb: warning: --assignee is deprecated and ignored — Arbiter is a local " <>
+          "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
+      )
     end
   end
 

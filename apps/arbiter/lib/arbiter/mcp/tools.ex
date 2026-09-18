@@ -323,6 +323,7 @@ defmodule Arbiter.MCP.Tools do
       finding_count: r.finding_count,
       reviewer_model: r.reviewer_model,
       reviewer_tier: r.reviewer_tier,
+      reviewer_provider: r.reviewer_provider,
       cost_usd: r.cost_usd,
       converged: r.converged,
       inserted_at: iso(r.inserted_at)
@@ -2039,7 +2040,6 @@ defmodule Arbiter.MCP.Tools do
       # still has to be readable there and not only in `arb prime`.
       review_park_reason: i.review_park_reason,
       review_parked_at: iso(i.review_parked_at),
-      assignee: i.assignee,
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
       tracker_context_type: to_str(i.tracker_context_type),
@@ -2087,6 +2087,23 @@ defmodule Arbiter.MCP.Tools do
       created_by: d.created_by,
       created_at: iso(d.created_at)
     }
+  end
+
+  @doc """
+  Render one `Arbiter.Tasks.Dependencies.list/1` row — `%{edge:, from:, to:}`
+  — as the MCP `dep_list` / CLI-mirroring shape: the edge fields plus each
+  endpoint's id/title/status/priority, so a live edge is distinguishable
+  from a closed↔closed one without a second lookup (bd-1defgu).
+  """
+  def serialize_dependency_edge(%{edge: %Dependency{} = dep, from: from, to: to}) do
+    dep
+    |> serialize_dependency()
+    |> Map.put(:from, serialize_dependency_endpoint(from))
+    |> Map.put(:to, serialize_dependency_endpoint(to))
+  end
+
+  defp serialize_dependency_endpoint(%Issue{} = i) do
+    %{id: i.id, title: i.title, status: to_str(i.status), priority: i.priority}
   end
 
   def serialize_workspace(%Workspace{} = ws) do
@@ -2200,6 +2217,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate dep_list(scope, args), to: Arbiter.MCP.Tools.Task
 
   defdelegate workspace_show(scope, args), to: Arbiter.MCP.Tools.Workspace
   defdelegate workspace_config_get(scope, args), to: Arbiter.MCP.Tools.Workspace

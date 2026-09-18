@@ -57,6 +57,18 @@ defmodule Arbiter.ReviewGate.Round do
                           `reviewer_model` so convergence analysis can segment by
                           the judge's tier instead of a moving reviewer reading
                           as a quality change.
+    * `reviewer_provider`
+                        — bd-3hb4ih: which agent provider ran a `:review` pass
+                          (`"claude"` / `"gemini"` / `"codex"`). Always nil for
+                          `:impl` rows and for a pass that never reached a
+                          provider (a pre-review escalation). Needed once a
+                          reviewer print-timeout rotates to the next entry in a
+                          `review_agent.type` pool: the rotation writes a
+                          `:timed_out` row per provider that timed out, and the
+                          verdict row names the provider that finally produced
+                          it — a question `reviewer_model` cannot answer,
+                          because a timed-out pass usually has no usage row and
+                          therefore no model.
     * `cost_usd`        — USD cost of this pass. Nil when not captured.
     * `criteria_total`  — number of acceptance criteria the reviewer addressed
                           in its per-criterion CRITERIA breakdown (bd-4yhv4x).
@@ -147,6 +159,7 @@ defmodule Arbiter.ReviewGate.Round do
         :finding_count,
         :reviewer_model,
         :reviewer_tier,
+        :reviewer_provider,
         :cost_usd,
         :criteria_total,
         :criteria_unmet,
@@ -213,6 +226,17 @@ defmodule Arbiter.ReviewGate.Round do
       public? true
       constraints max_length: 255, trim?: true
       description "Resolved model_tier for a :review row. Nil for :impl rows."
+    end
+
+    # bd-3hb4ih: which provider actually ran this pass. Load-bearing once the
+    # reviewer rotates providers on a print-timeout: `reviewer_model` alone
+    # cannot answer "which pool entry produced the verdict, and which one
+    # timed out" for a `review_agent.type` pool, because a timed-out pass
+    # often has no usage row (and therefore no model) at all.
+    attribute :reviewer_provider, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+      description "Provider that ran a :review pass. Nil for :impl rows and pre-review rows."
     end
 
     attribute :cost_usd, :float do

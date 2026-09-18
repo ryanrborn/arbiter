@@ -480,17 +480,22 @@ defmodule ArbiterWeb.SessionIndexLive do
 
               <span class="ml-auto flex items-center gap-2">
                 <%!-- Not a navigation: the window opens in the dock, on this
-                      page. An ended session opens too — its window carries the
-                      metadata and cost, and says plainly that the output it
-                      never watched is not available (bd-a292yj). --%>
+                      page. An ended session opens too, and since bd-3tf4oo its
+                      window replays the persisted transcript — so the action
+                      says what it will show. Same event, same dock window:
+                      this is an entry point, not a second viewer. --%>
                 <Core.button
-                  id={"open-in-dock-button-#{session.id}"}
+                  id={
+                    if session.status == :running,
+                      do: "open-in-dock-button-#{session.id}",
+                      else: "view-transcript-#{session.id}"
+                  }
                   size="sm"
                   variant="secondary"
                   phx-click="open_in_dock"
                   phx-value-id={session.id}
                 >
-                  {if session.status == :running, do: "Open in dock", else: "View in dock"}
+                  {if session.status == :running, do: "Open in dock", else: "View transcript"}
                 </Core.button>
 
                 <Core.button
@@ -716,6 +721,9 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp dispatch_label(%{can_dispatch: true}), do: " · can dispatch"
   defp dispatch_label(_session), do: ""
+
+  defp remote_control_label(%{remote_control: true, bridge_status: :unavailable}),
+    do: " · remote control bridge unavailable"
 
   defp remote_control_label(%{remote_control: true}), do: " · remote control requested"
   defp remote_control_label(_session), do: ""

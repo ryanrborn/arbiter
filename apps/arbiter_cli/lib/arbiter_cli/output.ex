@@ -124,6 +124,32 @@ defmodule ArbiterCli.Output do
     IO.puts("#{dep["from_issue_id"]} --#{dep["type"]}--> #{dep["to_issue_id"]}")
   end
 
+  @doc """
+  Print `arb dep list`'s edge rows (`Arbiter.Tasks.Dependencies.list/1`'s REST
+  shape). Mode-aware. Text rows carry both endpoints' id, title, status and
+  priority — the whole point of `arb dep list` over reading the DB by hand is
+  telling a live edge from a closed↔closed one at a glance.
+  """
+  @spec emit_dependency_list([map()], :text | :json) :: :ok
+  def emit_dependency_list(deps, :json), do: IO.puts(Jason.encode!(%{data: deps}))
+
+  def emit_dependency_list([], :text), do: IO.puts("(no dependency edges)")
+
+  def emit_dependency_list(deps, :text) do
+    Enum.each(deps, fn dep -> IO.puts(format_dependency_row(dep)) end)
+  end
+
+  defp format_dependency_row(dep) do
+    from = endpoint_label(dep["from"], dep["from_issue_id"])
+    to = endpoint_label(dep["to"], dep["to_issue_id"])
+    "#{from}  --#{dep["type"]}-->  #{to}"
+  end
+
+  defp endpoint_label(%{"id" => id, "title" => title, "status" => status, "priority" => p}, _),
+    do: "#{id} (#{title}) [#{status} P#{p}]"
+
+  defp endpoint_label(_, id), do: to_string(id)
+
   # ----- formatting primitives -----
 
   @doc """
@@ -151,7 +177,6 @@ defmodule ArbiterCli.Output do
       Status:       <status>
       Priority:     <priority>
       Type:         <issue_type>
-      Assignee:     <assignee>
       Workspace:    <workspace_id>
       Tracker:      <tracker_type>:<tracker_ref>
       Created:      <created_at>
@@ -182,7 +207,6 @@ defmodule ArbiterCli.Output do
         {"Progress", child_progress_label(issue)},
         {"Rollup", epic_rollup_label(issue["epic_rollup"])},
         {"Auto-close", auto_close_label(issue)},
-        {"Assignee", issue["assignee"]},
         {"Workspace", issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
         {"Target", issue["target_branch"]},
@@ -200,8 +224,16 @@ defmodule ArbiterCli.Output do
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
       |> Enum.map_join("", fn {k, v} -> "\n#{k}:\n  " <> indent(v) end)
 
-    header <> sections
+    header <> sections <> dependencies_section(issue["dependencies"])
   end
+
+  # bd-1defgu: `arb issue show` gains a Dependencies section — the edge write
+  # surfaces (`arb dep add`) had no read-side counterpart on this view before.
+  defp dependencies_section(deps) when is_list(deps) and deps != [] do
+    "\n\nDependencies:\n" <> Enum.map_join(deps, "\n", &("  " <> format_dependency_row(&1)))
+  end
+
+  defp dependencies_section(_deps), do: ""
 
   # bd-5lc99r: for a `task`-type directive the deliverable IS the findings
   # summary in `notes`, so surface it first and labelled "Findings", with an

@@ -167,8 +167,8 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     test "every guard in the design doc's §2 inventory has exactly one row" do
       doc_ids = inventory_ids()
 
-      assert length(doc_ids) == 63,
-             "expected §2's 63 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
+      assert length(doc_ids) == 65,
+             "expected §2's 65 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
                "table shape changed?"
 
       missing = doc_ids -- GuardRegistry.doc_refs()
@@ -565,7 +565,7 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
         c: ~w(G5 G6 G7 G8 G9 G10 G11 G12 G13),
         d: ~w(G14 G15 G16 C1 C3),
         e: ~w(W11 W12 W13 W14 W15 W16 W17 W18 W19 M7),
-        f: ~w(R2 R3 R4 R5 R6 P1 P2 P3 P4 P5 P6 P7)
+        f: ~w(R2 R3 R4 R5 R6 P1 P2 P3 P4 P5 P6 P7 P8)
       }
 
       for {class, refs} <- doc_classes, ref <- refs do

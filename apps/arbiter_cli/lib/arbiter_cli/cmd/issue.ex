@@ -10,7 +10,7 @@ defmodule ArbiterCli.Cmd.Issue do
                           [--parent <parent-id>] [--auto-close]
                           [--repo <repo_paths key>]
       arb issue update    <id> [--title ...] [--priority N] [--difficulty N]
-                          [--status s] [--description d] [--assignee a]
+                          [--status s] [--description d]
                           [--append-notes text] [--qa-notes text]
                           [--deployment-notes text] [--pr-body text]
       arb issue close     <id> [--reason ...]

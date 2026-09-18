@@ -400,7 +400,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # work, it may need to push a real fix, but that fix must land on the
   # ORIGINAL PR's branch: pushing a new branch from this directive's own
   # (unintegrated) worktree previously became a byte-identical duplicate PR
-  # against the original's entire diff (lt-divfvo -> verus_server#3682). Like
+  # against the original's entire diff (ac-divfvo -> apex_server#3682). Like
   # any `:task`, this directive gets no branch worktree — its current
   # directory (when one is provisioned) is a disposable, detached checkout
   # with no branch of its own, so `gh pr checkout` there is always safe: there

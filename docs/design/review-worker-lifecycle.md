@@ -54,7 +54,7 @@ automation modes. The mode decides **whether findings get posted to the PR** and
 | Mode | Reviews? | Posts to PR? | Behaviour |
 |---|---|---|---|
 | `:auto` | yes | **yes** — inline comments + verdict | Fully autonomous review. Used for authors/repos the fleet is trusted to comment on directly (`auto_authors`, or a `repo_overrides` set to `auto`). |
-| `:report_only` (alias `propose`) | yes | **no** | Human-in-the-loop. The reviewer runs the full review — reads the diff, computes findings + a recommended verdict — but posts **nothing**. It surfaces the findings and the exact **per-finding proposed comment text** to the coordinator mailbox (and, for the first pass, onto the `ExternalReview` audit record). A coordinator then **greenlights** which comments actually post. This is the required default for infra repos (`atlas`, `verus-infrastructure`). |
+| `:report_only` (alias `propose`) | yes | **no** | Human-in-the-loop. The reviewer runs the full review — reads the diff, computes findings + a recommended verdict — but posts **nothing**. It surfaces the findings and the exact **per-finding proposed comment text** to the coordinator mailbox (and, for the first pass, onto the `ExternalReview` audit record). A coordinator then **greenlights** which comments actually post. This is the required default for infra repos (`atlas`, `apex-infrastructure`). |
 | `:flag` (alias `notify`) | **no** | no | Pure escalation. Do NOT review — just raise a mailbox flag/escalation so a human notices the new commits or reply and decides what to do. The "ping me, don't review" stance. |
 | `:off` (aliases `never`, `disabled`) | **no** | no | Hard opt-out (bd-7opdaf). `worker_review` **refuses to dispatch at all** — no agent spawned, no tokens spent, nothing posted — unless `force: true` is passed for a deliberate one-off. An in-flight ReviewPatrol engagement downgraded live to `:off` behaves like `:flag` (surface, never post). Stricter than `:flag`, which still requires the guard to accept the initial dispatch. |
 
@@ -270,7 +270,7 @@ arb config set review_automation.default "report_only"
 
 # Hard-gate specific repos regardless of author — infra is review-and-report-only,
 # and a repo the fleet must never touch is a hard "off"
-arb config set review_automation.repo_overrides '{"atlas": "report_only", "verus-infrastructure": "report_only", "voice_biometrics": "off"}'
+arb config set review_automation.repo_overrides '{"atlas": "report_only", "apex-infrastructure": "report_only", "apex_audio": "off"}'
 ```
 
 Authors in `auto_authors` get `:auto` mode (automatic re-reviews and threaded
@@ -292,7 +292,7 @@ infra repos are review-and-report-only (never auto-post):
   "auto_authors": ["alice", "bob"],
   "repo_overrides": {
     "atlas": "report_only",
-    "verus-infrastructure": "report_only"
+    "apex-infrastructure": "report_only"
   }
 }
 ```
