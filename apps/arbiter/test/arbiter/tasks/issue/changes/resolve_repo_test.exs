@@ -102,12 +102,12 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepoTest do
     end
 
     test "an explicit repo is canonicalized onto the configured key" do
-      ws = ws!(%{"repo_paths" => %{"verus-server" => "/srv/vs", "client" => "/srv/client"}})
+      ws = ws!(%{"repo_paths" => %{"apex-server" => "/srv/vs", "client" => "/srv/client"}})
 
       {:ok, issue} =
-        Ash.create(Issue, %{title: "loose", workspace_id: ws.id, repo: "leotech/verus_server"})
+        Ash.create(Issue, %{title: "loose", workspace_id: ws.id, repo: "acme/apex_server"})
 
-      assert issue.repo == "verus-server"
+      assert issue.repo == "apex-server"
     end
 
     test "keeps the named key when two keys alias the same checkout" do

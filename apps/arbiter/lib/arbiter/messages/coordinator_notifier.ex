@@ -256,7 +256,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   Fired by `Arbiter.Trackers.Sync` / `Arbiter.Tasks.Issue.Changes.SyncTracker`
   when a lifecycle transition (dispatch → In Progress, PR-open → In Code Review,
   merge → Done, …) can't be resolved or fails on the wire. The original
-  incident (VR-17911) was invisible precisely because such failures were
+  incident (AX-17911) was invisible precisely because such failures were
   swallowed; this surfaces a `status_map`/workflow mismatch as an actionable
   inbox item instead. Best-effort, returns `:ok`.
 

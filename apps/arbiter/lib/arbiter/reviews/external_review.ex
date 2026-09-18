@@ -820,7 +820,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   # Resolve whether this review runs report-only (post nothing, await greenlight).
   # An explicit `report_only: true` or `automation: "report_only"|"propose"` wins;
   # otherwise the workspace `review_automation` policy decides — a repo_override or
-  # default of `report_only` (e.g. infra repos atlas / verus-infrastructure) makes
+  # default of `report_only` (e.g. infra repos atlas / apex-infrastructure) makes
   # the review report-only. Author is not needed: the author-based path only ever
   # yields :auto, never :report_only.
   defp put_report_only(opts, prepared) do

@@ -52,8 +52,8 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
   end
 
   describe "parse_external_ref/1" do
-    test "jira-VR-17585 → {:jira, \"VR-17585\"}" do
-      assert Mapper.parse_external_ref("jira-VR-17585") == {:jira, "VR-17585"}
+    test "jira-AX-17585 → {:jira, \"AX-17585\"}" do
+      assert Mapper.parse_external_ref("jira-AX-17585") == {:jira, "AX-17585"}
     end
 
     test "linear-LIN-42 → {:linear, \"LIN-42\"}" do
@@ -164,7 +164,7 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
     test "extracts prefix from first id" do
       assert Mapper.derive_prefix([%{"id" => "hq-3o8"}]) == "hq"
       assert Mapper.derive_prefix([%{"id" => "vs-jwq"}]) == "vs"
-      assert Mapper.derive_prefix([%{"id" => "verus-cv-7ipag"}]) == "verus"
+      assert Mapper.derive_prefix([%{"id" => "apex-cv-7ipag"}]) == "apex"
     end
 
     test "lowercases the prefix" do

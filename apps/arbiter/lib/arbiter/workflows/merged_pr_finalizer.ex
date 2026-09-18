@@ -9,7 +9,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   When a PR is merged manually on GitHub — or merged after the worker and its
   `restart: :temporary` Watchdog have already exited — nothing polls for the
   merge. The linked Jira ticket stalls at "In Code Review" and the arbiter task
-  stays open indefinitely. This was the root cause of the VR-17892 symptom.
+  stays open indefinitely. This was the root cause of the AX-17892 symptom.
 
   ## Detection
 

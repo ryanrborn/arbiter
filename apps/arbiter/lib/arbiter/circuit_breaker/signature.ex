@@ -32,7 +32,7 @@ defmodule Arbiter.CircuitBreaker.Signature do
     * Forge refs — a number preceded by `#` or `!` (`repo/x#3282`, `!77`) is
       never touched, which is what keeps two different PRs from colliding.
     * Slug-embedded numbers — a digit preceded by a word character or `-`
-      (`bd-7rxwzc`, `verus_server2`) is part of an identifier, not a count.
+      (`bd-7rxwzc`, `apex_server2`) is part of an identifier, not a count.
     * All non-numeric words: repo slugs, task ids, block reasons.
 
   ## Structured subjects
@@ -43,7 +43,7 @@ defmodule Arbiter.CircuitBreaker.Signature do
   rendered verbatim and never scrubbed. That is the escape hatch for a subject
   whose identity IS a number:
 
-      Signature.signature(ws, :pr_patrol_follow_up, ["leo/verus_server", 3282])
+      Signature.signature(ws, :pr_patrol_follow_up, ["acme/apex_server", 3282])
 
   keeps `3282` intact regardless of the free-text rules, while any binary
   component in the same list still goes through the scrubber. Component order

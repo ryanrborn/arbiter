@@ -37,8 +37,8 @@ defmodule Arbiter.Mergers.Github do
   ## Per-repo repo derivation
 
   When `workspace.config["merge"]["config"]` omits `repo` (a multi-repo
-  workspace whose repos live in *different* repos, e.g. the `leotech`
-  workspace's four `leo-technologies-llc/*` repos), `open/4` derives the
+  workspace whose repos live in *different* repos, e.g. the `acme`
+  workspace's four `acme-corp/*` repos), `open/4` derives the
   target repo from the repo's `origin` remote via
   `Arbiter.Mergers.Github.RepoResolver` and bakes the result into the
   minted `mr_ref`. The caller passes the repo path through `opts.repo_path`

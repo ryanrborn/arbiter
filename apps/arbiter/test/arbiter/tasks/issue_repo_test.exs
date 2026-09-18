@@ -110,10 +110,10 @@ defmodule Arbiter.Tasks.IssueRepoTest do
     end
 
     test "canonicalizes a loosely-spelled key onto the configured one" do
-      ws = ws!(%{"repo_paths" => %{"verus-server" => "/srv/vs"}})
+      ws = ws!(%{"repo_paths" => %{"apex-server" => "/srv/vs"}})
 
-      assert {:ok, "verus-server"} = IssueRepo.resolve(ws.id, "verus_server")
-      assert {:ok, "verus-server"} = IssueRepo.resolve(ws.id, "leotech/verus-server")
+      assert {:ok, "apex-server"} = IssueRepo.resolve(ws.id, "apex_server")
+      assert {:ok, "apex-server"} = IssueRepo.resolve(ws.id, "acme/apex-server")
     end
 
     test "accepts an explicit repo when the workspace configures no repos at all" do
@@ -143,7 +143,7 @@ defmodule Arbiter.Tasks.IssueRepoTest do
           "remote",
           "add",
           "origin",
-          "git@github.com:leotech/verus-client.git"
+          "git@github.com:acme/apex-client.git"
         ])
 
       on_exit(fn -> File.rm_rf!(tmp) end)
@@ -151,13 +151,13 @@ defmodule Arbiter.Tasks.IssueRepoTest do
     end
 
     test "resolves an owner/repo slug onto the repo_paths key by origin remote", %{path: path} do
-      # The leotech shape: the key is "client", the forge slug is
-      # "leotech/verus-client", and neither spelling contains the other. This
+      # The acme shape: the key is "client", the forge slug is
+      # "acme/apex-client", and neither spelling contains the other. This
       # is the repo PRPatrol hands a follow-up.
       ws = ws!(%{"repo_paths" => %{"client" => path, "server" => "/srv/server"}})
 
-      assert {:ok, "client"} = IssueRepo.resolve(ws.id, "leotech/verus-client")
-      assert IssueRepo.configured_key(ws.id, "leotech/verus-client") == "client"
+      assert {:ok, "client"} = IssueRepo.resolve(ws.id, "acme/apex-client")
+      assert IssueRepo.configured_key(ws.id, "acme/apex-client") == "client"
     end
 
     test "still rejects a slug that matches no configured repo's remote", %{path: path} do
@@ -170,9 +170,9 @@ defmodule Arbiter.Tasks.IssueRepoTest do
 
   describe "configured_key/2" do
     test "returns the canonical key, or nil when nothing matches" do
-      ws = ws!(%{"repo_paths" => %{"verus-server" => "/srv/vs"}})
+      ws = ws!(%{"repo_paths" => %{"apex-server" => "/srv/vs"}})
 
-      assert IssueRepo.configured_key(ws.id, "verus_server") == "verus-server"
+      assert IssueRepo.configured_key(ws.id, "apex_server") == "apex-server"
       assert IssueRepo.configured_key(ws.id, "nope") == nil
       assert IssueRepo.configured_key(ws.id, nil) == nil
     end

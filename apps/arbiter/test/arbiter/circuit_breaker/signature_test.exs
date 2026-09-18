@@ -57,7 +57,7 @@ defmodule Arbiter.CircuitBreaker.SignatureTest do
   describe "genuinely different subjects do not collide" do
     test "different PR numbers stay distinct" do
       refute norm("follow-up for #1632") == norm("follow-up for #1630")
-      refute norm("leo/verus_server#3282") == norm("leo/verus_server#3283")
+      refute norm("acme/apex_server#3282") == norm("acme/apex_server#3283")
     end
 
     test "different gitlab MR refs stay distinct" do

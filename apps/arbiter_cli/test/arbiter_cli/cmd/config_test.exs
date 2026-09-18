@@ -116,7 +116,7 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       initial = %{
         "merge" => %{
           "strategy" => "github",
-          "config" => %{"owner" => "leo", "repo" => "arbiter"}
+          "config" => %{"owner" => "acme", "repo" => "arbiter"}
         }
       }
 
@@ -217,7 +217,7 @@ defmodule ArbiterCli.Cmd.ConfigTest do
   describe "unset" do
     test "removes a dotted leaf, server-side via unset_paths" do
       initial = %{
-        "tracker" => %{"type" => "jira", "config" => %{"host" => "h", "project_key" => "VR"}}
+        "tracker" => %{"type" => "jira", "config" => %{"host" => "h", "project_key" => "AX"}}
       }
 
       stub_routes([
@@ -229,7 +229,7 @@ defmodule ArbiterCli.Cmd.ConfigTest do
            assert decoded["unset_paths"] == ["tracker.config.host"]
 
            updated = %{
-             "tracker" => %{"type" => "jira", "config" => %{"project_key" => "VR"}}
+             "tracker" => %{"type" => "jira", "config" => %{"project_key" => "AX"}}
            }
 
            conn
@@ -309,7 +309,7 @@ defmodule ArbiterCli.Cmd.ConfigTest do
   describe "overview" do
     test "renders grouped sections from config" do
       config = %{
-        "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "acme"}},
         "merge" => %{"strategy" => "github", "auto_merge" => true},
         "agent" => %{"type" => "claude"},
         "routing" => %{"policy" => "by_priority"},
@@ -323,7 +323,7 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert code == 0
       assert out =~ "== Tracker =="
       assert out =~ "type: github"
-      assert out =~ "owner: leo"
+      assert out =~ "owner: acme"
       assert out =~ "== Merge =="
       assert out =~ "strategy: github"
       assert out =~ "auto_merge: true"

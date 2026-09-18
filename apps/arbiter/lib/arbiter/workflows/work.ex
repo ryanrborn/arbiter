@@ -12,7 +12,7 @@ defmodule Arbiter.Workflows.Work do
 
     * `:none`  — no-op (no external tracker to notify).
     * `:jira`  — transitions to the workspace-configured "done" name
-                 (default `"Code Complete"` per the Verus convention).
+                 (default `"Code Complete"` per the Apex convention).
     * `:linear`, `:github` — Phase 5; will dispatch through their adapters
                  when those land.
 

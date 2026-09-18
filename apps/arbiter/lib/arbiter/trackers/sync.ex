@@ -11,7 +11,7 @@ defmodule Arbiter.Trackers.Sync do
       and — for `:pr_opened` — attaches the PR as a comment + remote link.
 
     * `notify_failure/3` — the shared failure surface. The original incident
-      (VR-17911 never auto-transitioned) was invisible because tracker errors
+      (AX-17911 never auto-transitioned) was invisible because tracker errors
       were silently swallowed. This logs loudly **and** raises an
       escalation so a `status_map` / workflow mismatch can't hide.
 

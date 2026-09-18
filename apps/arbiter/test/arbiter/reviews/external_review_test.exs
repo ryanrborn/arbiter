@@ -43,25 +43,25 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       assert {:ok, prepared} =
                ExternalReview.prepare(
-                 pr: "https://github.com/leo/verus_sigv4/pull/5",
+                 pr: "https://github.com/acme/apex_sigv4/pull/5",
                  workspace: ws.name
                )
 
       assert prepared.adapter == Arbiter.Mergers.Github
       assert prepared.strategy == :github
-      assert prepared.mr_ref == "leo/verus_sigv4#5"
-      assert prepared.link == "https://github.com/leo/verus_sigv4/pull/5"
+      assert prepared.mr_ref == "acme/apex_sigv4#5"
+      assert prepared.link == "https://github.com/acme/apex_sigv4/pull/5"
     end
 
     test "resolves repo_path from workspace config and embeds owner/repo for a bare number" do
-      repo = tmp_git_repo("git@github.com:leo/verus_auth_server.git")
+      repo = tmp_git_repo("git@github.com:acme/apex_auth_server.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "er-prep-3",
           prefix: uniq_prefix(),
           config: %{
-            "repo_paths" => %{"verus_auth_server" => repo},
+            "repo_paths" => %{"apex_auth_server" => repo},
             "merge" => %{
               "strategy" => "github",
               "config" => %{"owner" => "octo", "repo" => "widget"}
@@ -70,9 +70,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         })
 
       assert {:ok, prepared} =
-               ExternalReview.prepare(pr: "394", repo: "verus_auth_server", workspace: ws.name)
+               ExternalReview.prepare(pr: "394", repo: "apex_auth_server", workspace: ws.name)
 
-      assert prepared.mr_ref == "leo/verus_auth_server#394"
+      assert prepared.mr_ref == "acme/apex_auth_server#394"
     end
 
     test "the :direct merge strategy has no external-PR support" do
@@ -214,20 +214,20 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     # session.ex as a consumer via a read-only repo checkout.
     defp consumer_fixture_repo do
       dir = Path.join(System.tmp_dir!(), "er-consumer-#{:erlang.unique_integer([:positive])}")
-      File.mkdir_p!(Path.join(dir, "lib/verus"))
+      File.mkdir_p!(Path.join(dir, "lib/apex"))
 
-      File.write!(Path.join(dir, "lib/verus/token.ex"), """
-      defmodule Verus.Token do
+      File.write!(Path.join(dir, "lib/apex/token.ex"), """
+      defmodule Apex.Token do
         def sign(payload) do
           :ok
         end
       end
       """)
 
-      File.write!(Path.join(dir, "lib/verus/session.ex"), """
-      defmodule Verus.Session do
+      File.write!(Path.join(dir, "lib/apex/session.ex"), """
+      defmodule Apex.Session do
         def start(payload) do
-          Verus.Token.sign(payload)
+          Apex.Token.sign(payload)
         end
       end
       """)
@@ -270,9 +270,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
             conn
             |> Plug.Conn.put_resp_header("content-type", "text/plain")
             |> Plug.Conn.resp(200, """
-            diff --git a/lib/verus/token.ex b/lib/verus/token.ex
-            --- a/lib/verus/token.ex
-            +++ b/lib/verus/token.ex
+            diff --git a/lib/apex/token.ex b/lib/apex/token.ex
+            --- a/lib/apex/token.ex
+            +++ b/lib/apex/token.ex
             @@ -1,3 +1,3 @@
             -  def sign(payload, algorithm) do
             +  def sign(payload) do
@@ -721,13 +721,13 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                  workspace: ws.name,
                  follow_up: true,
                  automation: "auto",
-                 tracker_context_ref: "VR-18004",
+                 tracker_context_ref: "AX-18004",
                  check_runner: one_finding()
                )
 
       engagement = Ash.get!(Issue, result.engagement)
       assert engagement.review_automation == :auto
-      assert engagement.tracker_context_ref == "VR-18004"
+      assert engagement.tracker_context_ref == "AX-18004"
     end
   end
 
@@ -783,8 +783,8 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
             "tracker" => %{
               "type" => "jira",
               "config" => %{
-                "host" => "leotechnologies.atlassian.net",
-                "project_key" => "VR",
+                "host" => "acme.atlassian.net",
+                "project_key" => "AX",
                 "credentials_ref" => "env:#{@jira_env}",
                 "email" => "tester@example.com"
               }
@@ -796,7 +796,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
         json(conn, %{
-          "key" => "VR-18174",
+          "key" => "AX-18174",
           "fields" => %{
             "summary" => "Prompt too long on large PRs",
             "description" => "The reviewer chokes on bundled app.js diffs."
@@ -815,12 +815,12 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                ExternalReview.review(
                  pr: "octo/widget#42",
                  workspace: ws.name,
-                 tracker_context_ref: "VR-18174",
+                 tracker_context_ref: "AX-18174",
                  check_runner: runner
                )
 
       assert_received {:state, state}
-      assert state.tracker_context.ref == "VR-18174"
+      assert state.tracker_context.ref == "AX-18174"
       assert state.tracker_context.type == :jira
       assert state.tracker_context.title == "Prompt too long on large PRs"
       assert state.tracker_context.description == "The reviewer chokes on bundled app.js diffs."
@@ -2099,11 +2099,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       assert {:ok, prepared} =
                ExternalReview.prepare(
-                 pr: "leo-technologies-llc/voice_biometrics#450",
+                 pr: "acme-corp/apex_audio#450",
                  workspace: ws.name
                )
 
-      assert prepared.repo_name == "voice_biometrics"
+      assert prepared.repo_name == "apex_audio"
     end
 
     test "derives repo_name from a full forge URL when repo: is omitted" do
@@ -2111,7 +2111,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       assert {:ok, prepared} =
                ExternalReview.prepare(
-                 pr: "https://github.com/leo-technologies-llc/atlas/pull/1549",
+                 pr: "https://github.com/acme-corp/atlas/pull/1549",
                  workspace: ws.name
                )
 
@@ -2123,7 +2123,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       assert {:ok, prepared} =
                ExternalReview.prepare(
-                 pr: "leo-technologies-llc/voice_biometrics#450",
+                 pr: "acme-corp/apex_audio#450",
                  repo: "explicit_repo",
                  workspace: ws.name
                )
@@ -2157,7 +2157,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
               "default" => "auto",
               "repo_overrides" => %{
                 "atlas" => "report_only",
-                "voice_biometrics" => "report_only",
+                "apex_audio" => "report_only",
                 "fast_lane" => "auto",
                 "watched_repo" => "flag"
               }
@@ -2167,7 +2167,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       for {repo, expected_mode} <- [
             {"atlas", :report_only},
-            {"voice_biometrics", :report_only},
+            {"apex_audio", :report_only},
             {"fast_lane", :auto},
             {"watched_repo", :auto}
           ] do
@@ -2176,7 +2176,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         # regardless of what repo_overrides said (bd-7opdaf).
         assert {:ok, ack} =
                  ExternalReview.dispatch(
-                   pr: "leo-technologies-llc/#{repo}#1",
+                   pr: "acme-corp/#{repo}#1",
                    workspace: ws.name
                  )
 
@@ -2197,17 +2197,17 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
             },
             "review_automation" => %{
               "default" => "auto",
-              "repo_overrides" => %{"voice_biometrics" => "report_only"}
+              "repo_overrides" => %{"apex_audio" => "report_only"}
             }
           }
         })
 
       events = :ets.new(:ro_guard_events, [:public, :duplicate_bag])
-      stub_report_only_for(events, "leo-technologies-llc", "voice_biometrics", 1, "sha-guard")
+      stub_report_only_for(events, "acme-corp", "apex_audio", 1, "sha-guard")
 
       assert {:ok, result} =
                ExternalReview.review(
-                 pr: "leo-technologies-llc/voice_biometrics#1",
+                 pr: "acme-corp/apex_audio#1",
                  workspace: ws.name,
                  check_runner: one_finding()
                )
@@ -2299,11 +2299,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       assert {:error, {:automation_off, "quiet_repo", :repo_override}} =
                ExternalReview.dispatch(
-                 pr: "leo-technologies-llc/quiet_repo#1",
+                 pr: "acme-corp/quiet_repo#1",
                  workspace: ws.name
                )
 
-      assert [] = records_for(ws.id, "leo-technologies-llc/quiet_repo#1")
+      assert [] = records_for(ws.id, "acme-corp/quiet_repo#1")
     end
 
     test "review/1 refuses an off-gated repo_override before spawning anything" do
@@ -2321,7 +2321,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         })
 
       assert {:error, {:automation_off, "quiet_repo", :repo_override}} =
-               ExternalReview.review(pr: "leo-technologies-llc/quiet_repo#1", workspace: ws.name)
+               ExternalReview.review(pr: "acme-corp/quiet_repo#1", workspace: ws.name)
     end
 
     test "a workspace default of off refuses every repo" do
@@ -2364,7 +2364,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       assert {:ok, ack} =
                ExternalReview.dispatch(
-                 pr: "leo-technologies-llc/quiet_repo#1",
+                 pr: "acme-corp/quiet_repo#1",
                  workspace: ws.name,
                  force: true
                )
@@ -2402,7 +2402,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/repos/leo-technologies-llc/quiet_repo/pulls/1"} ->
+          {"GET", "/repos/acme-corp/quiet_repo/pulls/1"} ->
             json(conn, %{
               "number" => 1,
               "user" => %{"login" => "trusted_dev"},
@@ -2410,7 +2410,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
               "base" => %{"ref" => "main"}
             })
 
-          {"GET", "/repos/leo-technologies-llc/quiet_repo/pulls/1/reviews"} ->
+          {"GET", "/repos/acme-corp/quiet_repo/pulls/1/reviews"} ->
             json(conn, [])
 
           _ ->
@@ -2422,7 +2422,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       # though `auto_authors` should make it `:auto` for this PR's author.
       assert {:ok, ack} =
                ExternalReview.dispatch(
-                 pr: "leo-technologies-llc/quiet_repo#1",
+                 pr: "acme-corp/quiet_repo#1",
                  workspace: ws.name
                )
 
@@ -2431,9 +2431,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
     test "describe_error names the repo and the config key responsible" do
       msg =
-        ExternalReview.describe_error({:automation_off, "voice_biometrics", :repo_override})
+        ExternalReview.describe_error({:automation_off, "apex_audio", :repo_override})
 
-      assert msg =~ "voice_biometrics"
+      assert msg =~ "apex_audio"
       assert msg =~ "repo_overrides"
       assert msg =~ "force: true"
     end

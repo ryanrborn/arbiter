@@ -7,7 +7,7 @@ defmodule Arbiter.Workflows.CIFailureFollowUp do
 
   A failing required check must not trigger a blind "push something until
   it's green" response — flaky tests are common (the motivating case:
-  verus-client#3260/#3263, both the same flaky `call-details.spec`
+  apex-client#3260/#3263, both the same flaky `call-details.spec`
   transcript-scroll test), and a real regression needs a minimal fix, not a
   workaround. This mirrors `Arbiter.Workflows.ReviewThreadFollowUp`'s
   reply/resolve/escalate shape, but for the CI-triage decision tree instead

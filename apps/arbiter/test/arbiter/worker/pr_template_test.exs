@@ -308,7 +308,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
         priority: 2,
         issue_type: :bug,
         tracker_type: :jira,
-        tracker_ref: "VR-17585"
+        tracker_ref: "AX-17585"
       }
 
       out = PRTemplate.default_body(task)
@@ -353,7 +353,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
         priority: 2,
         issue_type: :task,
         tracker_type: :jira,
-        tracker_ref: "VR-100"
+        tracker_ref: "AX-100"
       }
 
       template = "## Summary\n\nSome body."
@@ -453,7 +453,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
 
       - Task: bd-6v2my2
       - Related protocol: bd-76ydsu (reply-then-resolve), bd-7ezcqb (no dangling deferral promises)
-      - Regression fixture: `lt-divfvo` → `leo-technologies-llc/verus_server#3682`
+      - Regression fixture: `ac-divfvo` → `acme-corp/apex_server#3682`
       """
 
       out = PRTemplate.ensure_closes_keyword(custom_body, task)
@@ -490,7 +490,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
         priority: 2,
         issue_type: :task,
         tracker_type: :jira,
-        tracker_ref: "VR-1059"
+        tracker_ref: "AX-1059"
       }
 
       custom_body = "## Summary\n\nFixed the issue.\n\n## References\n\n- Task: bd-6v2my2"
@@ -524,7 +524,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
         priority: 2,
         issue_type: :task,
         tracker_type: :jira,
-        tracker_ref: "VR-1059"
+        tracker_ref: "AX-1059"
       }
 
       custom_body = """
@@ -535,7 +535,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
       ## References
 
       - Task: bd-test
-      - Jira Issue: VR-1059
+      - Jira Issue: AX-1059
       """
 
       out = PRTemplate.ensure_closes_keyword(custom_body, task)
@@ -543,7 +543,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
       refute out =~ "Closes"
       # Should preserve the original content
       assert out =~ "Task: bd-test"
-      assert out =~ "VR-1059"
+      assert out =~ "AX-1059"
     end
   end
 end

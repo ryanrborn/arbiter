@@ -39,7 +39,7 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
   def parse_priority(_), do: 2
 
   @doc """
-  Parse a Dolt `external_ref` like `"jira-VR-17585"` into a
+  Parse a Dolt `external_ref` like `"jira-AX-17585"` into a
   `{tracker_type, tracker_ref}` tuple.
 
   Returns `{:none, nil}` for missing / empty / unknown formats.

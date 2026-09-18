@@ -20,7 +20,7 @@ defmodule Arbiter.Worker.ReviewAutomation do
       NOTHING to the PR. The findings and per-finding *proposed* comment text are
       surfaced to the coordinator, who greenlights which comments actually post
       (`Arbiter.Reviews.ExternalReview.greenlight/1`). This is the required
-      default for infra repos (atlas, verus-infrastructure) — human-in-the-loop
+      default for infra repos (atlas, apex-infrastructure) — human-in-the-loop
       review. Accepts the alias `"propose"`.
     * `:flag`        — a pure escalation: do NOT review, just surface new
       commits / author replies to the coordinator mailbox so a human decides
@@ -39,7 +39,7 @@ defmodule Arbiter.Worker.ReviewAutomation do
         "auto_authors" => ["alice", "bob"],
         "repo_overrides" => %{
           "atlas" => "report_only",     # infra: always review-and-report, never auto-post
-          "verus-infrastructure" => "report_only"
+          "apex-infrastructure" => "report_only"
         }
       }
   """

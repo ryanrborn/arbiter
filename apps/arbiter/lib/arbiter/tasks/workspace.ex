@@ -19,8 +19,8 @@ defmodule Arbiter.Tasks.Workspace do
         "tracker" => %{
           "type" => "jira",                    # one of: "none", "jira", "shortcut", "linear", "github", "gitlab"
           "config" => %{
-            "host" => "leotechnologies.atlassian.net",
-            "project_key" => "VR",
+            "host" => "acme.atlassian.net",
+            "project_key" => "AX",
             "credentials_ref" => "env:JIRA_TOKEN"
           }
         },
@@ -218,7 +218,7 @@ defmodule Arbiter.Tasks.Workspace do
 
       description """
       Short identifier prepended to every Issue ID in this workspace (e.g. "bd-3o8",
-      "verus-VR-17575"). Lowercase letters + digits only, max 16 chars.
+      "apex-AX-17575"). Lowercase letters + digits only, max 16 chars.
       """
     end
 

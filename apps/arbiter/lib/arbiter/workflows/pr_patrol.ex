@@ -71,7 +71,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   Not in `Application.children`. Started manually per-workspace:
 
       Arbiter.Workflows.PRPatrol.start_link(
-        repo: "leo-technologies-llc/verus_server",
+        repo: "acme-corp/apex_server",
         workspace_id: ws.id,
         interval_ms: 60_000
       )
@@ -452,7 +452,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   # a zombie `:idle` registration). Previously that also freed `deduped?/2` for
   # an immediate refile on the very next tick — a persistent failure therefore
   # re-filed + re-escalated once a minute forever (bd-49ajyt spammed ~25
-  # escalations on verus-client#3282). Now the failure is recorded per PR:
+  # escalations on apex-client#3282). Now the failure is recorded per PR:
   # `backing_off?/2` parks the PR for an exponentially-growing window before
   # the next retry, and escalation is gated on whether the coordinator message
   # actually PERSISTED (bd-dtpjlf) — not merely on whether this is the first
@@ -877,7 +877,7 @@ defmodule Arbiter.Workflows.PRPatrol do
         # `Dispatch.dispatch/2` call turns into a brand-new PR on completion
         # (via the MergeQueue), and its commit gate would fail a run that
         # posts replies/resolves but pushes no commit — exactly the
-        # lt-divfvo -> verus_server#3682 duplicate-PR incident. `:task`
+        # ac-divfvo -> apex_server#3682 duplicate-PR incident. `:task`
         # completes via the notes gate instead: no commit gate, no PR, no
         # merge, and no branch worktree at all — the worker still gets a real
         # (detached, branch-free) repo checkout to run `gh`/`git` from via
@@ -895,8 +895,8 @@ defmodule Arbiter.Workflows.PRPatrol do
         workspace_id: state.workspace_id,
         # bd-9dwbvt: a follow-up belongs to the PR's repo. `state.repo` is the
         # forge slug the patrol runs against; `configured_key/2` maps it back
-        # onto the `repo_paths` key the issue must persist (the leotech shape
-        # where key "client" ≠ slug "leotech/verus-client"). `nil` when it maps
+        # onto the `repo_paths` key the issue must persist (the acme shape
+        # where key "client" ≠ slug "acme/apex-client"). `nil` when it maps
         # to nothing, which leaves the create to resolve a repo the usual way.
         repo: IssueRepo.configured_key(state.workspace_id, state.repo)
       }

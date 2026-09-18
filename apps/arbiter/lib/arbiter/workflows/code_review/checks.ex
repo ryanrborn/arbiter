@@ -577,7 +577,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
 
   # Generated/minified/lockfile diffs (bundled `app.js`, `package-lock.json`,
   # `mix.lock`) add nothing for a reviewer to check but routinely blow past
-  # the model's context window (VR-18174 #3652: ~1.5M tokens from one bundled
+  # the model's context window (AX-18174 #3652: ~1.5M tokens from one bundled
   # asset). Strip whole-file diff hunks matching an exclude glob before they
   # ever reach the prompt; note what was dropped so the reviewer (and anyone
   # reading its findings) knows the diff was incomplete on purpose.
@@ -833,7 +833,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     end
   end
 
-  # A message that already cites a real relative path ("deps/verus_auth/
+  # A message that already cites a real relative path ("deps/apex_auth/
   # lib/.../authorize_jwt.ex:223-226") is fetched directly. Otherwise, look
   # for a CamelCase module-ish reference ("FallbackController",
   # "AuthorizeJwt") and, when the adapter also exposes `search_path/2`,

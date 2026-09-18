@@ -424,7 +424,7 @@ defmodule Arbiter.MCP.Catalog do
           "tracker_context_ref" => %{
             "type" => "string",
             "description" =>
-              "Tracker issue ref for read-only context (e.g. \"VR-18004\"). The ticket's " <>
+              "Tracker issue ref for read-only context (e.g. \"AX-18004\"). The ticket's " <>
                 "description is fetched at review dispatch and injected into the reviewer's " <>
                 "prompt. No assignment check, no write-back."
           },
@@ -807,7 +807,7 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Tracker issue ref to fetch acceptance criteria from — read-only " <>
                 "context for the reviewer. No claim, no assignment check, no write-back. Safe " <>
-                "for coworker-owned tickets (e.g. \"VR-18004\"). On a `pr` review with `follow_up`, " <>
+                "for coworker-owned tickets (e.g. \"AX-18004\"). On a `pr` review with `follow_up`, " <>
                 "it is also carried onto the engagement for re-review intent."
           },
           "tracker_context_type" => %{

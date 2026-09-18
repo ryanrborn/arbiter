@@ -123,7 +123,7 @@ from a laptop.
 Allowed background calls are attributed to the subsystem that issued them, and
 the periodic line carries the breakdown biggest-spender-first:
 
-    GitHub limiter: {:account, "leo"} remaining=4407 fg=0 fg_paused=0
+    GitHub limiter: {:account, "acme"} remaining=4407 fg=0 fg_paused=0
       bg=443 (pr_state_poller=380 pr_patrol=51 merge_queue=12) bg_paused=0
       secondary_trips=0
 

@@ -962,12 +962,12 @@ defmodule Arbiter.MCP.ToolsTest do
                  "title" => "review context task",
                  "tracker_type" => "none",
                  "tracker_context_type" => "jira",
-                 "tracker_context_ref" => "VR-18004"
+                 "tracker_context_ref" => "AX-18004"
                })
 
       {:ok, reloaded} = Ash.get(Issue, data.id)
       assert reloaded.tracker_context_type == :jira
-      assert reloaded.tracker_context_ref == "VR-18004"
+      assert reloaded.tracker_context_ref == "AX-18004"
       # tracker_type stays none — context ref is read-only and never claimed
       assert reloaded.tracker_type == :none
     end
@@ -2533,12 +2533,12 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:ok, ack} =
                Tools.worker_review(coordinator, %{
-                 "pr" => "https://github.com/leo/verus_sigv4/pull/5"
+                 "pr" => "https://github.com/acme/apex_sigv4/pull/5"
                })
 
       assert ack.external == true
       assert ack.status == "dispatched"
-      assert ack.mr_ref == "leo/verus_sigv4#5"
+      assert ack.mr_ref == "acme/apex_sigv4#5"
       assert ack.strategy == :github
     end
 
@@ -2554,7 +2554,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:ok, ack} =
                Tools.worker_review(coordinator, %{
-                 "pr" => "https://github.com/leo/verus_sigv4/pull/6",
+                 "pr" => "https://github.com/acme/apex_sigv4/pull/6",
                  "scope" => "repo"
                })
 
@@ -2588,14 +2588,14 @@ defmodule Arbiter.MCP.ToolsTest do
       _result =
         Tools.worker_review(ctx.coordinator, %{
           "task_id" => task.id,
-          "tracker_context_ref" => "VR-18004",
+          "tracker_context_ref" => "AX-18004",
           "tracker_context_type" => "jira",
           "with_claude" => false
         })
 
       # The tracker context must be persisted on the task regardless of dispatch outcome.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.tracker_context_ref == "VR-18004"
+      assert reloaded.tracker_context_ref == "AX-18004"
       assert reloaded.tracker_context_type == :jira
       # tracker_type must remain :none — no claim, no write-back.
       assert reloaded.tracker_type == :none
@@ -2604,12 +2604,12 @@ defmodule Arbiter.MCP.ToolsTest do
     test "task_show includes tracker_context_ref and tracker_context_type in full view (bd-2eo4cg)",
          ctx do
       {:ok, task} =
-        Ash.update(ctx.task, %{tracker_context_type: :jira, tracker_context_ref: "VR-18004"},
+        Ash.update(ctx.task, %{tracker_context_type: :jira, tracker_context_ref: "AX-18004"},
           action: :update
         )
 
       {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => task.id, "full" => true})
-      assert full.tracker_context_ref == "VR-18004"
+      assert full.tracker_context_ref == "AX-18004"
       assert full.tracker_context_type == "jira"
     end
 

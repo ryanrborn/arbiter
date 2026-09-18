@@ -330,9 +330,9 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
   describe "PATCH /api/workspaces/:id/config" do
     setup do
       initial = %{
-        "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "acme"}},
         "repo_paths" => %{"arbiter" => "/srv/arbiter"},
-        "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo", "repo" => "arb"}}
+        "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme", "repo" => "arb"}}
       }
 
       {:ok, ws} = Ash.create(Workspace, %{name: "patch-cfg", prefix: "pcf", config: initial})
@@ -349,7 +349,7 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert body["config"]["merge"]["auto_merge"] == true
       # The original footgun: replace semantics would have wiped these.
       assert body["config"]["merge"]["strategy"] == "github"
-      assert body["config"]["merge"]["config"]["owner"] == "leo"
+      assert body["config"]["merge"]["config"]["owner"] == "acme"
       assert body["config"]["tracker"]["type"] == "github"
       assert body["config"]["repo_paths"]["arbiter"] == "/srv/arbiter"
     end

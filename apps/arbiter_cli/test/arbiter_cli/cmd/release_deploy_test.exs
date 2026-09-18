@@ -117,7 +117,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
         {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha_text) end},
         {{"get", "/api/workspaces"}, {workspaces, 200}},
         {{"get", "/api/repos"},
-         {%{"data" => [%{"name" => "tonic", "source" => "leotech", "path" => "/srv/tonic"}]}, 200}},
+         {%{"data" => [%{"name" => "tonic", "source" => "acme", "path" => "/srv/tonic"}]}, 200}},
         {{"get", "/api/workers"}, {@no_workers, 200}}
       ] ++ version_route
     )
@@ -169,7 +169,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {workspaces, 200}},
       {{"get", "/api/repos"},
-       {%{"data" => [%{"name" => "tonic", "source" => "leotech", "path" => "/srv/tonic"}]}, 200}},
+       {%{"data" => [%{"name" => "tonic", "source" => "acme", "path" => "/srv/tonic"}]}, 200}},
       {{"get", "/api/workers"}, {@no_workers, 200}}
     ])
   end
@@ -280,7 +280,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # green-wait and auto-rolling-back every deploy regardless of whether
       # the new release was healthy.
       only_workspace = %{
-        "data" => [%{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}]
+        "data" => [%{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}]
       }
 
       tarball = release_tarball(@vsn)

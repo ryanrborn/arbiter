@@ -18,7 +18,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   ## Gated forward transition
 
   Some trackers gate a forward transition on custom fields being populated —
-  LeoTech's Jira (Verus / VR) refuses to move a ticket forward until its "QA
+  Acme's Jira (Apex / AX) refuses to move a ticket forward until its "QA
   Testing Notes" and "Deployment Notes" fields are filled. That gate is handled
   **provider-agnostically inside `Arbiter.Trackers.Sync.transition_event/2`**:
   it asks the adapter which fields gate the transition (`Tracker.gating_fields/2`),
@@ -34,7 +34,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   through `Arbiter.Trackers.Sync.transition_event/2`, which logs loudly and
   raises an escalation on a genuine failure (an unreachable mapped status,
   an auth/5xx error). A tracker that simply doesn't model the event is skipped
-  quietly. This is the fix for VR-17911, whose In-Progress sync failed
+  quietly. This is the fix for AX-17911, whose In-Progress sync failed
   invisibly because a `status_map` mismatch was swallowed (bd-c4cfuv).
 
   ## Forced sync (`force: true`)
@@ -107,7 +107,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
 
   defp do_transition(issue) do
     # Route through Sync so a genuine failure is loud + raises an escalation
-    # (the swallow-on-error that hid VR-17911 is gone). A benign "tracker
+    # (the swallow-on-error that hid AX-17911 is gone). A benign "tracker
     # doesn't model this status" is still skipped quietly.
     Sync.transition_event(issue, issue.status)
 

@@ -141,10 +141,10 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
     end
   end
 
-  describe "start_patrol/2 — multi-repo workspace (leotech shape)" do
+  describe "start_patrol/2 — multi-repo workspace (acme shape)" do
     test "starts one patrol per repo, keyed by workspace_id:owner/repo" do
-      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -154,29 +154,29 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
             "merge" => %{
               "strategy" => "github",
               "config" => %{
-                "owner" => "leo-technologies-llc",
+                "owner" => "acme-corp",
                 "credentials_ref" => "env:GITHUB_TOKEN"
               }
             },
-            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
+            "repo_paths" => %{"apex_server" => repo_a, "apex_web" => repo_b}
           }
         })
 
-      open_engagement!(ws, "leo-technologies-llc/verus_server#1")
-      open_engagement!(ws, "leo-technologies-llc/verus_web#1")
+      open_engagement!(ws, "acme-corp/apex_server#1")
+      open_engagement!(ws, "acme-corp/apex_web#1")
 
       assert {:ok, _pid} = start(ws)
 
       assert keys_for_workspace(ws.id) ==
                Enum.sort([
-                 "#{ws.id}:leo-technologies-llc/verus_server",
-                 "#{ws.id}:leo-technologies-llc/verus_web"
+                 "#{ws.id}:acme-corp/apex_server",
+                 "#{ws.id}:acme-corp/apex_web"
                ])
 
-      [{pid_a, _}] = Registry.lookup(@registry, "#{ws.id}:leo-technologies-llc/verus_server")
-      [{pid_b, _}] = Registry.lookup(@registry, "#{ws.id}:leo-technologies-llc/verus_web")
-      assert ReviewPatrol.state(pid_a).repo == "leo-technologies-llc/verus_server"
-      assert ReviewPatrol.state(pid_b).repo == "leo-technologies-llc/verus_web"
+      [{pid_a, _}] = Registry.lookup(@registry, "#{ws.id}:acme-corp/apex_server")
+      [{pid_b, _}] = Registry.lookup(@registry, "#{ws.id}:acme-corp/apex_web")
+      assert ReviewPatrol.state(pid_a).repo == "acme-corp/apex_server"
+      assert ReviewPatrol.state(pid_b).repo == "acme-corp/apex_web"
     end
   end
 
@@ -542,24 +542,24 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
     end
 
     test "in a multi-repo workspace starts only the repo(s) with an open engagement" do
-      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "rp-lazy-multi-#{System.unique_integer([:positive])}",
           prefix: "lm#{System.unique_integer([:positive])}",
           config: %{
-            "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo-technologies-llc"}},
-            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme-corp"}},
+            "repo_paths" => %{"apex_server" => repo_a, "apex_web" => repo_b}
           }
         })
 
-      # Only verus_server has an engagement (qualified source_pr names its repo).
-      open_engagement!(ws, "leo-technologies-llc/verus_server#1")
+      # Only apex_server has an engagement (qualified source_pr names its repo).
+      open_engagement!(ws, "acme-corp/apex_server#1")
 
       assert {:ok, _} = start(ws)
-      assert keys_for_workspace(ws.id) == ["#{ws.id}:leo-technologies-llc/verus_server"]
+      assert keys_for_workspace(ws.id) == ["#{ws.id}:acme-corp/apex_server"]
     end
   end
 

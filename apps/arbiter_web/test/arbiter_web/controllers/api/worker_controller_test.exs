@@ -385,14 +385,14 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       conn =
         post(conn, ~p"/api/workers/review", %{
-          "pr" => "https://github.com/leo/verus_sigv4/pull/5",
+          "pr" => "https://github.com/acme/apex_sigv4/pull/5",
           "workspace" => gh_ws.name
         })
 
       body = json_response(conn, 201)
       assert body["data"]["external"] == true
       assert body["data"]["status"] == "dispatched"
-      assert body["data"]["mr_ref"] == "leo/verus_sigv4#5"
+      assert body["data"]["mr_ref"] == "acme/apex_sigv4#5"
       assert body["data"]["strategy"] == "github"
     end
 

@@ -363,7 +363,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "cohort-target",
           task_id: "bd-cohort-target",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 2.0,
@@ -373,7 +373,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "cohort-peer-1",
           task_id: "bd-cohort-peer-1",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 3.0,
@@ -383,7 +383,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "cohort-peer-2",
           task_id: "bd-cohort-peer-2",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 5.0,
@@ -402,7 +402,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "above-rounds-below-cost",
           task_id: "bd-above-rounds-below-cost",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 2.0,
@@ -412,7 +412,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "at-median",
           task_id: "bd-at-median",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 3.0,
@@ -421,7 +421,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "above-both",
           task_id: "bd-above-both",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 5.0,
@@ -443,7 +443,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "below-rounds-above-cost",
           task_id: "bd-below-rounds-above-cost",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 5.0,
@@ -453,7 +453,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "cohort1",
           task_id: "bd-cohort1",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 3.0,
@@ -462,7 +462,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "cohort2",
           task_id: "bd-cohort2",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 3.0,
@@ -484,7 +484,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "above-both",
           task_id: "bd-above-both",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 5.0,
@@ -494,7 +494,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "cohort1",
           task_id: "bd-cohort1",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 3.0,
@@ -503,7 +503,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "cohort2",
           task_id: "bd-cohort2",
-          repo: "verus",
+          repo: "apex",
           difficulty: 1,
           status: :completed,
           cost_usd: 3.0,
@@ -620,7 +620,7 @@ defmodule Arbiter.Loop.AnalysisTest do
       rows = [
         row(%{task_id: "t1", difficulty: 2, repo: "arbiter", cost_usd: 4.0, max_round: 2}),
         row(%{task_id: "t2", difficulty: 2, repo: "arbiter", cost_usd: 6.0, max_round: 1}),
-        row(%{task_id: "t3", difficulty: 1, repo: "verus", cost_usd: 2.0, max_round: 1})
+        row(%{task_id: "t3", difficulty: 1, repo: "apex", cost_usd: 2.0, max_round: 1})
       ]
 
       report = Analysis.build_report(rows, label: "test")
@@ -647,7 +647,7 @@ defmodule Arbiter.Loop.AnalysisTest do
       for {task_id, cost} <- titles_and_costs do
         row(%{
           task_id: task_id,
-          repo: "verus_server",
+          repo: "apex_server",
           difficulty: nil,
           title: "PR #3701: chore: merge integration/dolphin i…",
           cost_usd: cost,
@@ -659,7 +659,7 @@ defmodule Arbiter.Loop.AnalysisTest do
     test "collapses near-duplicate task filings into one unit in the cost/rework cell" do
       report = Analysis.build_report(dup_dispatch_rows(), label: "test")
 
-      cell = Enum.find(report.cells, &(&1.repo == "verus_server"))
+      cell = Enum.find(report.cells, &(&1.repo == "apex_server"))
       assert cell
       # 5 re-filings of the same follow-up must not read as 5 independent
       # clean tasks — the cell should count them as (at most) one unit.
@@ -676,7 +676,7 @@ defmodule Arbiter.Loop.AnalysisTest do
           [
             row(%{
               task_id: "lt-unrelated",
-              repo: "verus_server",
+              repo: "apex_server",
               difficulty: nil,
               title: "Fix unrelated flaky test in checkout flow",
               cost_usd: 2.0,
@@ -685,7 +685,7 @@ defmodule Arbiter.Loop.AnalysisTest do
           ]
 
       report = Analysis.build_report(rows, label: "test")
-      cell = Enum.find(report.cells, &(&1.repo == "verus_server"))
+      cell = Enum.find(report.cells, &(&1.repo == "apex_server"))
       assert cell.tasks == 2
     end
   end
@@ -705,12 +705,12 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: run_id,
           task_id: task_id,
-          repo: "verus-specs",
+          repo: "apex-specs",
           status: :failed,
           failure_reason:
             "worker spawn failed after registration: {:inspect_worktree_failed, " <>
               "{:fetch_failed, \"git fetch origin development failed in " <>
-              "/home/rborn/dev/leotech/verus-specs: fatal: couldn't find remote ref development\"}}",
+              "/home/rborn/dev/acme/apex-specs: fatal: couldn't find remote ref development\"}}",
           terminal_lines: []
         })
       end

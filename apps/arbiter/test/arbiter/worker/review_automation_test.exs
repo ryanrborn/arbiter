@@ -141,14 +141,14 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
           "auto_authors" => ["alice"],
           "repo_overrides" => %{
             "atlas" => "report_only",
-            "verus-infrastructure" => "report_only"
+            "apex-infrastructure" => "report_only"
           }
         }
       }
 
       # Infra repos: never auto-post, even for a trusted (auto_authors) author.
       assert ReviewAutomation.resolve(config, "alice", "atlas") == :report_only
-      assert ReviewAutomation.resolve(config, "coworker", "verus-infrastructure") == :report_only
+      assert ReviewAutomation.resolve(config, "coworker", "apex-infrastructure") == :report_only
       assert ReviewAutomation.resolve(config, nil, "atlas") == :report_only
     end
 
@@ -176,14 +176,14 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
         "default" => "auto",
         "auto_authors" => ["alice"],
         "repo_overrides" => %{
-          "voice_biometrics" => "report_only",
+          "apex_audio" => "report_only",
           "fast_lane" => "auto"
         }
       }
     }
 
     test "returns the configured override for a repo with one" do
-      assert ReviewAutomation.repo_override_mode(@config, "voice_biometrics") == :report_only
+      assert ReviewAutomation.repo_override_mode(@config, "apex_audio") == :report_only
       assert ReviewAutomation.repo_override_mode(@config, "fast_lane") == :auto
     end
 
@@ -197,8 +197,8 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
     end
 
     test "returns nil for nil/empty config" do
-      assert ReviewAutomation.repo_override_mode(nil, "voice_biometrics") == nil
-      assert ReviewAutomation.repo_override_mode(%{}, "voice_biometrics") == nil
+      assert ReviewAutomation.repo_override_mode(nil, "apex_audio") == nil
+      assert ReviewAutomation.repo_override_mode(%{}, "apex_audio") == nil
     end
   end
 
@@ -232,12 +232,12 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
         "review_automation" => %{
           "default" => "auto",
           "auto_authors" => ["alice"],
-          "repo_overrides" => %{"voice_biometrics" => "off"}
+          "repo_overrides" => %{"apex_audio" => "off"}
         }
       }
 
-      assert ReviewAutomation.resolve(config, "alice", "voice_biometrics") == :off
-      assert ReviewAutomation.resolve(config, nil, "voice_biometrics") == :off
+      assert ReviewAutomation.resolve(config, "alice", "apex_audio") == :off
+      assert ReviewAutomation.resolve(config, nil, "apex_audio") == :off
     end
 
     test "a default of off applies when no repo_override / author match" do
@@ -259,10 +259,10 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
 
     test "repo_override_mode/2 returns :off for an off-gated repo" do
       config = %{
-        "review_automation" => %{"repo_overrides" => %{"voice_biometrics" => "off"}}
+        "review_automation" => %{"repo_overrides" => %{"apex_audio" => "off"}}
       }
 
-      assert ReviewAutomation.repo_override_mode(config, "voice_biometrics") == :off
+      assert ReviewAutomation.repo_override_mode(config, "apex_audio") == :off
     end
   end
 
@@ -271,7 +271,7 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       "review_automation" => %{
         "default" => "flag",
         "auto_authors" => ["alice"],
-        "repo_overrides" => %{"voice_biometrics" => "off", "atlas" => "report_only"}
+        "repo_overrides" => %{"apex_audio" => "off", "atlas" => "report_only"}
       }
     }
 
@@ -279,12 +279,12 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.resolve_with_source(@src_config, "alice", "backend", "auto") ==
                {:auto, :explicit}
 
-      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "voice_biometrics", "off") ==
+      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "apex_audio", "off") ==
                {:off, :explicit}
     end
 
     test "a repo_override wins with source :repo_override when no explicit mode is given" do
-      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "voice_biometrics", nil) ==
+      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "apex_audio", nil) ==
                {:off, :repo_override}
 
       assert ReviewAutomation.resolve_with_source(@src_config, "coworker", "atlas", nil) ==

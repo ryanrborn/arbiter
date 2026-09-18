@@ -1,11 +1,11 @@
 defmodule Arbiter.Worker.BranchNamer do
   @moduledoc """
-  Derive a git branch name from a `Arbiter.Tasks.Issue` following the Verus
+  Derive a git branch name from a `Arbiter.Tasks.Issue` following the Apex
   naming convention:
 
-      feature/VR-17585-add-monitor-controller-tests
-      bugfix/VR-17612-fix-token-refresh-race
-      epic/VR-17000-migrate-to-elixir
+      feature/AX-17585-add-monitor-controller-tests
+      bugfix/AX-17612-fix-token-refresh-race
+      epic/AX-17000-migrate-to-elixir
       chore/gte-010-branch-namer
 
   ## Mapping
@@ -17,7 +17,7 @@ defmodule Arbiter.Worker.BranchNamer do
       :epic                -> "epic"
       :chore, :decision    -> "chore"
 
-  The ref segment uses `issue.tracker_ref` when non-empty (e.g. `"VR-17585"`),
+  The ref segment uses `issue.tracker_ref` when non-empty (e.g. `"AX-17585"`),
   otherwise falls back to `issue.id` (e.g. `"gte-010"`). This makes `derive/1`
   total: every well-formed Issue yields a branch name.
 

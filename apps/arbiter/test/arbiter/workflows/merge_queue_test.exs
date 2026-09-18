@@ -638,8 +638,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       "tracker" => %{
         "type" => "jira",
         "config" => %{
-          "host" => "leotechnologies.atlassian.net",
-          "project_key" => "VR",
+          "host" => "acme.atlassian.net",
+          "project_key" => "AX",
           "credentials_ref" => "env:GTE_REFINERY_JIRA_TOKEN",
           "email" => "tester@example.com"
         }
@@ -658,7 +658,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
         Ash.create(Issue, %{
           title: "jira-backed",
           tracker_type: :jira,
-          tracker_ref: "VR-17585",
+          tracker_ref: "AX-17585",
           skip_upstream_create: true,
           workspace_id: ws.id
         })
@@ -685,7 +685,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       :ok = MergeQueue.enqueue(name, task.id)
 
-      assert_receive {:jira_remotelink, "/rest/api/3/issue/VR-17585/remotelink", payload}
+      assert_receive {:jira_remotelink, "/rest/api/3/issue/AX-17585/remotelink", payload}
       assert payload["object"]["url"] == "https://github.com/octo/widget/pull/88"
     end
   end
@@ -1663,8 +1663,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       "tracker" => %{
         "type" => "jira",
         "config" => %{
-          "host" => "leotechnologies.atlassian.net",
-          "project_key" => "VR",
+          "host" => "acme.atlassian.net",
+          "project_key" => "AX",
           "credentials_ref" => "env:#{@jira_env_mq}",
           "email" => "tester@example.com",
           "status_map" => %{"merged" => "Code Complete"}
@@ -1689,7 +1689,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
         Ash.create(Issue, %{
           title: "jira-merged",
           tracker_type: :jira,
-          tracker_ref: "VR-99999",
+          tracker_ref: "AX-99999",
           skip_upstream_create: true,
           workspace_id: ws.id
         })

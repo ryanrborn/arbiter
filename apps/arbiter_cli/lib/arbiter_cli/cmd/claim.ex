@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.Claim do
   POSTs to `/api/workspaces/:workspace_id/claim`. The server dispatches
   through the workspace's configured tracker adapter — GitHub, Jira,
   Shortcut, etc. — so `<ref>` is whatever that tracker uses: a GitHub issue
-  number (`arb claim 43`), a Jira key (`arb claim VR-1234`), a Shortcut story
+  number (`arb claim 43`), a Jira key (`arb claim AX-1234`), a Shortcut story
   id, and so on. The adapter fetches the issue, verifies it's assigned to the
   workspace's authenticated user (the adapter-defined claim signal), and
   either creates a new task or returns the existing one if a task already
@@ -56,7 +56,7 @@ defmodule ArbiterCli.Cmd.Claim do
 
           [] ->
             Output.die(
-              "claim requires a tracker ref (e.g. `arb claim 43` for GitHub, `arb claim VR-1234` for Jira)"
+              "claim requires a tracker ref (e.g. `arb claim 43` for GitHub, `arb claim AX-1234` for Jira)"
             )
 
           _ ->

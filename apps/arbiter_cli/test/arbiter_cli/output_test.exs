@@ -118,9 +118,9 @@ defmodule ArbiterCli.OutputTest do
     end
 
     test "renders tracker label only when tracker is meaningful" do
-      issue = %{"id" => "x", "title" => "T", "tracker_type" => "jira", "tracker_ref" => "VR-1"}
+      issue = %{"id" => "x", "title" => "T", "tracker_type" => "jira", "tracker_ref" => "AX-1"}
       assert Output.format_issue_detail(issue) =~ "Tracker:"
-      assert Output.format_issue_detail(issue) =~ "jira:VR-1"
+      assert Output.format_issue_detail(issue) =~ "jira:AX-1"
     end
 
     test "skips tracker line when type is none or nil" do

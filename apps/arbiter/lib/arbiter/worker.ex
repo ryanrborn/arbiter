@@ -4262,7 +4262,7 @@ defmodule Arbiter.Worker do
   end
 
   # The PR/MR title to open with. Formats according to the workspace's
-  # pr_title_format convention (e.g. conventional commits for leotech), falling
+  # pr_title_format convention (e.g. conventional commits for acme), falling
   # back to the internal merge_title stashed in meta when the task can't be
   # loaded (bd-7d5smn: strip the "Merge <id>:" prefix from outbound PRs).
   defp pr_title_for(task_id, meta) do
@@ -6158,9 +6158,9 @@ defmodule Arbiter.Worker do
 
   defp record_mr_ref_on_run(_state, _mr_ref, _merger_url), do: :ok
 
-  # PR-open: drive the task's external tracker forward (e.g. Jira VR ->
+  # PR-open: drive the task's external tracker forward (e.g. Jira AX ->
   # In Code Review) and attach the PR as a comment + remote link. The original
-  # incident (VR-17911) opened a PR but never transitioned the ticket and left
+  # incident (AX-17911) opened a PR but never transitioned the ticket and left
   # 0 comments / no remote-link; this fires that hook. Best-effort and
   # loud-on-failure inside `Arbiter.Trackers.Sync` — a missing/unreadable task
   # here just skips. (bd-c4cfuv)

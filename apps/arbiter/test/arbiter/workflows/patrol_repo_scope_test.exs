@@ -9,8 +9,8 @@ defmodule Arbiter.Workflows.PatrolRepoScopeTest do
     end
 
     test "strips a leading github: prefix" do
-      assert PatrolRepoScope.repo_of_ref("github:leo-technologies-llc/verus_server#7") ==
-               {:ok, "leo-technologies-llc/verus_server"}
+      assert PatrolRepoScope.repo_of_ref("github:acme-corp/apex_server#7") ==
+               {:ok, "acme-corp/apex_server"}
     end
 
     test "treats a bare GitHub ref as :bare" do

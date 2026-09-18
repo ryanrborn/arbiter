@@ -238,8 +238,8 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
             "tracker" => %{
               "type" => "jira",
               "config" => %{
-                "host" => "leotechnologies.atlassian.net",
-                "project_key" => "VR",
+                "host" => "acme.atlassian.net",
+                "project_key" => "AX",
                 "credentials_ref" => "env:#{@jira_env_wd}",
                 "email" => "tester@example.com",
                 "status_map" => %{"merged" => "Code Complete"}
@@ -265,7 +265,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
         Ash.create(Arbiter.Tasks.Issue, %{
           title: "watchdog-merged-tracker",
           tracker_type: :jira,
-          tracker_ref: "VR-77777",
+          tracker_ref: "AX-77777",
           skip_upstream_create: true,
           workspace_id: ws.id
         })
@@ -311,7 +311,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
         Ash.create(Arbiter.Tasks.Issue, %{
           title: "watchdog-automerged-tracker",
           tracker_type: :jira,
-          tracker_ref: "VR-77778",
+          tracker_ref: "AX-77778",
           skip_upstream_create: true,
           workspace_id: ws.id
         })

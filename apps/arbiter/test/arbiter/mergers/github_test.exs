@@ -1184,14 +1184,14 @@ defmodule Arbiter.Mergers.GithubTest do
     test "works with an embedded owner/repo ref" do
       stub(fn conn ->
         assert conn.request_path ==
-                 "/repos/leo-technologies-llc/verus_server/pulls/7/comments/55/replies"
+                 "/repos/acme-corp/apex_server/pulls/7/comments/55/replies"
 
         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 56})
       end)
 
       assert {:ok, _} =
                Github.reply_to_review_comment(
-                 "leo-technologies-llc/verus_server#7",
+                 "acme-corp/apex_server#7",
                  55,
                  "LGTM",
                  %{}
@@ -1496,12 +1496,12 @@ defmodule Arbiter.Mergers.GithubTest do
     test "resolves an embedded owner/repo ref for the update-branch path" do
       stub(fn conn ->
         assert conn.request_path ==
-                 "/repos/leo-technologies-llc/verus_server/pulls/7/update-branch"
+                 "/repos/acme-corp/apex_server/pulls/7/update-branch"
 
         conn |> Plug.Conn.put_status(202) |> Req.Test.json(%{})
       end)
 
-      assert :ok = Github.update_branch("leo-technologies-llc/verus_server#7")
+      assert :ok = Github.update_branch("acme-corp/apex_server#7")
     end
   end
 
@@ -2032,8 +2032,8 @@ defmodule Arbiter.Mergers.GithubTest do
     end
 
     test "returns a full HTTPS URL unchanged when pr_ref is already a complete URL" do
-      assert Github.link_for("https://github.com/leo-technologies-llc/verus_server/pull/3713") ==
-               "https://github.com/leo-technologies-llc/verus_server/pull/3713"
+      assert Github.link_for("https://github.com/acme-corp/apex_server/pull/3713") ==
+               "https://github.com/acme-corp/apex_server/pull/3713"
     end
 
     test "returns a full HTTP URL unchanged when pr_ref is already a complete URL" do
@@ -2048,7 +2048,7 @@ defmodule Arbiter.Mergers.GithubTest do
     test "does NOT wrap a full URL in another URL (bd-1413 regression guard)" do
       # This is the original bug: a full URL should NOT be treated as an invalid
       # ref and wrapped in the template. It should pass through unchanged.
-      full_url = "https://github.com/leo-technologies-llc/verus_server/pull/3713"
+      full_url = "https://github.com/acme-corp/apex_server/pull/3713"
       result = Github.link_for(full_url)
 
       # Verify the bug (nested double-URL) is NOT present
@@ -2081,12 +2081,12 @@ defmodule Arbiter.Mergers.GithubTest do
           "remote",
           "add",
           "origin",
-          "git@github.com:leo-technologies-llc/verus_server.git"
+          "git@github.com:acme-corp/apex_server.git"
         ])
 
       # Workspace cfg has owner + token but no repo — the multi-repo shape.
       Config.put_active(%{
-        "owner" => "leo-technologies-llc",
+        "owner" => "acme-corp",
         "credentials_ref" => "env:#{@env_var}",
         "default_target_branch" => "main"
       })
@@ -2101,15 +2101,15 @@ defmodule Arbiter.Mergers.GithubTest do
     } do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+          {"GET", "/repos/acme-corp/apex_server/pulls"} ->
             stub_no_existing_pr(conn)
 
-          {"POST", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+          {"POST", "/repos/acme-corp/apex_server/pulls"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 7})
         end
       end)
 
-      assert {:ok, "leo-technologies-llc/verus_server#7"} =
+      assert {:ok, "acme-corp/apex_server#7"} =
                Github.open("feature/x", "T", "B", %{repo_path: repo_dir})
     end
 
@@ -2118,26 +2118,26 @@ defmodule Arbiter.Mergers.GithubTest do
       # prove the adapter trusts the mr_ref, not the cfg, on read.
       stub(fn conn ->
         case conn.request_path do
-          "/repos/leo-technologies-llc/verus_server/pulls/7" ->
+          "/repos/acme-corp/apex_server/pulls/7" ->
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{
               "state" => "open",
               "merged" => false,
-              "html_url" => "https://github.com/leo-technologies-llc/verus_server/pull/7"
+              "html_url" => "https://github.com/acme-corp/apex_server/pull/7"
             })
 
-          "/repos/leo-technologies-llc/verus_server/pulls/7/reviews" ->
+          "/repos/acme-corp/apex_server/pulls/7/reviews" ->
             conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
         end
       end)
 
       assert {:ok,
               %{
-                ref: "leo-technologies-llc/verus_server#7",
+                ref: "acme-corp/apex_server#7",
                 status: :open,
-                url: "https://github.com/leo-technologies-llc/verus_server/pull/7"
-              }} = Github.get("leo-technologies-llc/verus_server#7")
+                url: "https://github.com/acme-corp/apex_server/pull/7"
+              }} = Github.get("acme-corp/apex_server#7")
     end
 
     test "merge/2 routes to the embedded owner/repo" do
@@ -2145,12 +2145,12 @@ defmodule Arbiter.Mergers.GithubTest do
         assert conn.method == "PUT"
 
         assert conn.request_path ==
-                 "/repos/leo-technologies-llc/verus_server/pulls/7/merge"
+                 "/repos/acme-corp/apex_server/pulls/7/merge"
 
         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
       end)
 
-      assert :ok = Github.merge("leo-technologies-llc/verus_server#7", nil)
+      assert :ok = Github.merge("acme-corp/apex_server#7", nil)
     end
 
     test "open/4 with NO owner in cfg still derives both owner and repo from :repo_path (bd-a53kv2)",
@@ -2162,15 +2162,15 @@ defmodule Arbiter.Mergers.GithubTest do
 
       stub(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+          {"GET", "/repos/acme-corp/apex_server/pulls"} ->
             stub_no_existing_pr(conn)
 
-          {"POST", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+          {"POST", "/repos/acme-corp/apex_server/pulls"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 5})
         end
       end)
 
-      assert {:ok, "leo-technologies-llc/verus_server#5"} =
+      assert {:ok, "acme-corp/apex_server#5"} =
                Github.open("feature/x", "T", "B", %{repo_path: repo_dir})
     end
 
@@ -2190,15 +2190,15 @@ defmodule Arbiter.Mergers.GithubTest do
     end
 
     test "link_for/1 with embedded mr_ref uses the embedded owner/repo" do
-      assert Github.link_for("leo-technologies-llc/verus_server#7") ==
-               "https://github.com/leo-technologies-llc/verus_server/pull/7"
+      assert Github.link_for("acme-corp/apex_server#7") ==
+               "https://github.com/acme-corp/apex_server/pull/7"
     end
 
     test "workspace cfg repo wins over per-repo derivation when both are present", %{
       repo_dir: repo_dir
     } do
       # Re-pin the workspace cfg to include `repo` — the repo dir's remote points
-      # at verus_server, but the cfg should still win (single-repo workspace
+      # at apex_server, but the cfg should still win (single-repo workspace
       # backwards-compat).
       Config.put_active(%{
         "owner" => @owner,
@@ -2326,8 +2326,8 @@ defmodule Arbiter.Mergers.GithubTest do
   # ref_for_pr/2 — construct an mr_ref for an external PR (bd-d4ealy).
   describe "ref_for_pr/2" do
     test "parses a github.com PR URL into an embedded ref" do
-      assert {:ok, "leo/verus_sigv4#5"} =
-               Github.ref_for_pr("https://github.com/leo/verus_sigv4/pull/5", %{})
+      assert {:ok, "acme/apex_sigv4#5"} =
+               Github.ref_for_pr("https://github.com/acme/apex_sigv4/pull/5", %{})
     end
 
     test "parses an enterprise-host PR URL (host is not constrained)" do
@@ -2349,8 +2349,8 @@ defmodule Arbiter.Mergers.GithubTest do
     end
 
     test "a bare number with a repo_path embeds the owner/repo from the origin remote" do
-      repo = tmp_git_repo("git@github.com:leo/verus_auth_server.git")
-      assert {:ok, "leo/verus_auth_server#394"} = Github.ref_for_pr("394", %{repo_path: repo})
+      repo = tmp_git_repo("git@github.com:acme/apex_auth_server.git")
+      assert {:ok, "acme/apex_auth_server#394"} = Github.ref_for_pr("394", %{repo_path: repo})
     end
 
     test "a bare number with an unresolvable repo_path falls back to a bare ref" do

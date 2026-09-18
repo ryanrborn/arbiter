@@ -197,7 +197,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       stub_all(
         [
           %{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}},
-          %{"id" => "ws-2", "name" => "leotech", "prefix" => "lt", "config" => %{}}
+          %{"id" => "ws-2", "name" => "acme", "prefix" => "ac", "config" => %{}}
         ],
         [],
         []
@@ -207,11 +207,11 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert exit_code == 0
 
       assert out =~ "== Workspace: default (bd) =="
-      assert out =~ "== Workspace: leotech (lt) =="
+      assert out =~ "== Workspace: acme (ac) =="
 
       default_at = :binary.match(out, "== Workspace: default (bd) ==") |> elem(0)
-      leotech_at = :binary.match(out, "== Workspace: leotech (lt) ==") |> elem(0)
-      assert default_at < leotech_at
+      acme_at = :binary.match(out, "== Workspace: acme (ac) ==") |> elem(0)
+      assert default_at < acme_at
     end
 
     test "renders the security posture section when the workspace carries one" do
@@ -427,12 +427,12 @@ defmodule ArbiterCli.Cmd.PrimeTest do
               "standing_orders" => ["Follow the PR template."],
               "repo_paths" => %{
                 "client" => %{
-                  "path" => "/home/rborn/dev/leotech/client",
+                  "path" => "/home/rborn/dev/acme/client",
                   "standing_orders" => [
                     "If the work has an associated Figma design, link it in the Jira ticket."
                   ]
                 },
-                "server" => "/home/rborn/dev/leotech/server"
+                "server" => "/home/rborn/dev/acme/server"
               }
             }
           }
@@ -467,7 +467,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "name" => "default",
             "prefix" => "bd",
             "config" => %{
-              "repo_paths" => %{"server" => "/home/rborn/dev/leotech/server"}
+              "repo_paths" => %{"server" => "/home/rborn/dev/acme/server"}
             }
           }
         ],
@@ -525,7 +525,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       stub_all(
         [
           %{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}},
-          %{"id" => "ws-2", "name" => "leotech", "prefix" => "lt", "config" => %{}}
+          %{"id" => "ws-2", "name" => "acme", "prefix" => "ac", "config" => %{}}
         ],
         [
           %{
@@ -536,7 +536,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "repo" => "test/repo"
           },
           %{
-            "task_id" => "lt-001",
+            "task_id" => "ac-001",
             "workspace_id" => "ws-2",
             "status" => "running",
             "current_step" => "implement",
@@ -557,8 +557,8 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "id" => "m-ws2",
             "workspace_id" => "ws-2",
             "kind" => "escalation",
-            "directive_ref" => "lt-001",
-            "subject" => "leotech coordinator msg",
+            "directive_ref" => "ac-001",
+            "subject" => "acme coordinator msg",
             "inserted_at" => "2026-05-28T12:00:00.000000Z"
           }
         ]
@@ -568,22 +568,22 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert exit_code == 0
 
       {:ok, decoded} = Jason.decode(String.trim(out))
-      [default_ws, leotech_ws] = decoded["workspaces"]
+      [default_ws, acme_ws] = decoded["workspaces"]
 
       assert Enum.map(default_ws["workers"], & &1["task_id"]) == ["bd-001"]
-      assert Enum.map(leotech_ws["workers"], & &1["task_id"]) == ["lt-001"]
+      assert Enum.map(acme_ws["workers"], & &1["task_id"]) == ["ac-001"]
 
       assert length(default_ws["coordinator_inbox"]) == 1
       assert hd(default_ws["coordinator_inbox"])["id"] == "m-ws1"
-      assert length(leotech_ws["coordinator_inbox"]) == 1
-      assert hd(leotech_ws["coordinator_inbox"])["id"] == "m-ws2"
+      assert length(acme_ws["coordinator_inbox"]) == 1
+      assert hd(acme_ws["coordinator_inbox"])["id"] == "m-ws2"
     end
 
     test "workspaces array has one entry per configured workspace" do
       stub_all(
         [
           %{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}},
-          %{"id" => "ws-2", "name" => "leotech", "prefix" => "lt", "config" => %{}}
+          %{"id" => "ws-2", "name" => "acme", "prefix" => "ac", "config" => %{}}
         ],
         [],
         []
@@ -597,7 +597,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       names = Enum.map(decoded["workspaces"], fn ws -> ws["workspace"]["name"] end)
       assert "default" in names
-      assert "leotech" in names
+      assert "acme" in names
     end
 
     test "standing_orders carries the config list through --json" do

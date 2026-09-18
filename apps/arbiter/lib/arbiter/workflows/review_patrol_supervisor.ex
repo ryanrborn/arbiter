@@ -174,7 +174,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   # already downgrades an in-flight engagement to no-dispatch behavior in this
   # case (see `ReviewPatrol.automation_mode/3`), but the PATROL PROCESS ITSELF
   # still started and ticked GitHub every interval regardless (bd-4brb2j: this
-  # was true of both `voice_biometrics` at `:flag` and `atlas` at
+  # was true of both `apex_audio` at `:flag` and `atlas` at
   # `:report_only` in the incident — closing that gap for the strictly-worse
   # `:off` case here is the highest-value, lowest-risk slice of that finding).
   # Checked at author-independent granularity (`repo_override_mode/2`, no PR

@@ -21,7 +21,7 @@ defmodule Arbiter.Trackers.Tracker do
     * `link_for/1` — return a human-clickable URL for the ref. Used in CLI
       output and notifications.
     * `parse_ref/1` — best-effort parse of a user-supplied string into the
-      adapter's canonical ref form (e.g. `"VR-17585"` for Jira). Returns
+      adapter's canonical ref form (e.g. `"AX-17585"` for Jira). Returns
       `:error` if the string is clearly not for this tracker.
     * `list_transitions/1` — return the set of legal next-states from the
       current state, as task-vocabulary atoms.
@@ -82,7 +82,7 @@ defmodule Arbiter.Trackers.Tracker do
 
   `:open | :in_progress | :closed` are the task's own statuses. The remaining
   atoms are richer lifecycle moments that don't map to a task status but still
-  drive an external workflow (e.g. Jira's VR board): `:pr_opened` (PR opened
+  drive an external workflow (e.g. Jira's AX board): `:pr_opened` (PR opened
   for review), `:approved_unmerged` (review approved but parked, not merged),
   and `:merged` (PR merged). Adapters that don't model an event simply leave it
   unmapped, and the sync layer skips it.

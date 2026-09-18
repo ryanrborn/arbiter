@@ -13,8 +13,8 @@ defmodule Arbiter.Tasks.IssueRepo do
 
     1. An explicit repo, canonicalized onto the configured `repo_paths` key it
        matches (see `Arbiter.Tasks.RepoConfig.find_key/2` — an explicit
-       `verus_server` or `leotech/verus-server` both land on a configured
-       `verus-server`).
+       `apex_server` or `acme/apex-server` both land on a configured
+       `apex-server`).
     2. The workspace's only configured repo.
     3. The workspace config's `default_repo`, when it names a configured repo.
     4. Otherwise `{:error, {:repo_required, configured_keys}}` — the caller
@@ -170,7 +170,7 @@ defmodule Arbiter.Tasks.IssueRepo do
   # Reverse slug resolution, the same miss-path fallback
   # `Arbiter.Worker.Dispatch` does for `{:repo_not_found, _}` (bd-49ajyt):
   # `repo_paths` is keyed by bare repo name ("client") while PRPatrol /
-  # ReviewPatrol / a PR URL only have the forge slug ("leotech/verus-client"),
+  # ReviewPatrol / a PR URL only have the forge slug ("acme/apex-client"),
   # and neither spelling contains the other. Match by reading each configured
   # checkout's `origin` remote.
   #

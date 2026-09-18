@@ -92,7 +92,7 @@ defmodule Arbiter.Workflows.WorkTest do
           title: "Jira task",
           workspace_id: ws_for_this_test(:ws).id,
           tracker_type: :jira,
-          tracker_ref: "VR-1"
+          tracker_ref: "AX-1"
         })
 
       result = Work.run_step(:submit, %{task_id: task.id})

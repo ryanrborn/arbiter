@@ -6,7 +6,7 @@ defmodule Arbiter.Trackers.Jira do
 
   ## Active-workspace contract
 
-  The `Tracker` behaviour callbacks take a `ref` (e.g. `"VR-17585"`) with no
+  The `Tracker` behaviour callbacks take a `ref` (e.g. `"AX-17585"`) with no
   workspace context. But Jira needs a host, project key, email + token, and
   field-id / status-name mappings — all workspace-scoped. We resolve those
   through `Arbiter.Trackers.Jira.Config`:
@@ -306,7 +306,7 @@ defmodule Arbiter.Trackers.Jira do
 
   # `expand=transitions.fields` only reports fields required by the
   # transition's *screen* — a workflow *validator* requiring a field (e.g.
-  # LeoTech's VR Story workflow gates "Pull request created" on QA/Deployment
+  # Acme's AX Story workflow gates "Pull request created" on QA/Deployment
   # notes this way) has no screen and is invisible to that call, so live
   # detection alone under-reports the gate (bd-4isprn). For lifecycle events
   # listed in `cfg.gated_note_events`, force qa_notes/deployment_notes into

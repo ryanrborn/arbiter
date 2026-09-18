@@ -1263,8 +1263,8 @@ defmodule Arbiter.Worker.Dispatch do
   # repos: read each registered repo's `origin` remote and match its derived
   # slug. This only runs on the miss path (both direct lookups returned nil)
   # and only for slug-shaped repos, so a normal repo-name dispatch never pays
-  # the git cost. Covers client↔verus-client, server↔verus_server, and the
-  # other leotech repos where repo name ≠ slug.
+  # the git cost. Covers client↔apex-client, server↔apex_server, and the
+  # other acme repos where repo name ≠ slug.
   defp slug_repo_path(_ws_id, repo) when not is_binary(repo), do: nil
 
   defp slug_repo_path(ws_id, repo) do
@@ -1352,8 +1352,8 @@ defmodule Arbiter.Worker.Dispatch do
   # Exact key match first (the common case). When that misses, fall back to a
   # normalized match (case-insensitive, underscore/hyphen-insensitive) — a
   # forge slug derived from a repo's actual GitHub name (e.g.
-  # "owner/verus_server") must still resolve against a `repo_paths` entry
-  # registered under a differently-separated key (e.g. "owner/verus-server").
+  # "owner/apex_server") must still resolve against a `repo_paths` entry
+  # registered under a differently-separated key (e.g. "owner/apex-server").
   # See bd-6rioa4.
   defp find_repo_path(map, repo), do: RepoConfig.find_path(map, repo)
 

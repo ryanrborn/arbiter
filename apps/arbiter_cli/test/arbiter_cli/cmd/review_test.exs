@@ -74,13 +74,13 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
       {_out, _err, code} =
         capture(fn ->
-          ArbiterCli.Cmd.Review.run(["bd-rev1", "--repo", "verus_server", "--model", "haiku"])
+          ArbiterCli.Cmd.Review.run(["bd-rev1", "--repo", "apex_server", "--model", "haiku"])
         end)
 
       assert code == 0
       assert_receive {:body, body}
       assert body["task_id"] == "bd-rev1"
-      assert body["repo"] == "verus_server"
+      assert body["repo"] == "apex_server"
       assert body["model"] == "haiku"
     end
 
@@ -114,10 +114,10 @@ defmodule ArbiterCli.Cmd.ReviewTest do
               "data" => %{
                 "external" => true,
                 "status" => "dispatched",
-                "pr" => "leo/verus_sigv4#5",
-                "mr_ref" => "leo/verus_sigv4#5",
+                "pr" => "acme/apex_sigv4#5",
+                "mr_ref" => "acme/apex_sigv4#5",
                 "strategy" => "github",
-                "link" => "https://github.com/leo/verus_sigv4/pull/5"
+                "link" => "https://github.com/acme/apex_sigv4/pull/5"
               }
             })
 
@@ -128,19 +128,19 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
       {out, _err, code} =
         capture(fn ->
-          ArbiterCli.Cmd.Review.run(["--pr", "leo/verus_sigv4#5", "--repo", "verus_sigv4"])
+          ArbiterCli.Cmd.Review.run(["--pr", "acme/apex_sigv4#5", "--repo", "apex_sigv4"])
         end)
 
       assert code == 0
       assert_receive {:body, body}
-      assert body["pr"] == "leo/verus_sigv4#5"
-      assert body["repo"] == "verus_sigv4"
+      assert body["pr"] == "acme/apex_sigv4#5"
+      assert body["repo"] == "apex_sigv4"
       refute Map.has_key?(body, "task_id")
 
       assert out =~ "External review dispatched:"
-      assert out =~ "leo/verus_sigv4#5"
+      assert out =~ "acme/apex_sigv4#5"
       assert out =~ "github"
-      assert out =~ "https://github.com/leo/verus_sigv4/pull/5"
+      assert out =~ "https://github.com/acme/apex_sigv4/pull/5"
     end
 
     test "--pr with --json emits the JSON payload" do

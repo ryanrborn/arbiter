@@ -127,7 +127,7 @@ defmodule ArbiterWeb.UsageLiveTest do
   test "switching to the By repo tab renders per-repo bars", %{conn: conn, ws: ws} do
     task = new_issue!(ws, "Some task")
     event!(%{task_id: task.id, workspace_id: ws.id, repo: "arbiter", cost_usd: 1.0})
-    event!(%{task_id: task.id, workspace_id: ws.id, repo: "verus-api", cost_usd: 0.4})
+    event!(%{task_id: task.id, workspace_id: ws.id, repo: "apex-api", cost_usd: 0.4})
 
     {:ok, view, _html} = live(conn, ~p"/usage")
 
@@ -137,7 +137,7 @@ defmodule ArbiterWeb.UsageLiveTest do
       |> render_click()
 
     assert html =~ "arbiter"
-    assert html =~ "verus-api"
+    assert html =~ "apex-api"
   end
 
   test "changing the range segmented control reloads data", %{conn: conn, ws: ws} do

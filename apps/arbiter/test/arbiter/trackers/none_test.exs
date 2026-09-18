@@ -24,7 +24,7 @@ defmodule Arbiter.Trackers.NoneTest do
     end
 
     test "parse_ref/1 always returns :error (Tracker.None never owns a ref)" do
-      assert None.parse_ref("VR-17585") == :error
+      assert None.parse_ref("AX-17585") == :error
       assert None.parse_ref("") == :error
     end
 

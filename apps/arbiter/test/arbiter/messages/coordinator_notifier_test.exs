@@ -678,7 +678,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       assert :ok =
                CoordinatorNotifier.tracker_sync_failed(
-                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-1"},
+                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "AX-1"},
                  :code_review,
                  reason
                )
@@ -710,7 +710,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       assert :ok =
                CoordinatorNotifier.tracker_sync_failed(
-                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-2"},
+                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "AX-2"},
                  :code_review,
                  reason
                )
@@ -735,7 +735,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       assert :ok =
                CoordinatorNotifier.tracker_sync_failed(
-                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-3"},
+                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "AX-3"},
                  :in_progress,
                  reason
                )

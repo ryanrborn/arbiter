@@ -17,7 +17,7 @@ defmodule Arbiter.Skills.Skill do
 
       workspace-scoped `name` in ws  →  global `name`  →  not found
 
-  So tuning `tdd` for `leotech` (a scoped row) never touches the `default`
+  So tuning `tdd` for `acme` (a scoped row) never touches the `default`
   workspace, which keeps resolving the global `tdd`. Global uniqueness is
   preserved (two globals named `tdd` collide); a scoped skill may reuse a
   global's name, and two workspaces may each hold their own `tdd`. This is

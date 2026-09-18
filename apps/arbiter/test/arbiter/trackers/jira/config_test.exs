@@ -3,8 +3,8 @@ defmodule Arbiter.Trackers.Jira.ConfigTest do
 
   alias Arbiter.Trackers.Jira.Config
 
-  @host "leotechnologies.atlassian.net"
-  @project "VR"
+  @host "acme.atlassian.net"
+  @project "AX"
   @env_var "GTE_JIRA_CONFIG_TEST_TOKEN"
 
   setup do
@@ -70,7 +70,7 @@ defmodule Arbiter.Trackers.Jira.ConfigTest do
     end
 
     test "the shipped default does not fabricate a Code Complete -> Done edge" do
-      # No VR transition from Code Complete lands on Done, so claiming that hop
+      # No AX transition from Code Complete lands on Done, so claiming that hop
       # would fail as :transition_unavailable ("the route is stale") when the
       # truth is :no_transition_path ("there is no route"). Routing Code
       # Complete onward through the deploy pipeline is bd-c4cfuv.

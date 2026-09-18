@@ -244,9 +244,9 @@ defmodule Arbiter.Worker.DispatchTest do
       on_exit(fn -> File.rm_rf(tmp) end)
 
       # Registry keyed by repo NAME "client"; the repo's origin resolves to the
-      # differently-named slug "leo-technologies-llc/verus-client".
+      # differently-named slug "acme-corp/apex-client".
       repo_path =
-        seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
+        seed_repo_with_github_origin!(tmp, "client", "acme-corp/apex-client")
 
       {:ok, ws} =
         Ash.update(ws, %{config: %{"repo_paths" => %{"client" => repo_path}}}, action: :update)
@@ -261,10 +261,10 @@ defmodule Arbiter.Worker.DispatchTest do
       # If the slug resolves, dispatch gets past the repo guard and fails later
       # at worktree provisioning (:missing_worktree) — the same distinguishable
       # outcome the bd-bi5pn0 tests rely on. The pre-fix behavior was
-      # {:error, {:repo_not_found, "leo-technologies-llc/verus-client"}}.
+      # {:error, {:repo_not_found, "acme-corp/apex-client"}}.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
-                 repo: "leo-technologies-llc/verus-client",
+                 repo: "acme-corp/apex-client",
                  start_driver: false,
                  start_claude: true,
                  provision_worktree: false,
@@ -2619,7 +2619,7 @@ defmodule Arbiter.Worker.DispatchTest do
           title: "tracked work",
           workspace_id: ws.id,
           tracker_type: "jira",
-          tracker_ref: "VR-17585",
+          tracker_ref: "AX-17585",
           skip_upstream_create: true
         })
 
@@ -3122,12 +3122,12 @@ defmodule Arbiter.Worker.DispatchTest do
           workspace_id: ws.id,
           tracker_type: :none,
           tracker_context_type: :jira,
-          tracker_context_ref: "VR-18004"
+          tracker_context_ref: "AX-18004"
         })
 
       # Simulate a pre-fetched tracker context (normally done in build_agent_session_opts).
       context = %{
-        ref: "VR-18004",
+        ref: "AX-18004",
         type: :jira,
         title: "Some Jira ticket",
         description: "## Acceptance\n- feature works\n- tests pass"
@@ -3136,7 +3136,7 @@ defmodule Arbiter.Worker.DispatchTest do
       prompt =
         Arbiter.Worker.Dispatch.prompt_for_task(task, review: true, tracker_context: context)
 
-      assert prompt =~ "Tracker context (read-only, jira:VR-18004)"
+      assert prompt =~ "Tracker context (read-only, jira:AX-18004)"
       assert prompt =~ "Some Jira ticket"
       assert prompt =~ "feature works"
       # The task has no tracker_ref, so no "Tracker ref (PR/MR to review)" line
@@ -3606,14 +3606,14 @@ defmodule Arbiter.Worker.DispatchTest do
     test "explicit repo slug resolves against a registered key differing only by _/- (bd-6rioa4)",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{
-        "leo-technologies-llc/verus-server" => repo
+        "acme-corp/apex-server" => repo
       })
 
       {:ok, task} = Ash.create(Issue, %{title: "underscore slug", workspace_id: ws.id})
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
-                 repo: "leo-technologies-llc/verus_server",
+                 repo: "acme-corp/apex_server",
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],

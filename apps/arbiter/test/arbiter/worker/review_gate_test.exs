@@ -505,7 +505,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
     test "APPROVE with a hosted-forge stub adapter does NOT merge when workspace auto_merge is off (bd-dkwhbn)",
          %{repo: repo} do
-      # bd-dkwhbn: leotech has `merge.auto_merge = false` ("human merges company
+      # bd-dkwhbn: acme has `merge.auto_merge = false` ("human merges company
       # repos"), yet a ReviewGate APPROVE on a fleet-authored branch was
       # force-merging into the hosted-forge target regardless of that setting.
       # via_review_gate must still prevent the bd-66ey1o hang (a non-terminal
