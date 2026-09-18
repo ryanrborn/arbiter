@@ -62,6 +62,14 @@ defmodule Arbiter.Agents.Gemini.Stream do
   off to the shared `summarize_params/1`/`shell_activity/1` helpers so
   `mix test` still resolves to the `running tests` activity phrase.
 
+  A third state, `"ERROR"`, shows up when headless `:strict` auto-denies a
+  tool call not named in `permissions.allow` (bd-25ivqe) — before this fix it
+  fell into the generic "unrecognized tool step state" schema-drift warning,
+  which is how a `:strict` agy worker's very first denied `arb` call rendered
+  as a confusing drift notice instead of a legible denial. It's now a
+  dedicated `format_event/1` clause and a `worker_run_steps` row with
+  `is_error: true` (`ClaudeSession.capture_steps/2`).
+
   `agy`'s terminal `result.usage` has no per-model breakdown, and — confirmed
   live (bd-2fzwlc round 2) — no `result` or `init` event names which model
   actually ran, so `usage_fields/2` here never stamps a guessed `:model` onto
@@ -252,12 +260,35 @@ defmodule Arbiter.Agents.Gemini.Stream do
     Enum.map(["⏴ tool result" | body], &{&1, false})
   end
 
-  # A `step_type: "tool"` step in a state other than ACTIVE/DONE (agy's wire
-  # carries at least a `CANCELLED` enum value) — the failure/cancellation
-  # wire shape was never captured live (bd-7y3mm9), so route it through the
-  # same "schema drift is loud" warning the unrecognized-top-level-event
-  # clause below uses, rather than silently dropping it like the generic
-  # step_update fallback would.
+  # agy's headless-denial state (bd-25ivqe): under `:strict`, a tool call not
+  # matched by `permissions.allow` comes back on this same
+  # ACTIVE/DONE-shaped step as `state: "ERROR"` — headless mode can't prompt,
+  # so an unallowed command is auto-denied rather than hanging. This is a
+  # known, meaningful outcome (a denied/failed tool call), not a schema-drift
+  # surprise, so it gets its own line rather than falling into the generic
+  # "unrecognized tool step state" warning below.
+  def format_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "tool", "state" => "ERROR"} = step
+      }) do
+    name = step["tool_name"] || "tool"
+    reason = tool_step_error_reason(step)
+
+    body =
+      reason
+      |> output_text()
+      |> lines()
+      |> Enum.reject(&(&1 == ""))
+      |> truncate_lines(40)
+
+    Enum.map(["⏴ #{name} denied/failed" | body], &{&1, false})
+  end
+
+  # A `step_type: "tool"` step in a state other than ACTIVE/DONE/ERROR (agy's
+  # wire carries at least a `CANCELLED` enum value) — that shape was never
+  # captured live (bd-7y3mm9), so route it through the same "schema drift is
+  # loud" warning the unrecognized-top-level-event clause below uses, rather
+  # than silently dropping it like the generic step_update fallback would.
   def format_event(%{
         "event" => "step_update",
         "step_update" => %{"step_type" => "tool", "state" => state} = step
@@ -316,6 +347,13 @@ defmodule Arbiter.Agents.Gemini.Stream do
       }) do
     name = step["tool_name"]
     tool_activity(name, agy_tool_params(name, get_in(step, ["tool_info", "parameters"])))
+  end
+
+  def activity_for_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "tool", "state" => "ERROR"} = step
+      }) do
+    "#{step["tool_name"] || "a command"} denied"
   end
 
   def activity_for_event(_event), do: nil
@@ -447,6 +485,34 @@ defmodule Arbiter.Agents.Gemini.Stream do
   def agy_tool_params("run_command", %{"CommandLine" => cmd}), do: %{"command" => cmd}
   def agy_tool_params(_name, params) when is_map(params), do: params
   def agy_tool_params(_name, _params), do: %{}
+
+  # The denial/failure detail on an ERROR-state tool step. The exact key agy
+  # uses for this was never captured live (like the ERROR state itself,
+  # bd-25ivqe) — `tool_info.error` mirrors the shape its DONE sibling uses for
+  # `tool_info.output`, so it's tried first; falling back to `output` covers
+  # a build that reuses the same key for both outcomes.
+  defp tool_step_error_reason(step) do
+    get_in(step, ["tool_info", "error"]) || get_in(step, ["tool_info", "output"])
+  end
+
+  @doc """
+  The base command token a denied `run_command` ERROR step named — `"arb"`
+  out of `"arb inbox bd-ci0y74"` — for surfacing a concrete "strict policy
+  denied required command `<x>`" failure reason
+  (`Arbiter.Worker.ClaudeSession.capture_steps/2`) instead of a generic
+  blank-notes failure. Returns the tool name verbatim for a non-command tool;
+  `nil` only when the step carried no tool name at all.
+  """
+  @spec agy_denied_command_token(String.t() | nil, map()) :: String.t() | nil
+  def agy_denied_command_token(name, params) do
+    case agy_tool_params(name, params) do
+      %{"command" => cmd} when is_binary(cmd) ->
+        cmd |> String.trim() |> String.split(" ", parts: 2) |> List.first()
+
+      _ ->
+        name
+    end
+  end
 
   defp agy_result_summary(result) do
     status = result["status"] || "done"

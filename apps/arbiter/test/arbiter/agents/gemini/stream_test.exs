@@ -346,6 +346,52 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
     end
 
+    @error_tool_event %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 3,
+        "state" => "ERROR",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "arb inbox bd-ci0y74"},
+          "error" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+        }
+      }
+    }
+
+    test "ERROR tool step renders a denial line, not a schema-drift warning, and never arms" do
+      lines = Stream.format_event(@error_tool_event)
+
+      refute Enum.any?(lines, fn {line, _} -> line =~ "unrecognized" end)
+      refute Enum.any?(lines, fn {line, _} -> line =~ "schema drift" end)
+      assert {"⏴ run_command denied/failed", false} in lines
+      assert Enum.any?(lines, fn {line, _} -> line =~ "permission check failed" end)
+      assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
+    end
+
+    test "ERROR tool step activity names the denied command" do
+      assert Stream.activity_for_event(@error_tool_event) == "run_command denied"
+    end
+
+    test "agy_denied_command_token extracts the base command token" do
+      params = %{"CommandLine" => "arb inbox bd-ci0y74"}
+      assert Stream.agy_denied_command_token("run_command", params) == "arb"
+    end
+
+    test "agy_denied_command_token falls back to the tool name for a non-command tool" do
+      assert Stream.agy_denied_command_token("write_file", %{"path" => "/etc/passwd"}) ==
+               "write_file"
+    end
+
+    test "a genuinely unrecognized tool step state (e.g. CANCELLED) still surfaces schema drift" do
+      cancelled = put_in(@active_tool_event, ["step_update", "state"], "CANCELLED")
+      assert [{line, false}] = Stream.format_event(cancelled)
+      assert line =~ "unrecognized tool step state CANCELLED"
+      assert line =~ "schema drift"
+    end
+
     test "activity_for_event routes run_command through shell_activity, mix test -> running tests" do
       assert Stream.activity_for_event(@active_tool_event) == "running: echo hello-from-agy"
 

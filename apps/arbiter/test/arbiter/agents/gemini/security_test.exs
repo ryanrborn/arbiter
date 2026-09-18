@@ -81,6 +81,54 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       assert "command(mix test)" in Security.settings(p)["permissions"]["allow"]
     end
 
+    test "strict mode always allows the worker-protocol bootstrap commands (bd-25ivqe AC1)" do
+      settings = Security.settings(mode("strict"))
+      allow = settings["permissions"]["allow"]
+      deny = settings["permissions"]["deny"]
+
+      assert "command(arb)" in allow
+      assert "command(git status)" in allow
+      assert "command(git diff)" in allow
+      assert "command(git log)" in allow
+
+      # The bootstrap baseline widens `allow` with read/exec commands only —
+      # it must never carry an out-of-worktree write, so `write_file(/etc/**)`
+      # stays denied under :strict the same way it does under :bypass.
+      assert "write_file(/etc/**)" in deny
+      refute Enum.any?(allow, &String.starts_with?(&1, "write_file("))
+    end
+
+    test "the bootstrap baseline is present alongside operator allow rules, not replaced by them" do
+      p = policy(%{"permissions" => %{"mode" => "strict", "allow" => ["Bash(mix test:*)"]}})
+      allow = Security.settings(p)["permissions"]["allow"]
+
+      assert "command(arb)" in allow
+      assert "command(mix test)" in allow
+    end
+
+    test "the bootstrap baseline also applies to a worktree-backed review-agent policy" do
+      review =
+        Arbiter.Worker.Dispatch.review_security_policy(
+          SecurityPolicy.merge(SecurityPolicy.base(), %{"permissions" => %{"mode" => "strict"}}),
+          review_checkout: %{path: "/tmp/some-review-checkout"}
+        )
+
+      allow = Security.allow_rules(review)
+      assert "command(arb)" in allow
+      assert "command(git status)" in allow
+    end
+
+    test "an operator deny still wins over the bootstrap allow baseline (AC2)" do
+      p =
+        policy(%{
+          "permissions" => %{"mode" => "strict", "deny" => ["Bash(arb:*)"]}
+        })
+
+      settings = Security.settings(p)
+      assert "command(arb)" in settings["permissions"]["allow"]
+      assert "command(arb)" in settings["permissions"]["deny"]
+    end
+
     test "a policy with network: false denies url(*) as well as the curl/wget commands" do
       p = policy(%{"sandbox" => %{"network" => false}})
       deny = Security.settings(p)["permissions"]["deny"]
