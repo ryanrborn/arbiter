@@ -85,19 +85,29 @@ defmodule Arbiter.Board.Autopilot do
 
   ## A quota-exhausted pre-flight failure is held, not retried every tick (bd-8lnnnt)
 
-  `Arbiter.Worker.Dispatch.run_preflight/2`'s cheap auth probe can fail with a
-  classified `Arbiter.Worker.StopReason` of `:quota_exhausted` — the account's
-  5h usage window, not a broken credential. Because that card never leaves
-  Ready on a dispatch failure, and the window does not reset on Autopilot's
-  15s tick, every tick before is a wasted CLI probe destined to fail the
-  identical way. `record_failure/3` computes a `retry_not_before` for this
-  shape — the probe's own reported reset time when known, else a bounded
-  exponential backoff — and `promote/1` honours it: the card stays the
-  board's `promote:` pick (Scheduler has no notion of "skip this one"), but
-  Autopilot declines to actually dispatch it until the hold clears, reporting
-  `{:held, id, retry_not_before}` instead. `Arbiter.Messages.CoordinatorNotifier.preflight_failed/2`
+  Historical: this held a `:quota_exhausted` `Arbiter.Worker.StopReason` that
+  `Arbiter.Worker.Dispatch.run_preflight/2`'s per-dispatch auth probe could
+  produce. bd-2jgs2h retired that probe (see
+  `Arbiter.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`) — `dispatch/2`
+  now only ever produces `:auth_expired` on this path, so the `retry_not_before`
+  branch below is currently unreachable from a real dispatch. It is kept
+  because the autopilot tests still feed a `:quota_exhausted` shape in by hand
+  to exercise `record_failure/3` and `promote_or_hold/2` directly, and because
+  `Arbiter.Workflows.DispatchQueue` may still produce that shape via its own
+  path (see its moduledoc). If some other producer of `:quota_exhausted`
+  reappears here, this hold still applies to it unchanged:
+
+  Because that card never leaves Ready on a dispatch failure, and the window
+  does not reset on Autopilot's 15s tick, every tick before a real quota-exhausted
+  failure resets is otherwise a wasted retry destined to fail the identical
+  way. `record_failure/3` computes a `retry_not_before` for this shape — the
+  failure's own reported reset time when known, else a bounded exponential
+  backoff — and `promote/1` honours it: the card stays the board's `promote:`
+  pick (Scheduler has no notion of "skip this one"), but Autopilot declines to
+  actually dispatch it until the hold clears, reporting `{:held, id,
+  retry_not_before}` instead. `Arbiter.Messages.CoordinatorNotifier.preflight_failed/2`
   carries its own separate dedupe for the escalation itself, so this hold is
-  about not re-running the probe, not (only) about not re-paging.
+  about not re-attempting, not (only) about not re-paging.
 
   This hold only covers Autopilot's own 15s tick. It is **not** what drove the
   bd-7qbavq incident this bug tracks: that card's retries carried
@@ -351,11 +361,13 @@ defmodule Arbiter.Board.Autopilot do
     end
   end
 
-  # A quota-exhausted pre-flight failure (bd-8lnnnt) is not transient the way
-  # a network blip is: every tick before the usage window resets fails the
-  # exact same way. `record_failure/3` records how long this card should sit
-  # out before the next attempt; honour that hold here rather than re-running
-  # the CLI probe (and, via `run_preflight/2`, re-escalating) every tick.
+  # A quota-exhausted failure (bd-8lnnnt) is not transient the way a network
+  # blip is: every tick before the usage window resets fails the exact same
+  # way. `record_failure/3` records how long this card should sit out before
+  # the next attempt; honour that hold here rather than re-attempting (and
+  # re-escalating) every tick. As of bd-2jgs2h this shape is no longer
+  # produced by `Dispatch.dispatch/2`'s own auth guard (that guard only ever
+  # produces `:auth_expired`); see the moduledoc section above.
   #
   # Scheduler always names the single highest-priority Ready card, with no
   # notion of "skip this one, try the next" (`Arbiter.Board.Scheduler.plan/1`)
