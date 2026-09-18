@@ -2568,6 +2568,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
                view,
                ~s(#refine-session-transcript-link[href="/sessions/#{session.id}/jsonl"])
              )
+
       assert has_element?(view, "#refine-session-cost", "$3.25")
     end
 
