@@ -21,6 +21,11 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
       orphan commit and no `:impl` round row;
     * the gate fast-forwards onto the new remote head and opens a FRESH review
       round on it, instead of parking `head_not_pushed`;
+    * that fresh round's prompt says what actually happened — nobody addressed
+      the findings — instead of the default "the implementer has addressed your
+      prior findings", which would push the reviewer to disposition its own
+      open findings `[ADDRESSED]` against a diff that never targeted them
+      (the bd-6r8caj property);
     * the branch is otherwise untouched: `origin/<branch>` still carries the
       other actor's commit.
 
@@ -37,7 +42,9 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Worker.PromptLog
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Workers.Run
 
   @remote_advance Path.expand("../../fixtures/review_remote_advance.sh", __DIR__)
   @push_check Path.expand("../../fixtures/review_push_check.sh", __DIR__)
@@ -193,6 +200,24 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
     gate
   end
 
+  # The prompt the round-`n` reviewer pass was actually launched with, read back
+  # off its own run row (`Worker.persist_composed_prompt/2` writes it).
+  defp round_prompt(task_id, round) do
+    id = ReviewGate.reviewer_task_id(task_id) <> "#r#{round}"
+
+    run =
+      Run
+      |> Ash.Query.filter(task_id == ^id)
+      |> Ash.Query.sort(started_at: :desc)
+      |> Ash.Query.limit(1)
+      |> Ash.read!()
+      |> List.first()
+
+    refute is_nil(run), "no run row for reviewer pass #{id}"
+    assert {:ok, prompt} = PromptLog.read(run.id)
+    prompt
+  end
+
   defp rounds(task_id) do
     Round |> Ash.Query.filter(task_id == ^task_id) |> Ash.Query.sort(:inserted_at) |> Ash.read!()
   end
@@ -249,6 +274,18 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
       {git_dir, 0} = git(["rev-parse", "--absolute-git-dir"], wt)
       refute File.exists?(Path.join(String.trim(git_dir), "revise_commit_pass"))
       assert Enum.filter(rounds(task.id), &(&1.role == :impl)) == []
+
+      # The fresh round is honest about WHY there is a new diff: no implementer
+      # ran, so the reviewer must re-check each open finding against a commit
+      # that was never aimed at it.
+      prompt = round_prompt(task.id, 2)
+      refute prompt =~ "The implementer has addressed your prior findings"
+      assert prompt =~ "NO implementer ran for your prior findings"
+      assert prompt =~ "the branch moved on"
+      assert prompt =~ String.slice(patrol_sha, 0, 12)
+      # The carried findings and their DISPOSITIONS instruction are still there.
+      assert prompt =~ "OPEN FINDINGS CARRIED FORWARD"
+      assert prompt =~ "DISPOSITIONS:"
     end
   end
 
@@ -286,6 +323,12 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
       git!(["fetch", "-q", "origin"], repo)
       assert sha(repo, "origin/" <> branch) == fix_head
       assert Enum.any?(rounds(task.id), &(&1.role == :impl))
+
+      # An ordinary fix round keeps the ordinary framing: an implementer really
+      # did address the findings on this path.
+      prompt = round_prompt(task.id, 2)
+      assert prompt =~ "The implementer has addressed your prior findings"
+      refute prompt =~ "NO implementer ran for your prior findings"
     end
   end
 end

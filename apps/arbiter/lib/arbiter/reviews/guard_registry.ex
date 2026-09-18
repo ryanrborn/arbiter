@@ -1197,6 +1197,29 @@ defmodule Arbiter.Reviews.GuardRegistry do
       sites: [{PRPatrol, :author_allowed?, 2}],
       anchors: ["author_allowed?"],
       summary: "do not patrol third-party PRs"
+    },
+    %{
+      id: :review_gate_branch_hold,
+      doc_ref: "P8",
+      class: :f,
+      class_source: :doc,
+      bound: {:evaluations, 1},
+      episode: {:pr, :tick},
+      terminal: :skipped,
+      sites: [{PRPatrol, :review_gate_holds?, 2}],
+      anchors: ["review_gate_holds?", "GateActivity"],
+      summary:
+        "bd-bq8c8a: while the ReviewGate owns a branch, nothing else may commit to it — " <>
+          "fails CLOSED on an undeterminable read (§5.2: a guard on filing)",
+      policy_note:
+        "One evaluation per PR per tick, and the terminal is a SKIP, not a give-up: the " <>
+          "threads stay unresolved and the first tick after the gate converges files the " <>
+          "follow-up this one declined. So the fail-closed posture costs one ~60s interval " <>
+          "and consumes nothing, while failing open re-runs the reported collision. " <>
+          "Residual window (accepted): G18's companion `remote_advance/1` fetches before the " <>
+          "gate DISPATCHES its implementer, so a push landing during an already-running fix " <>
+          "round still degrades to G18's `:head_not_pushed` park — this hold is what closes " <>
+          "that window for the patrol as the pusher."
     }
   ]
 

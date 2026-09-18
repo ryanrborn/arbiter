@@ -358,6 +358,11 @@ defmodule Arbiter.Workflows.PRPatrol do
   # consumed, and the threads stay unresolved — so the first tick after the
   # gate converges files exactly the follow-up this one declined to. Last in
   # the `and` chain so a deduped PR (the steady state) never pays for the read.
+  #
+  # Registry row P8, class F: a guard on *filing* fails CLOSED (§5.2), so
+  # `GateActivity` resolves a failed read to `{:gated, :undeterminable, nil}`
+  # and this returns `true` for it. Holding on an unanswerable question costs
+  # one ~60s tick; letting the filing through costs the incident above.
   defp review_gate_holds?(pr_number, state) do
     case GateActivity.engaged(state.workspace_id, pr_number, state.repo) do
       :clear ->

@@ -126,4 +126,34 @@ defmodule Arbiter.Reviews.GateActivityTest do
       assert {:gated, :review_parked, %Issue{}} = GateActivity.engaged(ws.id, "424", "owner/repo")
     end
   end
+
+  describe "a read that fails (§5.2: this guard fails CLOSED)" do
+    # A malformed workspace id makes the `Issue` read raise on the filter cast —
+    # the same shape as any transient read failure, and the only one a test can
+    # produce deterministically. The posture is what is pinned, not the cause.
+    @bad_ws "not-a-uuid"
+
+    test "resolves to {:gated, :undeterminable, nil} rather than :clear" do
+      assert {:gated, :undeterminable, nil} = GateActivity.engaged(@bad_ws, 424, "owner/repo")
+    end
+
+    test "engaged?/3 holds too, so the patrol declines to dispatch" do
+      # `PRPatrol.review_gate_holds?/2` matches `{:gated, _reason, _task}`, so
+      # an undeterminable read holds the tick exactly like a real gate signal.
+      assert GateActivity.engaged?(@bad_ws, 424, "owner/repo")
+    end
+
+    test "describe/1 names the hold without a task to point at" do
+      gated = GateActivity.engaged(@bad_ws, 424, "owner/repo")
+      assert GateActivity.describe(gated) =~ "read failed"
+      assert GateActivity.describe(gated) =~ "unknown"
+    end
+
+    test "the hold is one tick, not a give-up: a later good read decides again", %{ws: ws} do
+      _task = authored_task(ws, "owner/repo#424")
+
+      assert {:gated, :undeterminable, nil} = GateActivity.engaged(@bad_ws, 424, "owner/repo")
+      assert GateActivity.engaged(ws.id, 424, "owner/repo") == :clear
+    end
+  end
 end

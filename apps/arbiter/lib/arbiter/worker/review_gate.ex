@@ -771,7 +771,16 @@ defmodule Arbiter.Worker.ReviewGate do
       # resumed once to commit uncommitted work. Reset to false whenever a
       # round genuinely advances (finish_revise/1's dispatch_next_review/1) so
       # each new round gets its own one-shot nudge budget.
-      commit_nudge_used: false
+      commit_nudge_used: false,
+      # bd-bq8c8a: the sha this round is re-reviewing BECAUSE a third party
+      # pushed it, not because an implementer addressed anything
+      # (`restart_on_remote_head/3`). nil on every ordinary round. Read only by
+      # `rereview_prompt/1`, to state what actually happened instead of the
+      # default "the implementer has addressed your prior findings" — which on
+      # this path is false, and would bias the reviewer into dispositioning its
+      # own open findings `[ADDRESSED]` against a diff that never targeted them
+      # (the bd-6r8caj property).
+      restarted_on_remote_head: nil
     }
 
     Process.monitor(author)
@@ -1632,7 +1641,7 @@ defmodule Arbiter.Worker.ReviewGate do
         )
         |> Map.put(:commit_nudge_used, false)
         |> then(&%{&1 | head_sha: current_head_sha(&1)})
-        |> dispatch_next_review()
+        |> dispatch_next_review(restarted_on_remote_head: remote_head)
         |> keep_waiting()
 
       other ->
@@ -1747,7 +1756,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # pre-bd-2eyf9y behavior (proceed) rather than escalate on a guess.
   defp commit_gate_outcome(_state, _new_sha), do: {:advanced, nil}
 
-  defp dispatch_next_review(state) do
+  # `opts[:restarted_on_remote_head]` is the new remote sha when this round
+  # exists because the branch moved under us rather than because an implementer
+  # ran (bd-bq8c8a). It is set per-round — every ordinary caller leaves it nil,
+  # so the flag can never leak into a later round's prompt.
+  defp dispatch_next_review(state, opts \\ []) do
     # Reset the per-round retry budget so a reprompt used in this round does not
     # prevent a reprompt in the next round (bug bd-79goxj).
     # Also reset attempt counter so reprompts in the new round start fresh (bd-bgeo6i).
@@ -1758,7 +1771,8 @@ defmodule Arbiter.Worker.ReviewGate do
         retries_left: state.initial_retries,
         attempt: 0,
         verdict_scan: nil,
-        verdict_scans: []
+        verdict_scans: [],
+        restarted_on_remote_head: Keyword.get(opts, :restarted_on_remote_head)
     }
 
     review_id = reviewer_round_id(next.review_id, next.round)
@@ -4272,9 +4286,9 @@ defmodule Arbiter.Worker.ReviewGate do
   @spec rereview_prompt(map()) :: String.t()
   def rereview_prompt(state) do
     """
-    This is review round #{state.round} of a revise-and-rediscuss loop. The
-    implementer has addressed your prior findings. Re-review the UPDATED diff. For
-    each prior finding, decide whether to ACCEPT the fix/rebuttal or HOLD THE
+    This is review round #{state.round} of a revise-and-rediscuss loop.
+    #{why_rereviewing(state)}
+    For each prior finding, decide whether to ACCEPT the fix/rebuttal or HOLD THE
     LINE, then issue a fresh verdict on the current state of the branch.
 
     *** For EACH prior finding you are tempted to HOLD THE LINE on, re-open the
@@ -4290,6 +4304,33 @@ defmodule Arbiter.Worker.ReviewGate do
     ----------------------------------------------------------------------
 
     """ <> review_prompt(state)
+  end
+
+  # Why there is a new diff to read. bd-bq8c8a: on `restart_on_remote_head/3`'s
+  # path there is no implementer round behind this one — the head changed
+  # because a third party pushed to the branch, and that commit was not aimed
+  # at this reviewer's findings. Telling the reviewer otherwise invites it to
+  # disposition its own open findings `[ADDRESSED]` against a diff that never
+  # targeted them, which is the exact bd-6r8caj failure the open-findings
+  # briefing exists to prevent.
+  defp why_rereviewing(state) do
+    case Map.get(state, :restarted_on_remote_head) do
+      nil ->
+        """
+        The implementer has addressed your prior findings. Re-review the UPDATED
+        diff.
+        """
+
+      sha ->
+        """
+        NO implementer ran for your prior findings. Instead the branch moved on
+        origin: another actor pushed #{String.slice(sha, 0, 12)}, which is now the head, and
+        the fix round was skipped rather than build a commit that could not be
+        pushed. NOTHING in this diff was written in response to your findings —
+        re-check each one against the new code on its own terms, and do not
+        treat a finding as addressed unless the new head actually addresses it.
+        """
+    end
   end
 
   # bd-6r8caj: the open findings, by id, plus the DISPOSITIONS instruction that

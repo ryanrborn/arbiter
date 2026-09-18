@@ -34,6 +34,25 @@ defmodule Arbiter.Reviews.GateActivity do
       it; a patrol commit landing on top is exactly what made the reported
       recovery manual.
 
+  There is a fourth answer, `:undeterminable`, which is not a signal but the
+  absence of one: the read that would have answered the question failed. It
+  gates the PR too — see "Failure posture" below.
+
+  ## Failure posture — fail closed
+
+  §5.2 of `docs/review-coverage-and-guard-policy.md` assigns the posture by
+  what the guard protects: fail closed when the guard "cannot decide, do not
+  take the irreversible action", and that applies "to guards that protect
+  *authorisation* — merging, **filing**, publishing". This guard authorises
+  filing a follow-up whose worker then commits and pushes to a branch, so it
+  is fail-closed by that definition.
+
+  The asymmetry is stark. Failing closed costs one patrol tick (~60s): the
+  hold is a skip, not a give-up — nothing is written, nothing is consumed, the
+  threads stay unresolved, and the next tick asks again. Failing open costs a
+  re-run of the reported incident: two actors committing to one branch, a
+  `:diverged` push, a `head_not_pushed` park, and a hand recovery.
+
   ## Cost
 
   One `Issue` read plus in-memory registry lookups. No forge call — callers
@@ -49,9 +68,15 @@ defmodule Arbiter.Reviews.GateActivity do
   alias Arbiter.Workflows.PatrolRepoScope
 
   @typedoc "Why the PR's branch is spoken for. See the moduledoc."
-  @type reason :: :awaiting_review_gate | :round_running | :review_parked
+  @type reason :: :awaiting_review_gate | :round_running | :review_parked | :undeterminable
 
-  @type t :: :clear | {:gated, reason(), Issue.t()}
+  @typedoc """
+  `:clear` means no task in the workspace has this PR under the gate — which
+  includes "no task authored this PR at all". `{:gated, reason, task}` carries
+  the task, except for `:undeterminable`, where there is no task to carry
+  because reading it is what failed.
+  """
+  @type t :: :clear | {:gated, reason(), Issue.t() | nil}
 
   # The trailing PR/MR number in a merge ref: `owner/repo#424`, `github:owner/repo#424`,
   # `#424`, or GitLab's `!424`.
@@ -64,9 +89,10 @@ defmodule Arbiter.Reviews.GateActivity do
   when no task in the workspace authored that PR at all (an outside
   contributor's PR is nobody's branch to protect).
 
-  Never raises: any read failure resolves to `:clear`, which is the fail-open
-  direction. This guard exists to stop a *collision*, and a DB hiccup must not
-  silently freeze every follow-up the patrol would otherwise file.
+  Never raises, and never fails open: a read failure resolves to `{:gated,
+  :undeterminable, nil}`, because a guard that authorises filing-and-pushing
+  must not let the action through on a question it could not answer (§5.2,
+  class F). The cost is one tick — the next one re-reads and decides.
   """
   @spec engaged(String.t(), term(), String.t()) :: t()
   def engaged(workspace_id, pr_number, repo)
@@ -79,8 +105,14 @@ defmodule Arbiter.Reviews.GateActivity do
     end
   rescue
     error ->
-      Logger.warning("GateActivity: could not resolve gate activity: #{inspect(error)}")
-      :clear
+      # One line per tick, and deliberately short: an Ash read error inspects
+      # to several KB of Ecto query struct, which would bury the log.
+      Logger.warning(
+        "GateActivity: could not resolve gate activity for #{repo}##{inspect(pr_number)} " <>
+          "(#{error_summary(error)}) — holding this tick"
+      )
+
+      {:gated, :undeterminable, nil}
   end
 
   def engaged(_workspace_id, _pr_number, _repo), do: :clear
@@ -94,7 +126,12 @@ defmodule Arbiter.Reviews.GateActivity do
   @doc """
   One sentence naming the hold, for a log line or a task note.
   """
-  @spec describe({:gated, reason(), Issue.t()}) :: String.t()
+  @spec describe({:gated, reason(), Issue.t() | nil}) :: String.t()
+  def describe({:gated, :undeterminable, _task}),
+    do:
+      "the gate-activity read failed, so whether the ReviewGate owns the branch is " <>
+        "unknown — holding until a tick can answer it"
+
   def describe({:gated, :awaiting_review_gate, %Issue{id: id}}),
     do: "task #{id} is parked at :awaiting_review_gate — the ReviewGate owns the branch"
 
@@ -155,6 +192,17 @@ defmodule Arbiter.Reviews.GateActivity do
   end
 
   defp number_of_ref(_ref), do: nil
+
+  defp error_summary(error) do
+    summary =
+      if is_exception(error) do
+        "#{inspect(error.__struct__)}: #{Exception.message(error)}"
+      else
+        inspect(error)
+      end
+
+    summary |> String.replace(~r/\s+/, " ") |> String.slice(0, 240)
+  end
 
   defp normalize_number(n) when is_integer(n), do: {:ok, Integer.to_string(n)}
 
