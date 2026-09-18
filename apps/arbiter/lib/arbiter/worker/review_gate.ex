@@ -1162,6 +1162,7 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+
   def handle_info({:worker_exited, id, _status}, %{current_id: id, phase: :revising} = state) do
     case finish_revise(state) do
       {:done, state} -> {:stop, :normal, state}
@@ -1510,6 +1511,16 @@ defmodule Arbiter.Worker.ReviewGate do
     # (it may not have self-completed if it never printed `arb done`).
     stop_worker(state)
 
+    # bd-bq8c8a: fetch before handing the branch to an implementer. If the
+    # remote moved while this round was reviewing, a fix commit on top of the
+    # head the reviewer read can only be an orphan.
+    case remote_advance(state) do
+      {:advanced, remote_head} -> restart_on_remote_head(state, findings, remote_head)
+      :none -> launch_implementer(state, findings)
+    end
+  end
+
+  defp launch_implementer(state, findings) do
     impl_id = implementer_task_id(state.review_id, state.round)
 
     case launch_worker(
@@ -1545,6 +1556,104 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, finish(state, terminal_reject_verdict(state))}
     end
   end
+
+  # ---- the remote must not move under a fix round (bd-bq8c8a) --------------
+  #
+  # G18's companion, one step earlier in the round. `push_gate/1` asks "is the
+  # head I am about to review on the remote?" at the START of a round; this
+  # asks "has the remote moved past the head I just reviewed?" before a fix
+  # round is allowed to build on it.
+  #
+  # lt-20r7zu (admin_server PR #424, 2026-09-17): round 1 said REQUEST_CHANGES
+  # and dispatched an implementer; eighteen seconds later PRPatrol's fix worker
+  # pushed `aed4457` to `origin/<branch>`; twenty seconds after THAT the gate's
+  # implementer committed `19665a3` on the worktree — a sibling of the patrol
+  # commit, containing none of its work. The gate never fetched between the
+  # verdict and the commit, so the round could not notice, and `push_gate/1` at
+  # the end of the round could only report `:diverged` and park
+  # `head_not_pushed`. The round's whole cost was spent producing a commit that
+  # had to be thrown away by hand.
+  #
+  # The answer is not to reconcile the two lines of work — the gate cannot know
+  # whose commit is right — but to stop building on a head that is no longer
+  # the branch. A remote that STRICTLY ADVANCED (our head is an ancestor of it)
+  # is a fast-forward: sync onto it and open a fresh review round, which reads
+  # the new diff with this round's findings still on the thread, so nothing the
+  # reviewer said is lost.
+  #
+  # Every other shape is deliberately `:none` — off-branch worktree, no
+  # `origin`, git unavailable, a fetch that failed, or a branch that had
+  # ALREADY diverged before the round began. None of those is "the remote moved
+  # under us", and `push_gate/1` still owns them at the end of the round. This
+  # guard only ever *avoids* work; it never creates a new refusal.
+  @spec remote_advance(map()) :: {:advanced, String.t()} | :none
+  defp remote_advance(%{worktree_path: wt, branch: branch})
+       when is_binary(wt) and is_binary(branch) do
+    with {:ok, ^branch} <- Worktree.current_branch(wt),
+         {:ok, local} <- git_out(wt, ["rev-parse", "HEAD"]),
+         {:ok, _} <- git_out(wt, ["fetch", "--quiet", "origin", branch]),
+         {:ok, remote} <-
+           git_out(wt, ["rev-parse", "--verify", "--quiet", "origin/#{branch}^{commit}"]) do
+      if remote != local and ancestor?(wt, local, remote),
+        do: {:advanced, remote},
+        else: :none
+    else
+      _ -> :none
+    end
+  end
+
+  defp remote_advance(_state), do: :none
+
+  # The remote strictly advanced: fast-forward onto it and re-review, instead of
+  # dispatching a fix round that could only produce an orphan commit.
+  defp restart_on_remote_head(state, findings, remote_head) do
+    case Worktree.sync_from_origin(state.worktree_path, state.branch) do
+      {:ok, result} when result in [:up_to_date, :synced] ->
+        Logger.info(
+          "ReviewGate: task=#{state.task_id} round #{state.round} fix pass skipped — " <>
+            "`#{state.branch}` advanced to #{String.slice(remote_head, 0, 12)} on origin; " <>
+            "re-reviewing the new head instead"
+        )
+
+        state
+        |> record_thread(
+          :system,
+          "Round #{state.round} fix pass skipped — the branch moved on origin",
+          """
+          Another actor pushed to `origin/#{state.branch}` while this round was
+          reviewing: the branch is now #{String.slice(remote_head, 0, 12)}, and the head this
+          round read (#{state.head_sha}) is its ancestor.
+
+          A fix commit on top of the reviewed head would be a sibling of that push,
+          not a child — it could not be pushed, and the round's work would be
+          thrown away. No implementer was dispatched. The worktree has been
+          fast-forwarded onto the new head and the findings above are carried into
+          a fresh review round, which reads the pushed code.
+          """
+        )
+        |> Map.put(:commit_nudge_used, false)
+        |> then(&%{&1 | head_sha: current_head_sha(&1)})
+        |> dispatch_next_review()
+        |> keep_waiting()
+
+      other ->
+        # The fast-forward did not land (a race with yet another push, a git
+        # error). Fail open into the ordinary fix round — `push_gate/1` at the
+        # end of the round is still the backstop, exactly as before this guard.
+        Logger.warning(
+          "ReviewGate: task=#{state.task_id} could not fast-forward `#{state.branch}` onto " <>
+            "origin (#{inspect(other)}); proceeding with the fix round"
+        )
+
+        launch_implementer(state, findings)
+    end
+  end
+
+  # `dispatch_next_review/1` answers in the `:revising` loop's vocabulary
+  # (`:continue`); this call site is in the `:reviewing` loop, whose "keep
+  # waiting" token is `:revise`. Both mean `{:noreply, state}`.
+  defp keep_waiting({:continue, state}), do: {:revise, state}
+  defp keep_waiting({:done, state}), do: {:done, state}
 
   # The implementer finished addressing the round's findings. Capture its
   # transcript, post it back to the reviewer over the mailbox, and open the next
@@ -3005,6 +3114,23 @@ defmodule Arbiter.Worker.ReviewGate do
     do: current_head_sha_in(wt)
 
   defp current_head_sha(_state), do: nil
+
+  # `{:ok, trimmed_stdout}` for a git command that succeeded in `path`, `:error`
+  # otherwise. Never raises: a missing worktree, a git that isn't there and a
+  # non-zero exit are all the same "cannot answer" to `remote_advance/1`.
+  defp git_out(path, args) do
+    case System.cmd("git", ["-C", path | args], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, String.trim(out)}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
+  defp ancestor?(path, a, b),
+    do: match?({:ok, _}, git_out(path, ["merge-base", "--is-ancestor", a, b]))
 
   # Return the FULL HEAD SHA for the worktree at `path`, or nil on any error.
   # Deliberately not the abbreviated form `current_head_sha_in/1` returns: this
