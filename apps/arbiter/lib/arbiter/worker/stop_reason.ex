@@ -78,8 +78,17 @@ defmodule Arbiter.Worker.StopReason do
       Distinct from a plain early quit because the remediation is a
       `--resume` carrying corrective guidance, never a re-dispatch: the
       worktree usually holds real, uncommitted work.
-    * `:stalled` — no exit at all; the subprocess is alive but produced no
-      output within the watchdog window (caller passes `exit_status: nil`).
+    * `:stalled` — no exit at all; the subprocess is alive within the watchdog
+      window (caller passes `exit_status: nil`). The summary distinguishes a
+      wholly silent subprocess from one that was mid-flight: "produced no
+      output" is a *finding*, not a synonym for "timed out" (bd-svczq4).
+    * `:preflight_timeout` — the dispatch's auth **pre-flight probe** (not a
+      worker) outran its watchdog. Synthesized by
+      `Arbiter.Agents.Preflight`, never by `classify/2`: there is no worker,
+      no transcript and no work in progress, so it carries its own summary
+      (elapsed, watchdog, whether any output arrived) and a remediation that
+      names the probe's own config rather than sending the operator to a
+      transcript that does not exist (bd-svczq4).
     * `:missing_worktree` — the worker signalled `arb done` on a reviewable
       code directive but no per-task branch/worktree was ever provisioned, so
       there is nothing to integrate (bd-7pe74i). Not a subprocess-exit
@@ -132,6 +141,7 @@ defmodule Arbiter.Worker.StopReason do
           | :exited_without_done
           | :async_wait_abandoned
           | :stalled
+          | :preflight_timeout
           | :missing_worktree
           | :spawn_failed
 
@@ -478,14 +488,7 @@ defmodule Arbiter.Worker.StopReason do
         }
 
       is_nil(exit_status) ->
-        %__MODULE__{
-          category: :stalled,
-          summary: "agent produced no output within the watchdog window (possible hang)",
-          remediation:
-            "Inspect the worker's transcript; if genuinely hung, stop and re-dispatch the task.",
-          exit_status: nil,
-          signal: nil
-        }
+        stalled(output_lines)
 
       is_integer(signal) ->
         %__MODULE__{
@@ -572,6 +575,85 @@ defmodule Arbiter.Worker.StopReason do
     end
   end
 
+  # bd-svczq4: a watchdog expiry with output already in hand is NOT "produced no
+  # output" — that wording sent an operator hunting a hang that never happened.
+  # Report what was actually observed; keep the silent case's wording verbatim
+  # so the (accurate) no-output diagnosis is unchanged.
+  defp stalled(output_lines) do
+    count = length(output_lines)
+
+    summary =
+      if blank_output?(output_lines) do
+        "agent produced no output within the watchdog window (possible hang)"
+      else
+        "agent stopped producing output within the watchdog window " <>
+          "(#{count} line(s) seen, then silence — possible hang)"
+      end
+
+    %__MODULE__{
+      category: :stalled,
+      summary: summary,
+      remediation:
+        "Inspect the worker's transcript; if genuinely hung, stop and re-dispatch the task.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:preflight_timeout` reason (bd-svczq4): the dispatch's **auth
+  pre-flight probe** outran its watchdog.
+
+  Synthesized by `Arbiter.Agents.Preflight`, never by `classify/2`. A pre-flight
+  is not a worker: there is no transcript to inspect, no partial work to
+  preserve, and "re-dispatch the task" is not remediation — re-dispatching is
+  what the operator was trying to do. So this carries its own summary (what the
+  probe was actually observed doing) and its own remediation (the probe's own
+  config levers).
+
+  `opts`:
+    * `:timeout_ms` — the watchdog that fired.
+    * `:elapsed_ms` — how long the probe actually ran before it fired.
+    * `:lines` — the output lines captured before the deadline (default `[]`).
+    * `:provider` — the adapter's provider, when known.
+  """
+  @spec preflight_timeout(keyword()) :: t()
+  def preflight_timeout(opts \\ []) do
+    timeout_ms = Keyword.get(opts, :timeout_ms)
+    elapsed_ms = Keyword.get(opts, :elapsed_ms)
+    lines = Keyword.get(opts, :lines) || []
+    provider = Keyword.get(opts, :provider)
+
+    who = if is_binary(provider) and provider != "", do: "#{provider} ", else: ""
+
+    observed =
+      case length(lines) do
+        0 -> "it had produced no output yet"
+        n -> "it was mid-flight, having produced #{n} line(s) of output"
+      end
+
+    %__MODULE__{
+      category: :preflight_timeout,
+      summary:
+        "#{who}auth pre-flight probe timed out after #{ms(elapsed_ms)}" <>
+          " (watchdog #{ms(timeout_ms)}) — #{observed}. The probe was terminated;" <>
+          " this is the pre-flight itself, not a worker.",
+      remediation:
+        "No worker ran and nothing is hung. Raise this adapter's probe watchdog " <>
+          "(`config :arbiter, Arbiter.Agents.Preflight, timeout_ms_by_provider: " <>
+          "%{\"#{provider || "<provider>"}\" => ms}`) if the CLI is legitimately slow to " <>
+          "start, or check the CLI by hand. By default a pre-flight timeout is advisory " <>
+          "only — the adapter's expiry state is left exactly as it was, so no dispatch is " <>
+          "refused because of it (`on_timeout: :refuse` records it as a probe failure instead).",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  defp ms(nil), do: "?ms"
+  defp ms(n) when is_integer(n), do: "#{n}ms"
+  defp ms(n), do: "#{n}"
+
   @doc """
   Build a `:spawn_failed` reason (bd-bi5pn0): a `Dispatch.dispatch/2` step
   after `start_worker/3` failed, before any agent subprocess ever ran. Unlike
@@ -618,6 +700,7 @@ defmodule Arbiter.Worker.StopReason do
         :exited_without_done -> "exited without completing"
         :async_wait_abandoned -> "abandoned an async wait (background task never drained)"
         :stalled -> "stalled (no output)"
+        :preflight_timeout -> "auth pre-flight probe timed out"
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
         :spawn_failed -> "spawn failed (dispatch error after worker registration)"
       end

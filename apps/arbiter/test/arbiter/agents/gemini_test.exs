@@ -757,4 +757,86 @@ defmodule Arbiter.Agents.GeminiTest do
       assert {:error, {:executable_not_found, "agy or gemini"}} = Gemini.auth_probe_argv([])
     end
   end
+
+  # bd-svczq4: the pre-flight probe used to be a bare `agy -p ping` — plain-text
+  # print mode with no self-timeout, tools on, rooted in the live checkout. It
+  # took 102s against a 30s harness watchdog and refused a valid dispatch.
+  # bd-481sz7 gave it `--output-format stream-json` (asserted here as a
+  # regression guard); what this ticket adds is `--print-timeout`, derived from
+  # the harness watchdog so agy yields *first* and a real exit status is always
+  # observed instead of agy's own 5-minute default.
+  describe "auth_probe_argv/1 (bd-svczq4)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-probe-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    defp stub_exec(tmp, name) do
+      path = Path.join(tmp, name)
+      File.write!(path, "#!/bin/sh\nexit 0\n")
+      File.chmod!(path, 0o755)
+      path
+    end
+
+    defp flag_value(argv, flag) do
+      case Enum.find_index(argv, &(&1 == flag)) do
+        nil -> nil
+        idx -> Enum.at(argv, idx + 1)
+      end
+    end
+
+    test "agy: asks for a structured result", %{tmp: tmp} do
+      agy = stub_exec(tmp, "agy")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert ["sh", "-c", _script, "sh", ^agy, "-p", "ping" | _rest] = argv
+      assert flag_value(argv, "--output-format") == "stream-json"
+    end
+
+    test "agy: bounds its own turn strictly inside the harness watchdog", %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv(timeout_ms: 120_000)
+      assert value = flag_value(argv, "--print-timeout")
+      assert {seconds, "s"} = Integer.parse(value)
+      assert seconds > 0
+      # Strictly inside: agy must yield and report an exit status before the
+      # harness gives up, which is the whole point of the flag.
+      assert seconds * 1000 < 120_000
+    end
+
+    test "agy: bounds itself even when the caller names no watchdog", %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert value = flag_value(argv, "--print-timeout")
+      assert {seconds, "s"} = Integer.parse(value)
+      assert seconds > 0
+      # Never agy's own 5-minute print-mode default.
+      assert seconds < 300
+    end
+
+    test "upstream gemini: structured output, but no agy-only --print-timeout", %{tmp: tmp} do
+      gemini = stub_exec(tmp, "gemini")
+
+      assert {:ok, argv} = Gemini.auth_probe_argv(timeout_ms: 120_000)
+      assert ["sh", "-c", _script, "sh", ^gemini, "-p", "ping" | _rest] = argv
+      assert flag_value(argv, "--output-format") == "stream-json"
+      refute "--print-timeout" in argv
+    end
+  end
 end

@@ -795,4 +795,76 @@ defmodule Arbiter.Worker.StopReasonTest do
 
     "#{hour12}:#{String.pad_leading(to_string(at.minute), 2, "0")}#{meridiem}"
   end
+
+  # bd-svczq4: a refused gemini dispatch reported "agent produced no output
+  # within the watchdog window (possible hang)" for a probe that had
+  # authenticated, made 21 model calls and read 6 files. The branch keyed on
+  # `exit_status == nil` alone and never looked at whether output had arrived,
+  # and its remediation pointed at a worker transcript that does not exist for a
+  # pre-flight.
+  describe "classify/2 — a stall distinguishes silence from mid-flight output (bd-svczq4)" do
+    test "a stall with NO output says so" do
+      reason = StopReason.classify(nil, [])
+      assert reason.category == :stalled
+      assert reason.summary =~ "no output"
+    end
+
+    test "a stall that DID produce output does not claim it produced none" do
+      reason = StopReason.classify(nil, ["thinking...", "reading a file"])
+      assert reason.category == :stalled
+      refute reason.summary =~ "no output"
+      # It reports what was actually seen instead.
+      assert reason.summary =~ "2"
+    end
+
+    test "the two stalls are distinguishable" do
+      refute StopReason.classify(nil, []).summary ==
+               StopReason.classify(nil, ["thinking..."]).summary
+    end
+  end
+
+  describe "preflight_timeout/1 (bd-svczq4)" do
+    test "is a distinct category from a worker hang" do
+      reason = StopReason.preflight_timeout(timeout_ms: 30_000, elapsed_ms: 30_012, lines: [])
+
+      assert reason.category == :preflight_timeout
+      refute reason.category == StopReason.classify(nil, []).category
+    end
+
+    test "says the probe timed out and reports what was observed" do
+      reason =
+        StopReason.preflight_timeout(
+          timeout_ms: 30_000,
+          elapsed_ms: 30_012,
+          lines: ["one", "two"],
+          provider: "gemini"
+        )
+
+      assert reason.summary =~ "pre-flight"
+      assert reason.summary =~ "30"
+      assert reason.summary =~ "2 line"
+      assert reason.summary =~ "gemini"
+    end
+
+    test "distinguishes a silent probe from one that was mid-flight" do
+      silent = StopReason.preflight_timeout(timeout_ms: 30_000, elapsed_ms: 30_001, lines: [])
+
+      noisy =
+        StopReason.preflight_timeout(timeout_ms: 30_000, elapsed_ms: 30_001, lines: ["output!"])
+
+      refute silent.summary == noisy.summary
+    end
+
+    test "its remediation never sends the operator to a worker transcript" do
+      reason = StopReason.preflight_timeout(timeout_ms: 30_000, elapsed_ms: 30_001, lines: [])
+
+      refute reason.remediation =~ "transcript"
+      assert reason.remediation =~ "pre-flight"
+    end
+
+    test "labels distinctly" do
+      refute StopReason.label(StopReason.preflight_timeout(timeout_ms: 1, elapsed_ms: 1)) ==
+               StopReason.label(StopReason.classify(nil, []))
+    end
+  end
 end

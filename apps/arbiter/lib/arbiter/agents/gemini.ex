@@ -26,6 +26,15 @@ defmodule Arbiter.Agents.Gemini do
   # dashboards via `resolved_model/1`; dispatch behaviour is unchanged.
   @default_model "gemini-2.5-pro"
 
+  # bd-svczq4: the auth probe's prompt, and the two numbers that bound it. The
+  # fraction keeps agy's own `--print-timeout` strictly inside the harness
+  # watchdog so agy is always the one to yield; the fallback only applies to a
+  # bare adapter call that names no watchdog, since `Arbiter.Agents.Preflight`
+  # always threads one through.
+  @probe_prompt "ping"
+  @probe_timeout_fraction_pct 80
+  @probe_fallback_watchdog_ms 120_000
+
   @impl true
   def provider, do: "gemini"
 
@@ -73,7 +82,7 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   @impl true
-  def auth_probe_argv(_opts \\ []) do
+  def auth_probe_argv(opts \\ []) do
     # Cheap token-validity probe for whichever CLI is on PATH. A bad/expired key
     # makes Gemini print "API key not valid" / "RESOURCE_EXHAUSTED" (or 401) and
     # exit non-zero — classified by Arbiter.Worker.StopReason.
@@ -82,15 +91,47 @@ defmodule Arbiter.Agents.Gemini do
     # is plain text `Arbiter.Agents.Gemini.Stream` can't parse for usage, so
     # every preflight row landed with zero tokens even on a healthy probe —
     # the same root cause bd-2fzwlc found on the main spawn path.
+    #
+    # bd-svczq4: the word "ping" is not a ping to an agentic CLI. This probe
+    # runs with tools enabled and an Arbiter-worker `GEMINI.md` in its isolated
+    # HOME, and a measured run answered it with 21 model calls over 102s — well
+    # past the harness watchdog, which then reported a hang that had not
+    # happened. Without a `--print-timeout` agy runs on its own 5-minute
+    # print-mode default, so nothing makes agy yield before the harness gives
+    # up and no exit status is ever observed. Deriving one from the harness
+    # watchdog makes agy the first to yield and report a real status.
     case resolve_executable() do
-      {:ok, {_type, exec}} ->
+      {:ok, {:agy, exec}} ->
         {:ok,
-         ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", "ping"] ++
+         ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", @probe_prompt] ++
+           output_format_flag() ++ probe_print_timeout_flag(opts)}
+
+      {:ok, {:gemini, exec}} ->
+        # Upstream `gemini` has no `--print-timeout` (see `print_timeout_flag/1`);
+        # the harness watchdog stays its only bound.
+        {:ok,
+         ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", @probe_prompt] ++
            output_format_flag()}
 
       {:error, _} = err ->
         err
     end
+  end
+
+  # agy's own turn budget for a probe, kept strictly *inside* the harness
+  # watchdog (`Arbiter.Agents.Preflight.timeout_ms/2`, threaded in as
+  # `:timeout_ms`) so agy always yields first and the harness sees a real exit
+  # status instead of having to guess from silence. A bare adapter call that
+  # names no watchdog still gets a bound — never agy's 5-minute default.
+  defp probe_print_timeout_flag(opts) do
+    watchdog =
+      case Keyword.get(opts, :timeout_ms) do
+        ms when is_integer(ms) and ms > 0 -> ms
+        _ -> @probe_fallback_watchdog_ms
+      end
+
+    seconds = max(div(watchdog * @probe_timeout_fraction_pct, 100 * 1000), 1)
+    ["--print-timeout", "#{seconds}s"]
   end
 
   @doc """

@@ -91,6 +91,82 @@ posture**, not an accident to route around:
 See `Arbiter.Agents.CredentialWatchdog`'s moduledoc for the exact
 configuration resolution order and the adapter-list semantics.
 
+## The probe that survived is bounded (bd-svczq4)
+
+**2026-09-18.** What the Watchdog still runs used to be unbounded, and it had
+already refused a valid `--provider gemini` dispatch once, with a diagnosis
+that was factually wrong: *"agent produced no output within the watchdog
+window (possible hang)."* Nothing had hung. The probe authenticated, made 21
+model calls and answered in 102s — against a hard-coded 30s watchdog, and with
+the child left running for another 72s after Arbiter gave up on it. Two
+earlier probes the same day finished in 16s and 17s. The gate was a coin flip.
+
+The cause was that a one-word prompt is not a cheap round-trip to an agentic
+CLI: the gemini probe ran a full turn, tools enabled, `toolPermission:
+always-proceed`, rooted in whatever directory the BEAM was in (on this host,
+the live checkout Phoenix hot-reloads from), carrying an Arbiter-worker
+`GEMINI.md`. It read `ping` as a task.
+
+The probe is now bounded on five axes:
+
+| | before | now |
+|---|---|---|
+| agy's own turn budget | its 5-minute default | `--print-timeout` at 80% of the harness watchdog, so agy yields first and a real exit status is always observed |
+| structured output | plain text (bd-481sz7 fixed this) | `--output-format stream-json`, parseable and ledgerable |
+| working directory | the BEAM's cwd — the live checkout | `Arbiter.Agents.Preflight.probe_cwd/0`, an empty dir under the system temp dir |
+| a timed-out child | survived; `Port.close/1` does not reap it | whole process tree SIGKILLed (`Arbiter.Worker.OsProcess.kill_tree/1`) |
+| the watchdog itself | one hard-coded 30s module attribute | per adapter and configurable; gemini's built-in default is 120s, above its observed cold-start floor |
+
+```elixir
+config :arbiter, Arbiter.Agents.Preflight,
+  timeout_ms: 30_000,                              # install-wide default
+  timeout_ms_by_provider: %{"gemini" => 120_000},  # per adapter, wins over the above
+  on_timeout: :proceed                             # :proceed (default) | :refuse
+```
+
+**A probe timeout is advisory, not a credential verdict.** It is the one
+outcome that says nothing about the credentials, so `check/2` answers a
+timeout with `{:warn, reason}` — distinct from `{:error, reason}` — and the
+Watchdog logs it and leaves the adapter's state exactly as it was. A slow
+probe neither marks an adapter expired (which would refuse every dispatch
+fleet-wide) nor clears a mark a dying worker just set. `on_timeout: :refuse`
+turns it back into a recorded `{:error, _}`; note that even then its category
+is `:preflight_timeout`, not `:auth_expired`, so it is a logged non-auth probe
+failure rather than a fleet-wide refusal.
+
+That category also exists so the diagnosis stops lying. `:preflight_timeout`
+reports the elapsed time, the watchdog that fired and whether any output had
+arrived, and its remediation names the probe's own config instead of sending
+the operator to a worker transcript that does not exist. The `:stalled`
+category it used to borrow no longer claims "produced no output" when output
+did in fact arrive — that branch keyed on `exit_status == nil` alone.
+
+### The CLI's own result is the verdict
+
+Bounding the probe surfaced a second, sharper defect. Measured live on
+2026-09-18 with the bounded argv above: agy answered `ping` with a **14-step
+agentic turn** — 7 `run_command` calls, ~71K input tokens, 31.9s — because the
+Arbiter-worker `GEMINI.md` in its isolated `$HOME` tells it it is a worker with
+a task. One of those commands was `arb prime`. The backlog it printed contained
+a task titled *"Auth pre-flight P2: free expiry signals for codex and agy —
+generalise the 401-shaped detection"*, and Arbiter's line-scraping classifier
+read that text as proof its own credentials had expired. On a probe that
+authenticated fine and exited 0.
+
+From the `CredentialWatchdog` an `:auth_expired` verdict marks the adapter dead
+and refuses **every** dispatch for it, fleet-wide, until an operator resets it.
+So: a clean exit plus a successful structured result object is now conclusive,
+and the surrounding lines are not re-scanned. They are the agent's work product,
+not a diagnostic about our credentials. A CLI that reports its own failure
+(Claude's `is_error`, agy's non-SUCCESS `status`), or that prints an auth error
+and exits 0 with no result object, still falls through to the classifier.
+
+What is *not* fixed: the probe is still an agentic turn. The neutral cwd means
+it has no repo to wander into, and it no longer runs per dispatch, so what
+remains is cost and noise on the Watchdog's poll rather than a correctness
+problem. Making the probe non-agentic (a deny-all tool posture, or dropping the
+model round-trip entirely) is follow-up work.
+
 ## Out of scope here
 
 Two follow-ups were filed instead of folded in:
