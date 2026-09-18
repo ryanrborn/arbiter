@@ -62,6 +62,9 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
 
   @listener_id :session_dock_terminal_listener
 
+  # What the browser looks for in the replayed pane of the ended session.
+  @transcript_marker "REPLAYED-FROM-DISK"
+
   setup %{tmp_dir: tmp_dir} do
     Arbiter.Test.SessionEnv.sandbox("session-dock-terminal")
     put_env(:sessions_runtime_dir, tmp_dir)
@@ -79,11 +82,24 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
 
     a = launch!(tmp_dir, "alpha")
     b = launch!(tmp_dir, "beta")
+    c = ended_with_transcript!(tmp_dir, "gamma")
 
     case build_assets() do
-      :ok -> drive(node, tmp_dir, a, b)
+      :ok -> drive(node, tmp_dir, a, b, c)
       {:skipped, why} -> IO.puts("\n[skipped] #{why}")
     end
+  end
+
+  # A session that is already over, with a persisted raw transcript on disk
+  # (bd-3tf4oo): the case #1818 reported as an empty panel. Written through
+  # `Arbiter.Sessions.Transcript` itself rather than by hand, so the browser
+  # reads back exactly what the capture path writes — redaction included.
+  defp ended_with_transcript!(tmp_dir, name) do
+    {:ok, session} = Sessions.launch(cwd: tmp_dir, name: name, runner: NoopRunner)
+    :ok = Arbiter.Sessions.Transcript.append(session.id, "\r\n" <> @transcript_marker <> "\r\n")
+    {:ok, ended} = Sessions.kill(session.id)
+    on_exit(fn -> Stream.stop(session.id) end)
+    ended
   end
 
   # `put/2`, not `install/2`. `Sessions.launch/1` starts §11's transcript
@@ -100,7 +116,7 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
     session
   end
 
-  defp drive(node, tmp_dir, a, b) do
+  defp drive(node, tmp_dir, a, b, c) do
     port = start_listener!()
     sync = Path.join(tmp_dir, "sync")
     File.mkdir_p!(sync)
@@ -126,6 +142,10 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
           a.id,
           "--session-b",
           b.id,
+          "--session-c",
+          c.id,
+          "--transcript-marker",
+          @transcript_marker,
           "--sync",
           sync
         ] ++ screenshot_args(),
@@ -172,6 +192,13 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
               "an-idle-window-never-takes-the-pane-back",
               "interacting-reclaims-the-pane-at-this-windows-own-geometry",
               "ctrl-shift-escape-hands-the-keyboard-back-to-the-page",
+              # bd-3tf4oo / #1818: a session that ended before this browser
+              # session used to render an empty panel. These are the claims
+              # that it now replays its persisted transcript, and that the
+              # replay is never dressed up as a live pane.
+              "an-ended-sessions-window-replays-its-persisted-transcript",
+              "a-replayed-transcript-is-read-only-and-never-looks-live",
+              "a-replay-is-still-the-one-pane-in-the-dock",
               # The size presets (bd-covojz). Named for the same reason as the
               # rest: `maximized-keeps-the-roster-reachable` is a hit test now,
               # and a hit test that stops being emitted is exactly the kind of

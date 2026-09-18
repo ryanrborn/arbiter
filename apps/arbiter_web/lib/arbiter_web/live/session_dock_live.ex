@@ -77,11 +77,41 @@ defmodule ArbiterWeb.SessionDockLive do
   everything else in that payload, and a pane rebuilt frozen opens no socket at
   all — it is painted from the kept text and says the styling is gone.
 
-  This is the one thing the dock cannot serve alone. A session that ended in a
-  *previous* browser session has no scrollback here to show and none to fetch
-  until transcript persistence lands (bd-5pelo2, phase 9). Its window says so
-  and points at `/sessions`, rather than rendering an empty terminal that reads
-  like a live one with nothing on it: the two cases are named, never blurred.
+  ## Windows whose session ended before this browser session (bd-3tf4oo)
+
+  A frozen pane is scrollback this browser still holds. A session that ended in
+  a *previous* browser session has none — and used to get an empty panel for it
+  (#1818). It now gets the **persisted transcript**: phase 9's raw capture
+  (`Arbiter.Sessions.Transcript`) replayed into the same xterm, read-only.
+
+  The replay is not a second viewer. `assign_transcript/1` asks
+  `Arbiter.Sessions.TranscriptReplay` whether there is a file; if there is, the
+  window mounts the *same* `.SessionTerminal` hook with `data-transcript`, the
+  hook builds the *same* `SessionStream` with `mode: "transcript"`, and the
+  server replays the file's tail as the *same* `snapshot` event a live attach
+  sends (`ArbiterWeb.SessionChannel`). One channel, one renderer, one repaint
+  path; what differs is the join params and that the stream hangs up once the
+  bytes are on screen.
+
+  Three things keep it honest:
+
+    * It is never live. No status strip is rendered for it (that strip is the
+      live HUD), the pane is read-only from its first frame, the channel
+      refuses stdin/resize/redraw/kill with `read_only`, and the client does
+      not reconnect — an ended session has nothing to reconnect to.
+    * It says what it is showing. A transcript over
+      `TranscriptReplay.max_bytes/0` is replayed as a tail, and the window's
+      chrome says "showing last N of M" and links the whole file
+      (`ArbiterWeb.SessionTranscriptController`). Note the replayed bytes were
+      laid out by the pane at *its* geometry, not this window's, which is the
+      other reason the chrome says "transcript" rather than passing it off as a
+      live screen.
+    * When there is nothing to replay it says which nothing it is:
+      `retention_deleted`, `never_captured`, `empty`, or `loopback_only` — and
+      links the archived session JSONL when one exists. Never a blank terminal.
+
+  A frozen pane still wins over a replay while it exists: it holds the real
+  screen, styling and all, and the file holds the same bytes.
 
   Nothing about the transport changed. `ArbiterWeb.SessionSocket`'s topic was
   already keyed to the session id rather than to a LiveView process
