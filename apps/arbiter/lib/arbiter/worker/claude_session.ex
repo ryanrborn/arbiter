@@ -784,12 +784,14 @@ defmodule Arbiter.Worker.ClaudeSession do
   # only unique within its own run too.
   #
   # `is_error` is hardcoded `false`: only the DONE state (success) is matched
-  # here, so a tool step that ends in some other state (agy's wire carries at
-  # least `CANCELLED`) falls through to the catch-all clause below and writes
-  # no row at all — the failure/cancellation wire shape was never captured
-  # live, only its existence as an enum literal. `Gemini.Stream.format_event/1`
-  # surfaces those states as a schema-drift warning in the transcript so they
-  # aren't silently invisible, but no `worker_run_steps` row backs them yet.
+  # here. A tool step that ends `ERROR` (bd-25ivqe — the headless-denial
+  # state) is captured by the clause below with `is_error: true`; any OTHER
+  # state (agy's wire carries at least `CANCELLED`) still falls through to
+  # the catch-all clause further down and writes no row — that
+  # failure/cancellation wire shape was never captured live, only its
+  # existence as an enum literal. `Gemini.Stream.format_event/1` surfaces
+  # those states as a schema-drift warning in the transcript so they aren't
+  # silently invisible, but no `worker_run_steps` row backs them yet.
   defp capture_steps(%{provider: "gemini"} = session, %{
          "event" => "step_update",
          "step_update" => %{"step_type" => "tool", "state" => "DONE"} = step
@@ -815,6 +817,44 @@ defmodule Arbiter.Worker.ClaudeSession do
     })
 
     session
+  end
+
+  # bd-25ivqe: a `:strict` policy auto-denies any tool call `permissions.allow`
+  # doesn't name, and agy reports that as this same step landing in state
+  # `"ERROR"` instead of `"DONE"`. Write the row (`is_error: true`, so it's
+  # queryable/visible the same way any other failed step is) AND stash the
+  # denied command's base token onto the session under `:denied_command` —
+  # `sync_session_meta/2` (`Arbiter.Worker`) surfaces that into `meta`, which
+  # lets a subsequent notes-gate trip report "strict policy denied required
+  # command `<x>`" as its failure reason instead of the generic
+  # `:blank_notes_at_completion` (AC4). Last denial in the run wins if there
+  # were several — that's the one still blocking progress when the run ended.
+  defp capture_steps(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "tool", "state" => "ERROR"} = step
+       }) do
+    params = get_in(step, ["tool_info", "parameters"])
+    input = Arbiter.Agents.Gemini.Stream.agy_tool_params(step["tool_name"], params)
+    error = get_in(step, ["tool_info", "error"]) || get_in(step, ["tool_info", "output"])
+
+    write_step(session, %{
+      run_id: Map.get(session, :run_id),
+      task_id: Map.get(session, :task_id),
+      tool_use_id: to_string(step["step_index"]),
+      name: step["tool_name"],
+      is_error: true,
+      duration_ms: agy_duration_ms(step["duration_seconds"]),
+      input_digest: StepSummary.input_digest(input, redact_values(session)),
+      input_summary: StepSummary.input_summary(input, redact_values(session)),
+      output_summary: StepSummary.output_summary(error, redact_values(session)),
+      occurred_at: DateTime.utc_now()
+    })
+
+    Map.put(
+      session,
+      :denied_command,
+      Arbiter.Agents.Gemini.Stream.agy_denied_command_token(step["tool_name"], params)
+    )
   end
 
   defp capture_steps(%{provider: "gemini"} = session, _event), do: session

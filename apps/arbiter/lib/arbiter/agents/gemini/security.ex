@@ -59,6 +59,38 @@ defmodule Arbiter.Agents.Gemini.Security do
       side these are *permission-layer* guards inside the agent, not OS
       isolation.
 
+  ## Worker-protocol bootstrap allowlist (bd-25ivqe)
+
+  `:strict` is allowlist-only (see the table above), but the Arbiter worker
+  protocol itself is not optional: every worker and review-agent spawn reads
+  its mailbox and prints its status via `arb` (`arb inbox`, `arb show`, `arb
+  done`), and `Worker.PromptBuilder` routes both worker and reviewer prompts
+  through read-only git (`git status`, `git diff`, `git log`) to orient
+  themselves before doing anything else. Before this fix a `:strict` agy
+  policy generated `permissions.allow: []` unless the operator happened to
+  add rules of their own — so the worker's very first `run_command(arb
+  inbox ...)` was auto-denied, and the run died at bootstrap with no shell
+  at all (see bd-25ivqe's incident: probe run `6bf67d6b`).
+
+  `allow_rules/1` therefore always unions a fixed worker-protocol baseline —
+  `command(arb)`, `command(git status)`, `command(git diff)`, `command(git
+  log)` — onto the operator's own `allow` rules, for *every* domain (worker
+  and review-agent alike; this seam has no domain distinction to key off of,
+  and a reviewer needs the same mailbox/orientation commands a worker does).
+  This is deliberately narrower than "let agy run anything": it is exactly
+  the read-only/status surface the worker protocol depends on, not a general
+  shell escape hatch. It is emitted in every mode (not just `:strict`) since
+  in `:auto`/`:bypass` the allow list is inert anyway (`toolPermission:
+  "always-proceed"` lets everything through unless explicitly denied) — so
+  baking it in unconditionally is simpler than mode-branching for no
+  behavioural difference.
+
+  This baseline does **not** weaken the deny list: agy's `permissions.deny`
+  is a hard block "in every mode" (see the Honesty section above), so an
+  operator who explicitly denies e.g. `command(arb)` still wins over this
+  baseline allow — deny is checked independently of, and takes priority
+  over, what `allow` names.
+
   ## Rule grammar
 
   agy's permission rules are `command(<prefix>)`, `read_file(<glob>)`,
@@ -145,15 +177,29 @@ defmodule Arbiter.Agents.Gemini.Security do
     |> Enum.uniq()
   end
 
-  @doc """
-  The operator's `allow` rules translated into agy's grammar.
+  # The Arbiter worker protocol's own required commands — see the moduledoc
+  # section "Worker-protocol bootstrap allowlist". Always present regardless
+  # of domain (worker vs. review-agent) or mode.
+  @worker_bootstrap_allow [
+    "command(arb)",
+    "command(git status)",
+    "command(git diff)",
+    "command(git log)"
+  ]
 
-  Load-bearing under `:strict`, where headless agy auto-denies everything these
-  rules do not name.
+  @doc """
+  The full agy `allow` list for a policy: the worker-protocol bootstrap
+  baseline (`arb`, plus the read-only git the worker/review prompts require)
+  unioned with the operator's own `allow` rules translated into agy's
+  grammar.
+
+  Load-bearing under `:strict`, where headless agy auto-denies everything
+  these rules do not name — without the baseline a `:strict` agy worker
+  cannot even read its own mailbox (bd-25ivqe).
   """
   @spec allow_rules(SecurityPolicy.t()) :: [String.t()]
   def allow_rules(%SecurityPolicy{permissions: perms}),
-    do: perms.allow |> translate_all() |> Enum.uniq()
+    do: (@worker_bootstrap_allow ++ translate_all(perms.allow)) |> Enum.uniq()
 
   # ---- internals ---------------------------------------------------------
 

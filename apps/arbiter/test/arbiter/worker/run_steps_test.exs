@@ -242,6 +242,69 @@ defmodule Arbiter.Worker.RunStepsTest do
     assert steps_for(task_id) == []
   end
 
+  defp agy_tool_error_event(step_index, opts \\ []) do
+    %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => step_index,
+        "state" => "ERROR",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "duration_seconds" => Keyword.get(opts, :duration_seconds, 0.01),
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{
+            "CommandLine" => Keyword.get(opts, :command, "arb inbox bd-ci0y74")
+          },
+          "error" =>
+            Keyword.get(opts, :error, "permission check failed for unsandboxed \"arb inbox\"")
+        }
+      }
+    }
+  end
+
+  test "an agy tool step's ERROR event writes exactly one row with is_error true (bd-25ivqe)" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    run_id = Ash.UUID.generate()
+
+    _session =
+      new_session(task_id, run_id: run_id, provider: "gemini")
+      |> feed([agy_tool_error_event(3)])
+
+    assert [step] = steps_for(task_id)
+    assert step.run_id == run_id
+    assert step.tool_use_id == "3"
+    assert step.name == "run_command"
+    assert step.is_error == true
+    assert step.input_summary == "arb inbox bd-ci0y74"
+    assert step.output_summary =~ "permission check failed"
+    assert step.source == "live"
+  end
+
+  test "an agy ERROR tool step stashes the denied command's base token on the session" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+    session =
+      new_session(task_id, provider: "gemini")
+      |> feed([agy_tool_error_event(3, command: "arb inbox bd-ci0y74")])
+
+    assert session.denied_command == "arb"
+  end
+
+  test "secret-marked env values are redacted out of ERROR tool input/output summaries" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    secret = "super-secret-token-value"
+
+    _session =
+      new_session(task_id, provider: "gemini", redact_values: [secret])
+      |> feed([agy_tool_error_event(3, command: "echo #{secret}", error: secret)])
+
+    assert [step] = steps_for(task_id)
+    refute step.input_summary =~ secret
+    refute step.output_summary =~ secret
+    assert step.output_summary =~ "[REDACTED]"
+  end
+
   test "secret-marked env values are redacted out of agy tool input/output summaries" do
     task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
     secret = "super-secret-token-value"

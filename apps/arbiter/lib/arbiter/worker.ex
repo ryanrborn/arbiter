@@ -2227,6 +2227,13 @@ defmodule Arbiter.Worker do
           |> maybe_put(:result_subtype, Map.get(usage, :result_subtype))
           |> maybe_put(:result_is_error, Map.get(usage, :result_is_error))
           |> maybe_put(:result_message, Map.get(usage, :result_message))
+          # bd-25ivqe: the base command token of the most recent agy ERROR
+          # (headless-denial) tool step, stashed by
+          # `ClaudeSession.capture_steps/2` — read by `notes_gate_failure_reason/1`
+          # so a run that died because `:strict` denied a required command (e.g.
+          # `arb`) reports that concretely instead of the generic
+          # `:blank_notes_at_completion`.
+          |> maybe_put(:denied_command, Map.get(session, :denied_command))
 
         new_state = %State{state | meta: meta}
 
@@ -4121,7 +4128,27 @@ defmodule Arbiter.Worker do
     escalate_notes_gate(state, summary)
 
     meta = Map.put(state.meta || %{}, :notes_gate_detail, why)
-    fail_now(%State{state | meta: meta}, :blank_notes_at_completion)
+    fail_now(%State{state | meta: meta}, notes_gate_failure_reason(meta))
+  end
+
+  # bd-25ivqe AC4: blank notes at `arb done` is usually a genuine missing
+  # deliverable, but under `:strict` it can also mean the worker never got to
+  # write anything — every `run_command` it tried (starting with reading its
+  # own mailbox) was auto-denied because the policy's `permissions.allow`
+  # didn't name it. `:denied_command` (synced from the session by
+  # `sync_session_meta/2`, stamped by `ClaudeSession.capture_steps/2` off an
+  # agy ERROR tool step) distinguishes the two: when present, the run failed
+  # because a required command was denied, not because the agent simply
+  # forgot to write findings — report that concretely rather than folding it
+  # into the generic `:blank_notes_at_completion` catch-all.
+  defp notes_gate_failure_reason(meta) do
+    case Map.get(meta || %{}, :denied_command) do
+      cmd when is_binary(cmd) and cmd != "" ->
+        "strict policy denied required command `#{cmd}`"
+
+      _ ->
+        :blank_notes_at_completion
+    end
   end
 
   defp notes_gate_summary(%State{task_id: task_id, meta: meta}, why) do
@@ -4141,12 +4168,24 @@ defmodule Arbiter.Worker do
           "Detail: #{inspect(other)}."
       end
 
+    denial_blurb =
+      case Map.get(meta || %{}, :denied_command) do
+        cmd when is_binary(cmd) and cmd != "" ->
+          "\n\nbd-25ivqe: this looks like a strict-policy bootstrap failure, not a " <>
+            "missing deliverable — the worker's `#{cmd}` call was auto-denied under " <>
+            ":strict permissions before it could do any work. Check the workspace's " <>
+            "`permissions.allow` for a `command(#{cmd})` rule."
+
+        _ ->
+          ""
+      end
+
     """
     bd-5lc99r notes gate tripped for task #{task_id}: this is a `task`-type
     directive whose deliverable is a findings summary in `notes`, but `notes`
     is blank and `arb done` was signalled.
 
-    #{detail_blurb}
+    #{detail_blurb}#{denial_blurb}
 
     The directive cannot close without its findings. Re-dispatch it and ensure
     the worker writes its results to `notes` via the `task_update_progress` MCP
