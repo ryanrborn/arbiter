@@ -74,7 +74,24 @@ defmodule Arbiter.MCP.Tools.Task do
       # bd-18vl9q: the epic cost rollup (design bd-9jj5lf §4). `nil` for a
       # non-epic issue — the field always rides along so callers don't have to
       # branch on `issue_type` to know whether to look for it.
-      {:ok, Map.put(result, :epic_rollup, Estimate.epic_cost_rollup(loaded))}
+      result = Map.put(result, :epic_rollup, Estimate.epic_cost_rollup(loaded))
+
+      # bd-1defgu: the domain-layer edge read existed (`Dependencies.list/1`)
+      # but wasn't reachable from here — full view only, same bandwidth
+      # tradeoff as every other field this branch adds.
+      result =
+        if full,
+          do: Map.put(result, :dependencies, dependency_rows(id)),
+          else: result
+
+      {:ok, result}
+    end
+  end
+
+  defp dependency_rows(issue_id) do
+    case Dependencies.list(issue_id: issue_id) do
+      {:ok, rows} -> Enum.map(rows, &Tools.serialize_dependency_edge/1)
+      {:error, _} -> []
     end
   end
 
@@ -545,6 +562,60 @@ defmodule Arbiter.MCP.Tools.Task do
         {:error, reason} -> Tools.dependency_error(reason)
       end
     end
+  end
+
+  # ---- dep_list -----------------------------------------------------------
+
+  @doc """
+  List dependency edges in the scope's workspace. Coordinator or worker
+  (bd-1defgu) — a worker with no `workspace` arg sees its own workspace's
+  edges, exactly like `dep_add` / `dep_remove` already scope a worker's
+  writes; naming a *different* workspace is `:unauthorized`, the same rule
+  `Tools.authorized_workspace/2` already enforces everywhere else.
+
+  With no `issue_id`, lists every edge in the resolved workspace. With
+  `issue_id`, lists that issue's edges in both directions instead (the issue
+  must resolve inside the same workspace-authorization the scope already
+  has — a cross-workspace `issue_id` is not-found, not leaked).
+
+  Routed through `Arbiter.Tasks.Dependencies.list/1` (bd-1defgu): a symmetric
+  edge (`conflicts_with`) is never doubled — it appears once, from wherever
+  you look at it.
+  """
+  @spec dep_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def dep_list(%Scope{} = scope, args) do
+    with {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()) do
+      case Tools.fetch_string(args, "issue_id") do
+        nil -> dep_list_workspace(scope, args, type)
+        issue_id -> dep_list_issue(scope, args, issue_id, type)
+      end
+    end
+  end
+
+  defp dep_list_workspace(scope, args, type) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         {:ok, rows} <- list_edges(workspace_id: ws_id, type: type) do
+      {:ok, serialize_dep_list(rows)}
+    end
+  end
+
+  defp dep_list_issue(scope, args, issue_id, type) do
+    with {:ok, _issue} <- Tools.fetch_task(scope, args, issue_id),
+         {:ok, rows} <- list_edges(issue_id: issue_id, type: type) do
+      {:ok, serialize_dep_list(rows)}
+    end
+  end
+
+  defp list_edges(opts) do
+    case Dependencies.list(opts) do
+      {:ok, rows} -> {:ok, rows}
+      {:error, reason} -> Tools.dependency_error(reason)
+    end
+  end
+
+  defp serialize_dep_list(rows) do
+    deps = Enum.map(rows, &Tools.serialize_dependency_edge/1)
+    %{dependencies: deps, count: length(deps)}
   end
 
   # Load the child-progress rollup calcs for a task so the serializer can emit

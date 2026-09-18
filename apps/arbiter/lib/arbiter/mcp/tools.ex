@@ -2089,6 +2089,23 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
+  @doc """
+  Render one `Arbiter.Tasks.Dependencies.list/1` row — `%{edge:, from:, to:}`
+  — as the MCP `dep_list` / CLI-mirroring shape: the edge fields plus each
+  endpoint's id/title/status/priority, so a live edge is distinguishable
+  from a closed↔closed one without a second lookup (bd-1defgu).
+  """
+  def serialize_dependency_edge(%{edge: %Dependency{} = dep, from: from, to: to}) do
+    dep
+    |> serialize_dependency()
+    |> Map.put(:from, serialize_dependency_endpoint(from))
+    |> Map.put(:to, serialize_dependency_endpoint(to))
+  end
+
+  defp serialize_dependency_endpoint(%Issue{} = i) do
+    %{id: i.id, title: i.title, status: to_str(i.status), priority: i.priority}
+  end
+
   def serialize_workspace(%Workspace{} = ws) do
     %{
       id: ws.id,
@@ -2200,6 +2217,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate dep_list(scope, args), to: Arbiter.MCP.Tools.Task
 
   defdelegate workspace_show(scope, args), to: Arbiter.MCP.Tools.Workspace
   defdelegate workspace_config_get(scope, args), to: Arbiter.MCP.Tools.Workspace

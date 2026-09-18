@@ -205,6 +205,27 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Map.has_key?(data, :created_at)
       assert Map.has_key?(data, :updated_at)
     end
+
+    # bd-1defgu: the domain-layer read (`Dependencies.list/1`) existed but
+    # wasn't reachable from `task_show` — a worker/coordinator had to open the
+    # DB to see an edge it could already create/delete via dep_add/dep_remove.
+    test "full: true includes the task's dependency edges", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "conflicts with me", workspace_id: ctx.ws.id})
+      {:ok, dep} = Arbiter.Tasks.Dependencies.add(ctx.task.id, other.id, :conflicts_with)
+
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+
+      assert [row] = data.dependencies
+      assert row.id == dep.id
+      assert row.type == "conflicts_with"
+      assert row.to.id == other.id
+    end
+
+    test "slim payload omits dependency edges", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
+      refute Map.has_key?(data, :dependencies)
+    end
   end
 
   describe "inbox_check/2" do
@@ -1371,6 +1392,68 @@ defmodule Arbiter.MCP.ToolsTest do
                  "to_issue_id" => ctx.task.id,
                  "type" => "relates_to"
                })
+    end
+  end
+
+  describe "dep_list/2" do
+    setup ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
+
+      {:ok, dep} =
+        Arbiter.Tasks.Dependencies.add(ctx.task.id, other.id, :conflicts_with)
+
+      {:ok, other: other, dep: dep}
+    end
+
+    test "a coordinator lists a workspace's edges (naming the workspace)", ctx do
+      assert {:ok, %{dependencies: [row], count: 1}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id})
+
+      assert row.id == ctx.dep.id
+      assert row.type == "conflicts_with"
+      assert row.from.id == ctx.task.id
+      assert row.to.id == ctx.other.id
+      assert row.to.status
+      assert row.to.priority == ctx.other.priority
+    end
+
+    test "a coordinator lists edges scoped to one issue", ctx do
+      assert {:ok, %{dependencies: [row], count: 1}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.task.id})
+
+      assert row.id == ctx.dep.id
+    end
+
+    test "filters by type", ctx do
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(ctx.task.id, ctx.other.id, :relates_to)
+
+      assert {:ok, %{dependencies: rows}} =
+               Tools.dep_list(ctx.coordinator, %{
+                 "workspace" => ctx.ws.id,
+                 "type" => "relates_to"
+               })
+
+      assert [%{type: "relates_to"}] = rows
+    end
+
+    test "a worker lists its own workspace's edges with no `workspace` arg", ctx do
+      assert {:ok, %{dependencies: [row]}} = Tools.dep_list(ctx.worker, %{})
+      assert row.id == ctx.dep.id
+    end
+
+    test "a worker naming a different workspace is unauthorized", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dep-list-other", prefix: "dlo"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.dep_list(ctx.worker, %{"workspace" => other_ws.id})
+    end
+
+    test "a symmetric edge appears exactly once whether queried from a or b", ctx do
+      assert {:ok, %{dependencies: [_]}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.task.id})
+
+      assert {:ok, %{dependencies: [_]}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.other.id})
     end
   end
 

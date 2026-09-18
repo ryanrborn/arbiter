@@ -470,6 +470,33 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
 
+    # bd-1defgu: `arb issue show` was write-only for dependency edges — you
+    # could `arb dep add` one onto this task and never see it again short of
+    # opening the DB.
+    test "includes the issue's dependency edges", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show me", workspace_id: ws.id})
+      {:ok, other} = Ash.create(Issue, %{title: "the other one", workspace_id: ws.id})
+
+      {:ok, dep} =
+        Arbiter.Tasks.Dependencies.add(issue.id, other.id, :conflicts_with)
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert [row] = body["dependencies"]
+      assert row["id"] == dep.id
+      assert row["type"] == "conflicts_with"
+      assert row["to"]["id"] == other.id
+      assert row["to"]["title"] == "the other one"
+    end
+
+    test "dependencies is an empty list when the issue has no edges", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "lonely", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert body["dependencies"] == []
+    end
+
     # bd-3j4ch4 AC5: `arb issue show` renders the cost estimate, and this is
     # where it gets the numbers from.
     test "carries the cost estimate when the ledger has enough history", %{conn: conn, ws: ws} do
