@@ -1813,7 +1813,7 @@ defmodule ArbiterWeb.SessionDockLive do
             :if={@transcript && @transcript.archived?}
             id={"session-dock-jsonl-#{@session.id}"}
             href={~p"/sessions/#{@session.id}/jsonl"}
-            download={"#{@session.id}.jsonl.gz"}
+            download={"#{@session.id}.jsonl"}
             class="text-[var(--text-link)] no-underline hover:underline"
           >
             Download the archived session JSONL

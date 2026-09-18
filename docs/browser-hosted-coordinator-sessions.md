@@ -1054,6 +1054,11 @@ took it — the session ended longer ago than the retention window),
 exists, and never renders a blank terminal. A transcript over the replay cap is
 shown as a tail, with "showing last N of M" and a download link to the whole
 file (`ArbiterWeb.SessionTranscriptController`, loopback-only like the socket).
+That controller serves both of a finished session's artefacts:
+`/sessions/:id/transcript` is the raw PTY capture this section is about, and
+`/sessions/:id/jsonl` is the phase 9 session archive, decompressed — the same
+route the issue detail page's refine "Transcript" link uses (bd-cvfjms). Both
+derive the served path from a looked-up session row, never from the URL.
 
 Nothing about it is presented as live: no status strip, no reconnect (the
 client hangs up once the bytes are painted), and stdin, resize, redraw and kill

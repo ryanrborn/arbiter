@@ -178,7 +178,7 @@ defmodule ArbiterWeb.SessionDockTranscriptTest do
 
       assert has_element?(
                dock,
-               ~s(#session-dock-jsonl-#{session.id}[href="/sessions/#{session.id}/jsonl"])
+               ~s(#session-dock-jsonl-#{session.id}[href="/sessions/#{session.id}/jsonl"][download="#{session.id}.jsonl"])
              )
     end
 
