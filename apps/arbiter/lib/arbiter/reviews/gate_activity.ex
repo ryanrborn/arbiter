@@ -193,15 +193,13 @@ defmodule Arbiter.Reviews.GateActivity do
 
   defp number_of_ref(_ref), do: nil
 
+  # `rescue` always binds a normalised exception, so `Exception.message/1` is
+  # always available. Collapsed to one line and clipped: an Ash read error's
+  # message carries the whole Ecto query, which would bury the log.
   defp error_summary(error) do
-    summary =
-      if is_exception(error) do
-        "#{inspect(error.__struct__)}: #{Exception.message(error)}"
-      else
-        inspect(error)
-      end
-
-    summary |> String.replace(~r/\s+/, " ") |> String.slice(0, 240)
+    "#{inspect(error.__struct__)}: #{Exception.message(error)}"
+    |> String.replace(~r/\s+/, " ")
+    |> String.slice(0, 240)
   end
 
   defp normalize_number(n) when is_integer(n), do: {:ok, Integer.to_string(n)}
