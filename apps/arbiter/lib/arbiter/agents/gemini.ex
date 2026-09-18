@@ -77,9 +77,16 @@ defmodule Arbiter.Agents.Gemini do
     # Cheap token-validity probe for whichever CLI is on PATH. A bad/expired key
     # makes Gemini print "API key not valid" / "RESOURCE_EXHAUSTED" (or 401) and
     # exit non-zero — classified by Arbiter.Worker.StopReason.
+    #
+    # bd-481sz7 AC3: without `--output-format stream-json` the probe's stdout
+    # is plain text `Arbiter.Agents.Gemini.Stream` can't parse for usage, so
+    # every preflight row landed with zero tokens even on a healthy probe —
+    # the same root cause bd-2fzwlc found on the main spawn path.
     case resolve_executable() do
       {:ok, {_type, exec}} ->
-        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", "ping"]}
+        {:ok,
+         ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", "ping"] ++
+           output_format_flag()}
 
       {:error, _} = err ->
         err

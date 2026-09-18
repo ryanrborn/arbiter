@@ -28,5 +28,23 @@ defmodule Arbiter.Agents.ModelDisplayTest do
       assert ModelDisplay.short("some-other-model") == "some-other-model"
       assert ModelDisplay.short(nil) == nil
     end
+
+    # bd-481sz7 AC4: the agy tier map (bd-d2yut8) resolves to Gemini 3.x ids
+    # with an effort suffix (`-low`/`-medium`/`-high`) — a prefix-only rule
+    # can't cover every version number agy might catalogue next, so this must
+    # match on the family word (flash/pro), not the literal "2.5" ids above.
+    test "maps agy's Gemini 3.x catalogue by family, any version/effort suffix" do
+      assert ModelDisplay.short("gemini-3.8-flash-low") == "Flash"
+      assert ModelDisplay.short("gemini-3.8-flash-medium") == "Flash"
+      assert ModelDisplay.short("gemini-3.1-pro-high") == "Pro"
+    end
+
+    test "maps agy's Claude catalogue the same as native Claude ids" do
+      assert ModelDisplay.short("claude-opus-4-6-thinking") == "Opus"
+    end
+
+    test "maps agy's GPT-OSS catalogue" do
+      assert ModelDisplay.short("gpt-oss-120b") == "GPT-OSS"
+    end
   end
 end

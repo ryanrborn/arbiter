@@ -48,6 +48,21 @@ defmodule Arbiter.UsageTest do
       assert ev.step == :work
     end
 
+    test "persists agy's thinking_tokens alongside the rest of the token accounting (bd-481sz7)" do
+      ev =
+        create_event!(%{
+          model: "gemini-3.8-flash-low",
+          provider: "gemini",
+          tokens_in: 17_529,
+          tokens_out: 118,
+          thinking_tokens: 110,
+          cost_usd: nil,
+          cost_note: "agy/Antigravity reports no cost"
+        })
+
+      assert ev.thinking_tokens == 110
+    end
+
     test "persists cost_note explaining a null cost_usd (bd-2fzwlc)" do
       ev =
         create_event!(%{
@@ -428,6 +443,47 @@ defmodule Arbiter.UsageTest do
 
       assert {:ok, rollups} = Usage.summarize(by: :campaign, workspace_id: "ws-usage")
       assert Enum.any?(rollups, &(&1.group == epic.id))
+    end
+
+    # bd-481sz7: agy/Antigravity never reports cost_usd (nil, permanently —
+    # a subscription metered by quota %, not a priced API). A rollup whose
+    # rows are ALL cost-unknown must say so (`cost_known: false`) rather than
+    # silently summing nil to 0.0 and reading like a real $0 session.
+    test "a rollup with no priced rows reports cost_known: false" do
+      create_event!(%{
+        task_id: "bd-agy-nil-cost",
+        model: "gemini-3.8-flash-low",
+        provider: "gemini",
+        cost_usd: nil,
+        cost_note: "agy/Antigravity reports no cost",
+        tokens_in: 4000,
+        tokens_out: 250,
+        thinking_tokens: 60,
+        occurred_at: DateTime.utc_now()
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :model, workspace_id: "ws-usage")
+
+      rollup = Enum.find(rollups, &(&1.group == "gemini-3.8-flash-low"))
+      assert rollup.cost_known == false
+      assert rollup.total_cost_usd == 0.0
+      assert rollup.tokens_in == 4000
+      assert rollup.thinking_tokens == 60
+    end
+
+    test "a rollup with at least one priced row reports cost_known: true" do
+      create_event!(%{
+        task_id: "bd-mixed-cost",
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 1.0,
+        occurred_at: DateTime.utc_now()
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :model, workspace_id: "ws-usage")
+
+      rollup = Enum.find(rollups, &(&1.group == "claude-opus-4-7"))
+      assert rollup.cost_known == true
     end
   end
 

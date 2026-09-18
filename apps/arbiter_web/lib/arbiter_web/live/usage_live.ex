@@ -66,7 +66,7 @@ defmodule ArbiterWeb.UsageLive do
     work_sessions = load_work_sessions(since)
     titles = load_titles(task_rollup)
 
-    grand_cost = sum_cost(task_rollup)
+    grand_cost = if sum_cost_known?(task_rollup), do: sum_cost(task_rollup), else: nil
     grand_tokens = sum_tokens(task_rollup)
     total_sessions = sum_rows(task_rollup)
     base_ids = base_ids(task_rollup)
@@ -193,6 +193,7 @@ defmodule ArbiterWeb.UsageLive do
     |> Enum.group_by(&base_task_id(&1.group))
     |> Enum.map(fn {base_id, rows} ->
       ws = Map.get(work_sessions, base_id, %{sessions: 0, extra_cost: 0.0})
+      cost_known = Enum.any?(rows, & &1.cost_known)
 
       %{
         task_id: base_id,
@@ -201,10 +202,16 @@ defmodule ArbiterWeb.UsageLive do
         extra_cost: ws.extra_cost,
         tokens:
           Enum.reduce(rows, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end),
-        cost_usd: Enum.reduce(rows, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+        # nil (never a folded 0.0) when every underlying event's cost is
+        # unknown (e.g. an all-agy task) — `format_usd/1` renders that as
+        # "—", not the misleading "$0.00" a priced task would show.
+        cost_usd:
+          if cost_known do
+            Enum.reduce(rows, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+          end
       }
     end)
-    |> Enum.sort_by(&(-&1.cost_usd))
+    |> Enum.sort_by(&(-(&1.cost_usd || 0.0)))
     |> Enum.take(20)
   end
 
@@ -238,12 +245,20 @@ defmodule ArbiterWeb.UsageLive do
     rollup
     |> Enum.with_index()
     |> Enum.map(fn {row, index} ->
-      pct = if total_cost > 0, do: round(row.total_cost_usd / total_cost * 100), else: 0
+      pct =
+        if row.cost_known and is_number(total_cost) and total_cost > 0 do
+          round(row.total_cost_usd / total_cost * 100)
+        else
+          0
+        end
+
       label = label_fn.(to_string(row.group))
 
       %{
         label: label,
-        value: format_usd(row.total_cost_usd),
+        # `format_usd(nil)` renders "—" — never fold an unpriced (agy) row's
+        # nil cost into $0.00, which would misreport a subscription run as free.
+        value: format_usd(if row.cost_known, do: row.total_cost_usd),
         pct: pct,
         hue: hue_fn.(label, index)
       }
@@ -261,6 +276,11 @@ defmodule ArbiterWeb.UsageLive do
 
   defp sum_cost(rollup),
     do: Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+
+  # No rows at all means zero spend, definitively — not "unpriced provider"
+  # (the reason a non-empty rollup can be cost-unknown).
+  defp sum_cost_known?([]), do: true
+  defp sum_cost_known?(rollup), do: Enum.any?(rollup, & &1.cost_known)
 
   defp sum_tokens(rollup),
     do: Enum.reduce(rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end)

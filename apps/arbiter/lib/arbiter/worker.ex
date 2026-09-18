@@ -1456,6 +1456,7 @@ defmodule Arbiter.Worker do
       provider: provider,
       tokens_in: Map.get(usage, :tokens_in),
       tokens_out: Map.get(usage, :tokens_out),
+      thinking_tokens: Map.get(usage, :thinking_tokens),
       cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
       cache_read_tokens: Map.get(usage, :cache_read_tokens),
       cost_usd: Map.get(usage, :cost_usd),
