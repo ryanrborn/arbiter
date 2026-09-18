@@ -112,6 +112,58 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert [_single] = events_for(task_id)
   end
 
+  # bd-481sz7: an agy session's ledger row must carry full token accounting
+  # (including thinking_tokens), the model threaded onto the session at
+  # spawn time (T1 — agy's own stream never names a model), and cost_usd
+  # nil with a subscription-not-priced cost_note, never a "model unknown"
+  # explanation now that the model is in fact known.
+  test "an agy session's ledger row carries thinking_tokens, the pre-resolved model, and no cost" do
+    task_id = "bd-ledgeragy-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    result_event =
+      Jason.encode!(%{
+        "event" => "result",
+        "result" => %{
+          "status" => "SUCCESS",
+          "duration_seconds" => 1.1,
+          "usage" => %{
+            "input_tokens" => 17529,
+            "output_tokens" => 118,
+            "thinking_tokens" => 110,
+            "cache_read_tokens" => 0,
+            "total_tokens" => 17647
+          }
+        }
+      })
+
+    events_path = Path.join(cwd, "agy-events-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(events_path, result_event <> "\n")
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", events_path],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    :ok = GenServer.stop(pid, :normal)
+
+    assert [event] = events_for(task_id)
+    assert event.model == "gemini-3.8-flash-low"
+    assert event.tokens_in == 17529
+    assert event.tokens_out == 118
+    assert event.thinking_tokens == 110
+    assert event.cost_usd == nil
+    assert event.cost_note =~ "no cost"
+  end
+
   defp wait_until(fun, timeout_ms \\ 2000, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)

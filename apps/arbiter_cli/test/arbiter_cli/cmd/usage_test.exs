@@ -177,6 +177,36 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert code == 0
       assert out =~ "(no usage rows for --by day)"
     end
+
+    # bd-481sz7: agy/Antigravity never reports cost (subscription, metered by
+    # quota %, not dollars) — a group whose rows are entirely agy must render
+    # the cost column as "n/a", never "$0.0000", which would read as "this
+    # session was free" rather than "cost is unknowable for this provider".
+    test "a group with no known cost renders the cost column as n/a, not $0.0000" do
+      stub_get("/api/usage", %{
+        "by" => "model",
+        "data" => [
+          %{
+            "group" => "gemini-3.8-flash-low",
+            "rows" => 2,
+            "total_cost_usd" => nil,
+            "tokens_in" => 4000,
+            "tokens_out" => 250,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 5_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "model"]) end)
+
+      assert code == 0
+      row_line = out |> String.split("\n") |> Enum.find(&(&1 =~ "gemini-3.8-flash-low"))
+      assert row_line =~ "n/a"
+      refute row_line =~ "0.0000"
+    end
   end
 
   describe "arb usage --by session" do

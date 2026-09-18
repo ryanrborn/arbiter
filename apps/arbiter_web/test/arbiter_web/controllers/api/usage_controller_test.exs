@@ -125,6 +125,32 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert_in_delta row["total_cost_usd"], 3.0, 0.001
     end
 
+    # bd-481sz7: agy/Antigravity rows always carry cost_usd: nil (subscription,
+    # metered by quota %, not a priced API). A group made up entirely of such
+    # rows must render total_cost_usd as null/n/a, never as a real $0.00 —
+    # `arb usage` reads null and prints "n/a"; a $0.00 would misreport a
+    # subscription as free.
+    test "a model group with no priced rows reports total_cost_usd: null", %{conn: conn} do
+      _ =
+        insert_event!(%{
+          model: "gemini-3.8-flash-low",
+          provider: "gemini",
+          cost_usd: nil,
+          cost_note: "agy/Antigravity reports no cost",
+          tokens_in: 4000,
+          tokens_out: 250,
+          thinking_tokens: 60
+        })
+
+      conn = get(conn, ~p"/api/usage", %{by: "model", workspace_id: @ws})
+      data = Map.new(json_response(conn, 200)["data"], &{&1["group"], &1})
+
+      row = data["gemini-3.8-flash-low"]
+      assert row["total_cost_usd"] == nil
+      assert row["tokens_in"] == 4000
+      assert row["thinking_tokens"] == 60
+    end
+
     test "missing by returns 400", %{conn: conn} do
       conn = get(conn, ~p"/api/usage", %{})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)

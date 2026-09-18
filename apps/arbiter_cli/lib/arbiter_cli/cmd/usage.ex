@@ -356,7 +356,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
     Enum.each(rows, fn ev ->
       IO.puts(
-        "  #{ev["occurred_at"]}  source=#{ev["source"] || "task"}  task=#{ev["task_id"] || "-"}  session=#{ev["session_id"] || "-"}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
+        "  #{ev["occurred_at"]}  source=#{ev["source"] || "task"}  task=#{ev["task_id"] || "-"}  session=#{ev["session_id"] || "-"}  step=#{ev["step"]}  model=#{ev["model"]}  cost=#{cost_label(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
       )
     end)
   end
@@ -408,11 +408,17 @@ defmodule ArbiterCli.Cmd.Usage do
 
   defp shift_back_hours(_), do: nil
 
-  defp format_cost(nil), do: "0.0000"
+  # nil means "no priced cost known" (e.g. agy/Antigravity, a subscription
+  # with no per-call dollar figure) — never render that as "$0.0000", which
+  # reads as "this session was free" rather than "cost is unknowable here".
+  defp format_cost(nil), do: "n/a"
 
   defp format_cost(n) when is_number(n) do
     :erlang.float_to_binary(n / 1, decimals: 4)
   end
+
+  defp cost_label(nil), do: "n/a"
+  defp cost_label(n) when is_number(n), do: "$" <> format_cost(n)
 
   defp format_int(nil), do: "0"
   defp format_int(n) when is_integer(n), do: Integer.to_string(n)

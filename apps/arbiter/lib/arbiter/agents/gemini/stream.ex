@@ -64,13 +64,17 @@ defmodule Arbiter.Agents.Gemini.Stream do
 
   `agy`'s terminal `result.usage` has no per-model breakdown, and — confirmed
   live (bd-2fzwlc round 2) — no `result` or `init` event names which model
-  actually ran; agy's own catalogue doesn't overlap the Gemini price table at
-  all (Gemini 3.x tiers, Claude models, GPT-OSS, no 2.5 model). Pricing a row
-  against the session's pre-resolved `fallback_model` would therefore stamp a
-  confident, wrong dollar figure — worse than no figure — so agy rows always
-  carry `cost_usd: nil` and a `:cost_note` explaining why, and never stamp a
-  guessed `:model` onto the row (that would pollute `usage_summarize --by
-  model` with a model agy didn't run).
+  actually ran, so `usage_fields/2` here never stamps a guessed `:model` onto
+  the row (that would pollute `usage_summarize --by model` with a model agy
+  didn't run); `Arbiter.Worker`'s `record_usage_event/3` fills it in from the
+  session's pre-resolved model instead (bd-2fzwlc / bd-d2yut8, T1).
+
+  Operator decision (2026-09-17, bd-481sz7): agy/Antigravity reports no
+  per-call dollar cost for *any* model — it's a subscription metered by
+  quota percentage, not a priced API, and agy's own catalogue doesn't overlap
+  the Gemini price table anyway (Gemini 3.x tiers, Claude models, GPT-OSS, no
+  2.5 model). So every agy row carries `cost_usd: nil` permanently, with a
+  `:cost_note` saying so.
   """
 
   alias Arbiter.Agents.Gemini.Pricing
@@ -84,7 +88,14 @@ defmodule Arbiter.Agents.Gemini.Stream do
   # nothing is configured — would stamp a confident, wrong dollar figure on
   # a model agy never ran. So agy cost is always unavailable; the row must
   # say why rather than guess.
-  @agy_cost_unavailable_note "cost unavailable: agy does not report which model it ran and its model catalogue does not overlap the Gemini price table"
+  # Operator decision (2026-09-17, bd-481sz7): agy/Antigravity is a
+  # subscription with a quota-percentage meter, not a per-call priced API — it
+  # reports no dollar cost for *any* model, not just an unresolved one. After
+  # T1 (bd-2fzwlc) the model is known (threaded onto the session at spawn
+  # time and stamped by `Arbiter.Worker.record_usage_event/3`'s `session.model`
+  # fallback), so this note must not blame an "unknown model" that isn't true
+  # anymore — it explains the real, permanent reason cost_usd stays nil.
+  @agy_cost_unavailable_note "agy/Antigravity reports no cost: it's a subscription metered by Antigravity quota percentage, not a per-call priced API"
 
   @doc """
   Reduce one decoded stream-json event to a map of usage fields to merge onto
@@ -134,6 +145,12 @@ defmodule Arbiter.Agents.Gemini.Stream do
       tokens_in: number(usage["input_tokens"]),
       tokens_out: number(usage["output_tokens"]),
       cache_read_tokens: number(usage["cache_read_tokens"]),
+      # Confirmed live (bd-481sz7): `input_tokens + output_tokens ==
+      # total_tokens`, with no separate thinking bucket added on top — agy's
+      # thinking tokens are a subset already counted inside `output_tokens`,
+      # not additional spend. Recorded here for visibility only; never add
+      # this to `tokens_out` or the ledger double-counts it.
+      thinking_tokens: number(usage["thinking_tokens"]),
       duration_ms: agy_duration_ms(result["duration_seconds"]),
       cost_usd: nil,
       cost_note: @agy_cost_unavailable_note,

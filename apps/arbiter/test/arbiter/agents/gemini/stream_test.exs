@@ -182,13 +182,35 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert fields.tokens_in == 17529
       assert fields.tokens_out == 118
       assert fields.cache_read_tokens == 0
+      assert fields.thinking_tokens == 110
       assert fields.duration_ms == 1103
       refute Map.has_key?(fields, :model)
       assert fields.is_error == false
       assert fields.result_status == "SUCCESS"
       assert fields.raw == event
       refute Map.has_key?(fields, :cost_usd)
-      assert fields.cost_note =~ "agy does not report which model it ran"
+      assert fields.cost_note =~ "Antigravity"
+      assert fields.cost_note =~ "no cost"
+
+      # bd-2fzwlc's live probe: thinking_tokens is a subset of output_tokens,
+      # not an addition on top of it (input + output == total, with no third
+      # bucket) — so tokens_out must NOT be inflated by adding thinking on
+      # top, or the ledger would double-count every thinking token.
+      assert fields.tokens_in + fields.tokens_out == 17647
+      assert fields.thinking_tokens <= fields.tokens_out
+    end
+
+    test "thinking_tokens is nil when agy's usage carries none" do
+      event = %{
+        "event" => "result",
+        "result" => %{
+          "status" => "SUCCESS",
+          "usage" => %{"input_tokens" => 10, "output_tokens" => 5}
+        }
+      }
+
+      fields = Stream.usage_fields(event, nil)
+      refute Map.has_key?(fields, :thinking_tokens)
     end
 
     test "result with no fallback model still records why cost is nil" do
@@ -202,7 +224,7 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
 
       fields = Stream.usage_fields(event, nil)
       refute Map.has_key?(fields, :cost_usd)
-      assert fields.cost_note =~ "agy does not report which model it ran"
+      assert fields.cost_note =~ "no cost"
     end
 
     test "non-SUCCESS status flags is_error" do

@@ -703,4 +703,58 @@ defmodule Arbiter.Agents.GeminiTest do
       refute Enum.any?(Gemini.spawn_env(api_key: "k"), &match?({"HOME", _}, &1))
     end
   end
+
+  # bd-481sz7 AC3: the preflight probe must request structured output so its
+  # usage_events row carries real token counts (previously it ran `-p ping`
+  # with no `--output-format`, so `Arbiter.Agents.Gemini.Stream` had nothing
+  # to parse and every agy preflight row landed with zero tokens).
+  describe "auth_probe_argv/1" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-probe-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    test "requests stream-json structured output for agy", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "ping" | rest] = argv
+      assert "--output-format" in rest
+
+      assert Enum.at(rest, Enum.find_index(rest, &(&1 == "--output-format")) + 1) ==
+               "stream-json"
+    end
+
+    test "requests stream-json structured output for upstream gemini", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      assert {:ok, argv} = Gemini.auth_probe_argv([])
+      assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "ping" | rest] = argv
+      assert "--output-format" in rest
+    end
+
+    test "returns {:error, ...} when neither CLI is on PATH" do
+      System.put_env("PATH", "/nonexistent-dir-for-test")
+      assert {:error, {:executable_not_found, "agy or gemini"}} = Gemini.auth_probe_argv([])
+    end
+  end
 end

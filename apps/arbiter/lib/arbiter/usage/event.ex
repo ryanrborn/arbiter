@@ -101,6 +101,7 @@ defmodule Arbiter.Usage.Event do
         :provider,
         :tokens_in,
         :tokens_out,
+        :thinking_tokens,
         :cache_creation_tokens,
         :cache_read_tokens,
         :cost_usd,
@@ -176,6 +177,17 @@ defmodule Arbiter.Usage.Event do
 
     attribute :tokens_out, :integer do
       public? true
+    end
+
+    attribute :thinking_tokens, :integer do
+      public? true
+
+      description "agy/Antigravity's thinking-token count (bd-481sz7). Confirmed live: " <>
+                    "input_tokens + output_tokens == total_tokens, with no separate " <>
+                    "third bucket — thinking tokens are a subset already counted inside " <>
+                    "tokens_out, not additional spend. Kept here for visibility only; " <>
+                    "never add this to tokens_out. Nil for every non-agy provider and " <>
+                    "for agy rows predating this column."
     end
 
     attribute :cache_creation_tokens, :integer do
