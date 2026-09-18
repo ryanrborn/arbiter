@@ -60,4 +60,17 @@ defmodule ArbiterWeb.SessionTranscriptControllerTest do
     conn = get(conn, "/sessions/..%2F..%2F..%2Fetc%2Fpasswd/transcript")
     assert response(conn, 404)
   end
+
+  test "GET /sessions/:id/transcript 404s on a 16-byte path-traversal id (Ecto.UUID's raw-binary cast clause)",
+       %{conn: conn} do
+    # "../../../../../x" is exactly 16 bytes, which Ecto.UUID.cast/1 accepts
+    # via its raw-binary clause and re-encodes as a harmless-looking hex UUID.
+    # The controller must resolve the *cast* id, not the original traversal
+    # string, or this still reaches the filesystem outside the archive root.
+    traversal = "../../../../../x"
+    assert byte_size(traversal) == 16
+
+    conn = get(conn, "/sessions/" <> URI.encode(traversal, &(&1 != ?/)) <> "/transcript")
+    assert response(conn, 404)
+  end
 end

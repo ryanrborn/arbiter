@@ -17,7 +17,7 @@ defmodule ArbiterWeb.SessionTranscriptController do
   alias Arbiter.Worker.SessionArchive
 
   def download(conn, %{"id" => id}) do
-    with {:ok, _} <- Ecto.UUID.cast(id),
+    with {:ok, id} <- Ecto.UUID.cast(id),
          {:ok, jsonl} <- SessionArchive.read(id) do
       conn
       |> put_resp_content_type("application/x-ndjson")
