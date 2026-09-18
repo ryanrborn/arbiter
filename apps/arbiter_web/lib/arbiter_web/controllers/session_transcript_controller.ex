@@ -34,11 +34,11 @@ defmodule ArbiterWeb.SessionTranscriptController do
   # The served path is never built from the URL. `session_id/1` accepts only a
   # well-formed UUID *and* only one that is a real `Arbiter.Sessions.Session`
   # row, and the path is then derived from the row's own id — so `..` never
-  # reaches `Path.join/2` (sobelow reads the dataflow as param -> path and
-  # flags the shape; the lookup is what makes it safe, and
-  # `ArbiterWeb.SessionTranscriptControllerTest` asserts the traversal attempt
-  # 404s).
-  @sobelow_skip ["Traversal.SendFile"]
+  # reaches `Path.join/2`, and `ArbiterWeb.SessionTranscriptControllerTest`
+  # asserts that a traversal attempt 404s. Annotated on the two functions that
+  # earn it rather than added to `.sobelow-conf`'s `ignore` list, so a new
+  # `send_file/3` anywhere else in the app still fails the scan.
+  # sobelow_skip ["Traversal.SendFile"]
   def raw(conn, %{"id" => id}) do
     with {:ok, session_id} <- session_id(id),
          path = Transcript.path_for(session_id),
@@ -53,7 +53,8 @@ defmodule ArbiterWeb.SessionTranscriptController do
   end
 
   @doc "The gzipped session JSONL, as archived on session end."
-  @sobelow_skip ["Traversal.SendFile"]
+  # See `raw/2` above: the path comes from the looked-up row, not the URL.
+  # sobelow_skip ["Traversal.SendFile"]
   def jsonl(conn, %{"id" => id}) do
     with {:ok, session_id} <- session_id(id),
          path = SessionArchive.path_for(session_id),
