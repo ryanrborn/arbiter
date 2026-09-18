@@ -2774,7 +2774,7 @@ defmodule Arbiter.Worker.DispatchTest do
         File.rm_rf!(tmp)
       end)
 
-      %{repo: repo, worktree_root: worktree_root}
+      %{repo: repo, worktree_root: worktree_root, tmp: tmp}
     end
 
     # Dispatch a task, provisioning its worktree, then simulate a mid-work stop:
@@ -3036,6 +3036,155 @@ defmodule Arbiter.Worker.DispatchTest do
         Dispatch.resume(task.id, start_driver: false, claude_command: ["sleep", "2"])
 
       assert is_binary(result.worktree_path)
+    end
+
+    # bd-b7e33c AC5 post-merge finding: `worker_resume` (the MCP tool backing
+    # this path) resumed an agy task straight onto Claude — Routing.choose/2
+    # re-decided the provider from the workspace default with nothing to pin
+    # it to the prior run. Without an explicit `agent_type`, `resume/2` must
+    # now default to the provider the task's most recent usage row ran on.
+    test "resume/2 without an explicit agent_type stays on the prior run's provider",
+         %{ws: ws, tmp: tmp} do
+      gemini_file = Path.join(tmp, "gemini-resume-argv.txt")
+      :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+
+      {:ok, task} = Ash.create(Issue, %{title: "agy resume provider", workspace_id: ws.id})
+
+      # Workspace defaults to Claude — nothing here forces gemini explicitly on
+      # the resume call, so a passing test proves the default came from the
+      # prior run's ledger row, not from workspace/routing config.
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+      # A real agy run writes this row itself when its session port exits;
+      # simulate that here rather than running a full CLI session.
+      {:ok, _event} =
+        Ash.create(UsageEvent, %{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "rs/repo",
+          step: :work,
+          provider: "gemini",
+          occurred_at: DateTime.utc_now()
+        })
+
+      File.rm!(gemini_file)
+
+      {:ok, result} = Dispatch.resume(task.id, start_driver: false, preflight: false)
+
+      _ = wait_for_argv!(gemini_file)
+
+      routing = Worker.state(result.worker_pid).meta[:routing_config]
+      assert routing.provider == "gemini"
+    end
+  end
+
+  describe "resume_session/2 (bd-1z7624)" do
+    @env_key :repo_paths
+
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "dispatch-resume-session-#{:erlang.unique_integer([:positive])}"
+        )
+
+      repo = Path.join(tmp, "source")
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+      remote = Path.join(tmp, "remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      worktree_root = Path.join(tmp, "worktrees")
+      File.mkdir_p!(worktree_root)
+
+      prior_wt_root = Application.get_env(:arbiter, :worktree_root)
+      prior_repo_paths = Application.get_env(:arbiter, @env_key)
+
+      Application.put_env(:arbiter, :worktree_root, worktree_root)
+      Application.put_env(:arbiter, @env_key, %{"rs/repo" => repo})
+
+      on_exit(fn ->
+        if prior_wt_root,
+          do: Application.put_env(:arbiter, :worktree_root, prior_wt_root),
+          else: Application.delete_env(:arbiter, :worktree_root)
+
+        if prior_repo_paths,
+          do: Application.put_env(:arbiter, @env_key, prior_repo_paths),
+          else: Application.delete_env(:arbiter, @env_key)
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{repo: repo, worktree_root: worktree_root, tmp: tmp}
+    end
+
+    # bd-b7e33c AC2/AC5: the actual `arb worker resume` / `POST
+    # /api/workers/:id/resume` surface. Session-level resume threads the prior
+    # `session_id` through `Worker.inject_resume_argv/4`, which now (T7)
+    # translates it to `--conversation <id>` for gemini/agy — but only if the
+    # fresh dispatch actually resolves the gemini adapter. Without pinning
+    # `:agent_type` to the ledger's recorded provider, `Routing.choose/2` could
+    # still hand the spawn to Claude, and `--conversation <agy-uuid>` would get
+    # injected into a Claude invocation instead.
+    test "resume_session/2 without an explicit agent_type dispatches the same provider as the prior session",
+         %{ws: ws, tmp: tmp} do
+      gemini_file = Path.join(tmp, "gemini-resume-session-argv.txt")
+      :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+
+      {:ok, task} = Ash.create(Issue, %{title: "agy resume session", workspace_id: ws.id})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+      {:ok, _event} =
+        Ash.create(UsageEvent, %{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "rs/repo",
+          step: :work,
+          provider: "gemini",
+          session_id: "agy-conv-#{:erlang.unique_integer([:positive])}",
+          occurred_at: DateTime.utc_now()
+        })
+
+      File.rm!(gemini_file)
+
+      {:ok, result} = Dispatch.resume_session(task.id, start_driver: false, preflight: false)
+
+      resumed_args = wait_for_argv!(gemini_file)
+      assert "--conversation" in resumed_args
+
+      routing = Worker.state(result.worker_pid).meta[:routing_config]
+      assert routing.provider == "gemini"
     end
   end
 

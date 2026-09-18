@@ -257,11 +257,15 @@ defmodule Arbiter.Worker.Dispatch do
   the prior worker's committed + uncommitted work, so it continues from where
   the stopped run left off instead of restarting from scratch.
 
-  This is the explicit `arb resume <task>` path. It is provider-agnostic — no
-  Claude/Gemini session-resume id; the continuity comes entirely from the
-  preserved worktree state plus a `Arbiter.Worker.ResumeContext` briefing
-  prepended to the standard work prompt (coordinator sign-off 2026-06-05, approach
-  (b)).
+  This is the explicit `arb resume <task>` path. It carries no Claude/Gemini
+  session-resume id; the continuity comes from the preserved worktree state
+  plus a `Arbiter.Worker.ResumeContext` briefing prepended to the standard
+  work prompt (coordinator sign-off 2026-06-05, approach (b)). It is NOT
+  provider-agnostic, though: unless the caller passes an explicit
+  `:agent_type`, the fresh agent defaults to whichever provider the task's
+  most recent usage-ledger row ran on (bd-b7e33c AC5), so resuming an agy run
+  doesn't silently switch to Claude and spend quota the operator dispatched
+  to agy specifically to conserve.
 
   ## Steps
 
@@ -311,6 +315,7 @@ defmodule Arbiter.Worker.Dispatch do
 
       resume_opts =
         opts
+        |> Keyword.put_new(:agent_type, latest_provider(task_id))
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
@@ -383,6 +388,7 @@ defmodule Arbiter.Worker.Dispatch do
 
       resume_opts =
         opts
+        |> Keyword.put_new(:agent_type, latest_provider(task_id))
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
@@ -603,6 +609,37 @@ defmodule Arbiter.Worker.Dispatch do
     end
   rescue
     _ -> {:error, :no_session}
+  end
+
+  # bd-b7e33c AC5 post-merge finding: neither `resume/2` nor `resume_session/2`
+  # threaded a provider through to the new dispatch, so `build_agent_session_opts`
+  # re-ran `Routing.choose/2` from scratch and could silently hand an agy/gemini
+  # task's resume to Claude — spending the quota the whole agy-parity epic exists
+  # to conserve, with no signal in the result that a provider switch happened.
+  # Default `:agent_type` (unless the caller already forced one) to the provider
+  # the task's most recent usage-ledger row actually ran on, so a resume stays on
+  # the same provider by construction. `nil` (no prior usage row, or an
+  # unrecognized provider string) leaves the routing policy free to choose, same
+  # as before this fix.
+  defp latest_provider(task_id) when is_binary(task_id) do
+    Event
+    |> Ash.Query.filter(task_id == ^task_id and not is_nil(provider))
+    |> Ash.Query.sort(occurred_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %Event{provider: p} when is_binary(p) and p != "" -> safe_provider_atom(p)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp safe_provider_atom(p) do
+    String.to_existing_atom(p)
+  rescue
+    ArgumentError -> nil
   end
 
   # `review: true` is the convenience hook used by `arb review`: it forces the
