@@ -76,6 +76,14 @@ export function createSessionTerminal(el, options = {}) {
     // join a dead session's channel and sit at "reconnecting…".
     readOnly: startReadOnly = false,
     restoredText = null,
+    // A pane for a session that ended *before this browser session*
+    // (bd-3tf4oo). There is no scrollback in memory to restore and no pane to
+    // attach to, but there usually is a persisted raw transcript — so this one
+    // joins the same channel in transcript mode, paints the one `snapshot` the
+    // server replays out of that file, and hangs up. Read-only from its first
+    // frame, and never described as live.
+    transcript = false,
+    onTranscript = () => {},
     onStatus = () => {},
     onExit = () => {},
     onMeta = () => {},
@@ -253,7 +261,47 @@ export function createSessionTerminal(el, options = {}) {
     })
   }
 
-  const stream = startReadOnly ? inertStream() : liveStream()
+  // The *same* `SessionStream`, the same channel and the same `repaint` sink a
+  // live attach uses — only the join params differ. A second renderer for
+  // finished sessions is exactly what this does not build (bd-3tf4oo AC 5).
+  const transcriptStream = () =>
+    new SessionStream({
+      socket,
+      sessionId,
+      mode: "transcript",
+      geometry: () => ({ cols: term.cols, rows: term.rows }),
+      sink: {
+        repaint: (_seq, data) => {
+          term.reset()
+          if (data) term.write(data)
+        },
+        joined: (reply) => {
+          // The replay's bounds and the session's end, for whoever is drawing
+          // chrome around this pane. The dock renders its own from the server,
+          // so this is the seam rather than the only copy.
+          onTranscript(reply || {})
+        },
+        status: onStatus,
+        error: (err) => {
+          // A transcript that went away between the page rendering and this
+          // join — the retention sweep is the realistic case. The one thing
+          // that must not happen is a blank terminal that reads as a live
+          // session with no output (#1818).
+          if (err && err.code === "transcript_unavailable") {
+            term.writeln("")
+            term.writeln(DIM + `-- transcript unavailable (${err.reason || "gone"}) --` + RESET)
+          }
+
+          onError(err)
+        }
+      }
+    })
+
+  const stream = transcript
+    ? transcriptStream()
+    : startReadOnly
+      ? inertStream()
+      : liveStream()
 
   term.onData((data) => {
     reclaim()
@@ -513,7 +561,14 @@ export function createSessionTerminal(el, options = {}) {
     return lines.join("\r\n")
   }
 
-  if (startReadOnly) {
+  if (transcript) {
+    // Nothing is typed into a recording. The connect itself is the settle path
+    // above — the same one a live pane uses, so the replay is painted into a
+    // terminal that has already been measured — and what must be true before
+    // its bytes land is that this pane cannot be typed into and does not look
+    // like it is waiting for input.
+    setReadOnly()
+  } else if (startReadOnly) {
     if (restoredText) term.write(restoredText + "\r\n")
     term.writeln(DIM + "-- the session had ended; scrollback restored as plain text --" + RESET)
     setReadOnly()

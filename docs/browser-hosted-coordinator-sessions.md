@@ -1036,13 +1036,37 @@ says out loud that the styling did not survive. `scripts/verify_session_page.mjs
 asserts the whole sequence in a real browser — kill, read-only with the
 scrollback, drop and re-join the socket, still there, then dismiss.
 
-**The one case the dock cannot serve alone, said out loud.** A session that
-ended in a *previous* browser session has no scrollback here and none to fetch
-until transcript persistence (bd-5pelo2, phase 9). Opening it gives a window
-that says exactly that and points at `/sessions`, rather than an empty terminal
-that reads like a live one with nothing on it. The two cases are named, never
-blurred — which is the difference between "your output is gone" and "your agent
-has printed nothing".
+**A session that ended before this browser session: replay the file**
+(bd-3tf4oo, #1818). It has no scrollback in this browser, but phase 9 persists
+its raw PTY capture, so that is what its window shows — read-only, ANSI intact,
+through the same seam a live pane uses rather than a second renderer:
+
+    Arbiter.Sessions.TranscriptReplay.read_tail/2     the bounded tail of the file
+      -> SessionChannel join with mode: "transcript"  same topic, no reader started
+      -> push "snapshot"                              the same event a live attach sends
+      -> SessionStream repaint -> xterm               the same renderer
+
+`TranscriptReplay.describe/2` is what the dock asks first, and it is also what
+makes the empty case honest: a missing file is `:retention_deleted` (the sweep
+took it — the session ended longer ago than the retention window),
+`:never_captured` (it predates capture, or its reader never started) or
+`:empty`, and the window names which, links the archived session JSONL when one
+exists, and never renders a blank terminal. A transcript over the replay cap is
+shown as a tail, with "showing last N of M" and a download link to the whole
+file (`ArbiterWeb.SessionTranscriptController`, loopback-only like the socket).
+That controller serves both of a finished session's artefacts:
+`/sessions/:id/transcript` is the raw PTY capture this section is about, and
+`/sessions/:id/jsonl` is the phase 9 session archive, decompressed — the same
+route the issue detail page's refine "Transcript" link uses (bd-cvfjms). Both
+derive the served path from a looked-up session row, never from the URL.
+
+Nothing about it is presented as live: no status strip, no reconnect (the
+client hangs up once the bytes are painted), and stdin, resize, redraw and kill
+are refused on the channel with `read_only`. Note also that the replayed bytes
+were laid out by the pane at the geometry it had when they were written, not at
+this window's — another reason the chrome says "transcript" rather than
+implying a live screen. `/sessions` ended rows say **View transcript** and open
+this same window; it is an entry point, not a second viewer.
 
 ## 7. Metering and attribution (research task 4)
 

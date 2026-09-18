@@ -2078,7 +2078,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                   <span :if={@refine_session.status != :ended}>Session in progress</span>
                   <.link
                     :if={@refine_session_archived?}
-                    href={~p"/sessions/#{@refine_session.id}/transcript"}
+                    href={~p"/sessions/#{@refine_session.id}/jsonl"}
                     id="refine-session-transcript-link"
                     class="link"
                   >

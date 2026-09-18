@@ -49,6 +49,12 @@ const BASE = (options.url || "http://localhost:4848").replace(/\/$/, "")
 const DEADLINE_MS = Number(options.seconds || 30) * 1000
 const SESSION_A = options["session-a"]
 const SESSION_B = options["session-b"]
+// A session that is already **over**, with a persisted raw transcript on disk
+// (bd-3tf4oo). Optional: given, the run also checks that opening it replays
+// that file into a read-only pane rather than showing the empty panel #1818
+// reported.
+const SESSION_C = options["session-c"] || null
+const TRANSCRIPT_MARKER = options["transcript-marker"] || "REPLAYED-FROM-DISK"
 const SYNC = options.sync
 const SCREENSHOT = options.screenshot || null
 
@@ -705,10 +711,67 @@ async function run(page) {
     `focused in the terminal=${focus.inTerminal}, then on the title bar=${released.onTitle}`
   )
 
+  // -- a session that ended before this browser session (bd-3tf4oo) ---------
+
+  if (SESSION_C) await transcriptReplay(page)
+
   check(
     "no-console-errors",
     consoleErrors.length === 0,
     consoleErrors.length ? JSON.stringify(consoleErrors.slice(0, 3)) : "the page logged none"
+  )
+}
+
+// Opening an *ended* session: its persisted transcript is replayed into the
+// same xterm, read-only, and nothing about it claims to be live (#1818).
+//
+// Read through `__arbTerminal` rather than off the DOM for the same reason
+// every other claim here is: the canvas renderer draws pixels, so the screen
+// has no text to query.
+async function transcriptReplay(page) {
+  await open(page, SESSION_C)
+  await waitForText(page, SESSION_C, TRANSCRIPT_MARKER)
+
+  const replay = await page.json(`(() => {
+    const el = document.getElementById("session-dock-terminal-${SESSION_C}")
+    const term = el.__arbTerminal
+    return {
+      xterms: document.querySelectorAll(".xterm").length,
+      transcript: el.dataset.transcript || null,
+      readOnly: term.readOnly(),
+      disableStdin: !!term.term.options.disableStdin,
+      finished: !!term.stream.finished,
+      // The live HUD is not rendered for a replay — it is the strip that says
+      // "live", and a recording is not.
+      statusStrip: !!document.getElementById("session-dock-status-${SESSION_C}"),
+      banner: (document.getElementById("session-dock-ended-${SESSION_C}") || {}).textContent || "",
+      unavailable: !!document.getElementById("session-dock-unavailable-${SESSION_C}"),
+      download: !!document.getElementById("session-dock-transcript-download-${SESSION_C}")
+    }
+  })()`)
+
+  check(
+    "an-ended-sessions-window-replays-its-persisted-transcript",
+    replay.transcript === "true" && !replay.unavailable && replay.download,
+    JSON.stringify(replay)
+  )
+
+  check(
+    "a-replayed-transcript-is-read-only-and-never-looks-live",
+    replay.readOnly &&
+      replay.disableStdin &&
+      replay.finished &&
+      !replay.statusStrip &&
+      replay.banner.includes("read-only"),
+    JSON.stringify(replay)
+  )
+
+  // The dock's own invariant still holds with a replay open: one pane, and
+  // this one holds no socket at all once the file is on screen.
+  check(
+    "a-replay-is-still-the-one-pane-in-the-dock",
+    replay.xterms === 1,
+    `${replay.xterms} xterm(s) in the document`
   )
 }
 

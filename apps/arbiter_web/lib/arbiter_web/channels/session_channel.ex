@@ -10,6 +10,26 @@ defmodule ArbiterWeb.SessionChannel do
   lets the transport be tested headlessly and lets a second transport (a CLI,
   a second UI) exist later without reimplementing the protocol.
 
+  ## Transcript mode (bd-3tf4oo)
+
+  A session that has *ended* has no reader to attach to, but it usually has a
+  persisted raw transcript (`Arbiter.Sessions.Transcript`, §11). Joining with
+  `%{"mode" => "transcript"}` replays that file instead of attaching: the
+  bytes go out as the same `snapshot` event a live attach sends, so the
+  browser paints a finished session through the terminal's existing repaint
+  path rather than through a second renderer. The join reply carries the
+  replay's bounds (`total_bytes`, `replay_bytes`, `truncated?`) and the
+  session's own end reason and `ended_at`.
+
+  Such a channel is a *reader of a file*, and everything that would make it
+  look otherwise is refused with `read_only`: stdin, resize, redraw and kill.
+  It starts no reader process, subscribes to no usage feed, pushes no `meta`
+  and never stamps `last_client_at` — an ended session has no idle deadline
+  left to postpone. A transcript that is missing (swept by
+  `Arbiter.Sessions.TranscriptRetention`, never captured, or empty) refuses
+  the join with `transcript_unavailable` and the reason, which the dock
+  renders as an explicit empty state rather than a blank terminal.
+
   ## Client → server
 
   | Event | Payload | Notes |
@@ -77,6 +97,7 @@ defmodule ArbiterWeb.SessionChannel do
   alias Arbiter.Sessions
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Stream
+  alias Arbiter.Sessions.TranscriptReplay
 
   require Logger
 
@@ -87,12 +108,52 @@ defmodule ArbiterWeb.SessionChannel do
   @touch_client_interval_ms 5 * 60_000
 
   @impl true
+  def join("session:" <> session_id, %{"mode" => "transcript"}, socket) do
+    with {:ok, session} <- fetch_session(session_id),
+         {:ok, tail} <- read_transcript(session) do
+      socket =
+        socket
+        |> assign(:session_id, session_id)
+        |> assign(:mode, :transcript)
+        |> assign(:replay, tail)
+
+      send(self(), :after_join_transcript)
+
+      {:ok,
+       %{
+         mode: "transcript",
+         # The replay's own end offset, so a client's `last_seq` arithmetic
+         # starts from the same place a live snapshot's would.
+         seq: tail.end_offset,
+         start_offset: tail.start_offset,
+         end_offset: tail.end_offset,
+         total_bytes: tail.total_bytes,
+         replay_bytes: byte_size(tail.data),
+         truncated?: tail.truncated?,
+         end_reason: session.end_reason,
+         ended_at: session.ended_at
+       }, socket}
+    else
+      {:error, :session_gone} ->
+        {:error, %{code: "session_gone", detail: "no session #{session_id}"}}
+
+      {:error, {:transcript_unavailable, reason}} ->
+        {:error,
+         %{
+           code: "transcript_unavailable",
+           reason: to_string(reason),
+           detail: "no transcript for #{session_id} (#{reason})"
+         }}
+    end
+  end
+
   def join("session:" <> session_id, params, socket) do
     with {:ok, session} <- fetch_live_session(session_id),
          {:ok, attached} <- attach(session, params) do
       socket =
         socket
         |> assign(:session_id, session_id)
+        |> assign(:mode, :live)
         |> assign(:attached, attached)
         |> assign(:last_stdin_seq, 0)
         |> assign(:joined?, false)
@@ -130,6 +191,16 @@ defmodule ArbiterWeb.SessionChannel do
   end
 
   @impl true
+  def handle_info(:after_join_transcript, socket) do
+    tail = socket.assigns.replay
+
+    # The same event, with the same shape, a live attach's scrollback arrives
+    # on (`dispatch({:session_snapshot, ...})` below) — one renderer.
+    push(socket, "snapshot", %{seq: tail.end_offset, data: tail.data})
+
+    {:noreply, assign(socket, :replay, %{tail | data: ""})}
+  end
+
   def handle_info(:after_join, socket) do
     %{attached: attached, session_id: session_id} = socket.assigns
 
@@ -183,7 +254,20 @@ defmodule ArbiterWeb.SessionChannel do
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
+  # A transcript channel is a file being read, not a pane. Every verb that
+  # would write to a pane (or end one) stops here, before it can reach a
+  # reader that does not exist — and says why, rather than failing silently.
   @impl true
+  def handle_in("stdin", _payload, %{assigns: %{mode: :transcript}} = socket) do
+    push(socket, "error", %{code: "read_only", detail: "this is a replayed transcript"})
+    {:noreply, socket}
+  end
+
+  def handle_in(event, _payload, %{assigns: %{mode: :transcript}} = socket)
+      when event in ~w(resize redraw kill) do
+    {:reply, {:error, %{code: "read_only", detail: "this is a replayed transcript"}}, socket}
+  end
+
   def handle_in("stdin", {:binary, payload}, socket) do
     case Frame.decode(payload) do
       {:ok, seq, bytes} when seq > socket.assigns.last_stdin_seq ->
@@ -284,6 +368,31 @@ defmodule ArbiterWeb.SessionChannel do
   end
 
   # -- internals --------------------------------------------------------------
+
+  # Any session row at all, live or over — transcript mode reads a file, and
+  # the file outlives the pane.
+  defp fetch_session(session_id) do
+    case Sessions.get(session_id) do
+      {:ok, session} -> {:ok, session}
+      {:error, :not_found} -> {:error, :session_gone}
+    end
+  end
+
+  # `describe/2` first, so an unavailable transcript is refused with *why* it
+  # is unavailable rather than with a bare `enoent`; the read that follows can
+  # still lose a race with the retention sweep, which reports the same way.
+  defp read_transcript(session) do
+    case TranscriptReplay.describe(session) do
+      %{available?: true} ->
+        case TranscriptReplay.read_tail(session.id) do
+          {:ok, tail} -> {:ok, tail}
+          {:error, _reason} -> {:error, {:transcript_unavailable, :retention_deleted}}
+        end
+
+      %{reason: reason} ->
+        {:error, {:transcript_unavailable, reason}}
+    end
+  end
 
   defp fetch_live_session(session_id) do
     case Sessions.get(session_id) do

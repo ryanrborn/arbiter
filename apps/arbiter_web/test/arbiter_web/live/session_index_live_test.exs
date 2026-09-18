@@ -62,6 +62,38 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     ev
   end
 
+  describe "an ended row's transcript action (bd-3tf4oo)" do
+    test "an ended session's action says View transcript", %{conn: conn} do
+      session = launch!()
+      {:ok, _ended} = Sessions.kill(session.id)
+
+      {:ok, view, _html} = live(conn, "/sessions")
+
+      assert has_element?(view, "#view-transcript-#{session.id}", "View transcript")
+      refute has_element?(view, "#open-in-dock-button-#{session.id}")
+    end
+
+    test "it hands the session to the dock, the same way Open does", %{conn: conn} do
+      session = launch!()
+      {:ok, _ended} = Sessions.kill(session.id)
+
+      {:ok, view, _html} = live(conn, "/sessions")
+      render_click(element(view, "#view-transcript-#{session.id}"))
+
+      assert_push_event(view, "session-dock:open", %{id: id})
+      assert id == session.id
+    end
+
+    test "a running session still says Open in dock", %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, "/sessions")
+
+      assert has_element?(view, "#open-in-dock-button-#{session.id}", "Open in dock")
+      refute has_element?(view, "#view-transcript-#{session.id}")
+    end
+  end
+
   describe "the cost/tokens column" do
     test "shows an ended session's final totals, from the same source as `arb usage --by session`",
          %{conn: conn} do
