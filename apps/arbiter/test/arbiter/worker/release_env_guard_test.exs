@@ -95,6 +95,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker.ex" => :pure_tool,
+    # bd-svczq4: the OS-process-tree kill helpers extracted out of `worker.ex`
+    # (and now shared with `Arbiter.Agents.Preflight`'s probe teardown). Spawns
+    # only `kill` and `pgrep`.
+    "apps/arbiter/lib/arbiter/worker/os_process.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/loop/apply/repo_doc.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/direct.ex" => :pure_tool,

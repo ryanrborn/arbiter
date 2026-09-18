@@ -113,6 +113,7 @@ defmodule Arbiter.Worker do
 
   require Logger
 
+  alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewVerification
@@ -2476,19 +2477,13 @@ defmodule Arbiter.Worker do
       end
 
     if is_integer(os_pid) do
-      # bd-bmmj4w: enumerate the agent's descendants BEFORE killing it. The
-      # process actually holding the worktree open is usually not `claude`
-      # itself but what it spawned (`mix test`, `git`, ...); once the parent
-      # dies those are reparented to init and `pgrep -P` can no longer reach
-      # them, so they would outlive teardown and keep writing into a directory
-      # `CleanupWorktree` is about to remove.
-      descendants = descendant_os_pids(os_pid)
-
-      Enum.each([os_pid | descendants], fn pid ->
-        _ = System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
-      end)
-
-      case Enum.reject([os_pid | descendants], &os_process_gone?/1) do
+      # bd-bmmj4w: `OsProcess.kill_tree/1` enumerates the agent's descendants
+      # BEFORE killing it. The process actually holding the worktree open is
+      # usually not `claude` itself but what it spawned (`mix test`, `git`, ...);
+      # once the parent dies those are reparented to init and `pgrep -P` can no
+      # longer reach them, so they would outlive teardown and keep writing into a
+      # directory `CleanupWorktree` is about to remove.
+      case OsProcess.kill_tree(os_pid) do
         [] ->
           :ok
 
@@ -2522,69 +2517,6 @@ defmodule Arbiter.Worker do
     end
   rescue
     _ -> :error
-  end
-
-  # Every OS process descended from the agent, breadth-first, depth-bounded.
-  # `pgrep -P` is present on both Linux and macOS; when it is missing or the
-  # probe blows up we return [] and fall back to killing the agent alone —
-  # best-effort, never a teardown crash. The BEAM shares its process group
-  # with the port's children, so a group kill is not an option here: the
-  # descendants have to be enumerated and signalled individually.
-  @max_descendant_depth 5
-
-  defp descendant_os_pids(root_os_pid) do
-    collect_descendants([root_os_pid], MapSet.new(), @max_descendant_depth)
-  end
-
-  defp collect_descendants([], acc, _depth), do: MapSet.to_list(acc)
-  defp collect_descendants(_frontier, acc, 0), do: MapSet.to_list(acc)
-
-  defp collect_descendants(frontier, acc, depth) do
-    next =
-      frontier
-      |> Enum.flat_map(&child_os_pids/1)
-      |> Enum.reject(&MapSet.member?(acc, &1))
-      |> Enum.uniq()
-
-    collect_descendants(next, Enum.into(next, acc), depth - 1)
-  end
-
-  defp child_os_pids(os_pid) do
-    case System.cmd("pgrep", ["-P", Integer.to_string(os_pid)], stderr_to_stdout: true) do
-      {out, 0} ->
-        out
-        |> String.split(~r/\s+/, trim: true)
-        |> Enum.flat_map(fn token ->
-          case Integer.parse(token) do
-            {pid, ""} -> [pid]
-            _ -> []
-          end
-        end)
-
-      # exit 1 == "no matching processes", i.e. a leaf.
-      _ ->
-        []
-    end
-  rescue
-    _ -> []
-  end
-
-  # Poll `kill -0` until the OS process is gone (SIGKILL is prompt, so this
-  # usually returns on the first probe). Bounded so a wedged/zombie pid can't
-  # block worker teardown indefinitely.
-  defp os_process_gone?(os_pid, attempts \\ 25) do
-    Enum.reduce_while(1..attempts, false, fn _i, _acc ->
-      case System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true) do
-        {_, 0} ->
-          Process.sleep(20)
-          {:cont, false}
-
-        _ ->
-          {:halt, true}
-      end
-    end)
-  rescue
-    _ -> true
   end
 
   # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the
