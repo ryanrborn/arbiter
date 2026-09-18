@@ -112,9 +112,8 @@ defmodule Arbiter.Accounts.Migrate do
   """
   @spec read_plan(String.t()) :: {:ok, map()} | {:error, String.t()}
   def read_plan(path) when is_binary(path) do
-    with {:ok, body} <- read_file(path),
-         {:ok, json} <- decode_json(body, path) do
-      {:ok, json}
+    with {:ok, body} <- read_file(path) do
+      decode_json(body, path)
     end
   end
 
@@ -325,7 +324,7 @@ defmodule Arbiter.Accounts.Migrate do
   defp parse_credential(credential, slug),
     do:
       {:error,
-       "account #{slug}: each credential needs \"fingerprint\", \"kind\" and \"env_var\" " <>
+       ~s(account #{slug}: each credential needs "fingerprint", "kind" and "env_var" ) <>
          "(got #{keys(credential)})"}
 
   defp parse_kind(kind, slug) do
@@ -378,7 +377,7 @@ defmodule Arbiter.Accounts.Migrate do
       workspace, {:ok, _} ->
         {:halt,
          {:error,
-          "account #{slug}: each workspace entry needs a string \"id\" and \"env_key\" " <>
+          ~s(account #{slug}: each workspace entry needs a string "id" and "env_key" ) <>
             "(got #{keys(workspace)})"}}
     end)
     |> case do
@@ -908,29 +907,32 @@ defmodule Arbiter.Accounts.Migrate do
 
   defp select_backups(opts) do
     cond do
-      id = Keyword.get(opts, :backup_id) ->
-        case Backup |> Ash.Query.filter(id == ^id) |> Ash.read!() do
-          [] -> {:error, "no backup row #{id}"}
-          [backup] -> {:ok, [backup]}
-        end
+      id = Keyword.get(opts, :backup_id) -> select_backup_by_id(id)
+      id = Keyword.get(opts, :migration_id) -> select_backups_by_migration(id)
+      reference = Keyword.get(opts, :workspace) -> select_workspace_backup(reference)
+      Keyword.get(opts, :all, false) -> select_all_unrestored_backups()
+      true -> {:error, "give one of --migration-id, --backup-id, --workspace or --all"}
+    end
+  end
 
-      id = Keyword.get(opts, :migration_id) ->
-        case Backup |> Ash.Query.filter(migration_id == ^id) |> Ash.read!() do
-          [] -> {:error, "no backup rows for migration #{id}"}
-          backups -> {:ok, Enum.sort_by(backups, & &1.created_at, DateTime)}
-        end
+  defp select_backup_by_id(id) do
+    case Backup |> Ash.Query.filter(id == ^id) |> Ash.read!() do
+      [] -> {:error, "no backup row #{id}"}
+      [backup] -> {:ok, [backup]}
+    end
+  end
 
-      reference = Keyword.get(opts, :workspace) ->
-        select_workspace_backup(reference)
+  defp select_backups_by_migration(id) do
+    case Backup |> Ash.Query.filter(migration_id == ^id) |> Ash.read!() do
+      [] -> {:error, "no backup rows for migration #{id}"}
+      backups -> {:ok, Enum.sort_by(backups, & &1.created_at, DateTime)}
+    end
+  end
 
-      Keyword.get(opts, :all, false) ->
-        case Backup |> Ash.Query.filter(is_nil(restored_at)) |> Ash.read!() do
-          [] -> {:error, "no un-restored provider-account migration backups"}
-          backups -> {:ok, Enum.sort_by(backups, & &1.created_at, DateTime)}
-        end
-
-      true ->
-        {:error, "give one of --migration-id, --backup-id, --workspace or --all"}
+  defp select_all_unrestored_backups do
+    case Backup |> Ash.Query.filter(is_nil(restored_at)) |> Ash.read!() do
+      [] -> {:error, "no un-restored provider-account migration backups"}
+      backups -> {:ok, Enum.sort_by(backups, & &1.created_at, DateTime)}
     end
   end
 
