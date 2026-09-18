@@ -478,10 +478,7 @@ defmodule Arbiter.Accounts.Migrate do
       # row is already there — needs no material, and must not be resolved:
       # after a successful run the key it came from is gone from `worker_env`,
       # and re-running the same plan has to stay a clean no-op.
-      if MapSet.member?(
-           already_written,
-           {credential.kind, credential.env_var, credential.fingerprint}
-         ) do
+      if {credential.kind, credential.env_var, credential.fingerprint} in already_written do
         {:cont, {:ok, [credential | acc]}}
       else
         case resolve_secret(credential, account, workspaces) do
@@ -498,7 +495,7 @@ defmodule Arbiter.Accounts.Migrate do
 
   defp already_written(account, existing) do
     case Map.get(existing, {account.provider, account.slug}) do
-      nil -> MapSet.new()
+      nil -> []
       row -> existing_fingerprints(row.id)
     end
   end
@@ -786,13 +783,13 @@ defmodule Arbiter.Accounts.Migrate do
   end
 
   defp create_credentials(account, account_id, dry_run?) do
-    existing = if account_id, do: existing_fingerprints(account_id), else: MapSet.new()
+    existing = if account_id, do: existing_fingerprints(account_id), else: []
 
     Enum.count(account.credentials, fn credential ->
       key = {credential.kind, credential.env_var, credential.fingerprint}
 
       cond do
-        MapSet.member?(existing, key) ->
+        key in existing ->
           false
 
         dry_run? ->
@@ -814,11 +811,14 @@ defmodule Arbiter.Accounts.Migrate do
     end)
   end
 
+  # A list rather than a `MapSet`: dialyzer cannot see through MapSet's
+  # opaqueness across the empty-vs-populated union these call sites build, and
+  # an account carries a handful of credential rows, not thousands.
   defp existing_fingerprints(account_id) do
     ProviderCredential
     |> Ash.Query.filter(provider_account_id == ^account_id)
     |> Ash.read!()
-    |> MapSet.new(&{&1.kind, &1.env_var, &1.fingerprint})
+    |> Enum.map(&{&1.kind, &1.env_var, &1.fingerprint})
   end
 
   defp attach_workspaces(account, account_id, dry_run?) do
