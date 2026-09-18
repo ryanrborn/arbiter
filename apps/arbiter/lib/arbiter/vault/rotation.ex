@@ -20,6 +20,7 @@ defmodule Arbiter.Vault.Rotation do
 
     * `Arbiter.Tasks.Workspace` — `:secrets`, `:worker_env`
     * `Arbiter.Accounts.ProviderCredential` — `:secret`
+    * `Arbiter.Accounts.ProviderAccountMigrationBackup` — `:worker_env`
 
   Add new entries to `@columns` here when a new resource grows a `cloak`
   block — nothing here discovers them automatically. A drift guard
@@ -51,7 +52,13 @@ defmodule Arbiter.Vault.Rotation do
   @columns [
     {Arbiter.Tasks.Workspace, "workspaces", :secrets},
     {Arbiter.Tasks.Workspace, "workspaces", :worker_env},
-    {Arbiter.Accounts.ProviderCredential, "provider_credentials", :secret}
+    {Arbiter.Accounts.ProviderCredential, "provider_credentials", :secret},
+    # P2's migration backups (bd-77j2if). Missing this one would make
+    # `mix arbiter.accounts.rollback` fail *after* a completed rotation drops
+    # the old key — the rows stay readable right up until the one moment they
+    # are needed.
+    {Arbiter.Accounts.ProviderAccountMigrationBackup, "provider_account_migration_backups",
+     :worker_env}
   ]
 
   @doc "The `{resource, table, attribute}` triples swept and verified. Exposed for the drift-guard test."
