@@ -52,6 +52,12 @@ defmodule ArbiterWeb.SessionTranscriptControllerTest do
       assert conn.status == 404
     end
 
+    test "refuses an id that is not a session id at all", %{conn: conn} do
+      conn = get(conn, "/sessions/#{URI.encode_www_form("../../../etc/passwd")}/transcript")
+
+      assert conn.status == 404
+    end
+
     test "refuses an off-box peer", %{conn: conn, session: session} do
       :ok = Transcript.append(session.id, "secret output")
 

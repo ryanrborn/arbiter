@@ -31,30 +31,51 @@ defmodule ArbiterWeb.SessionTranscriptController do
   plug :require_loopback
 
   @doc "The raw PTY capture, verbatim — ANSI and all."
+  # The served path is never built from the URL. `session_id/1` accepts only a
+  # well-formed UUID *and* only one that is a real `Arbiter.Sessions.Session`
+  # row, and the path is then derived from the row's own id — so `..` never
+  # reaches `Path.join/2` (sobelow reads the dataflow as param -> path and
+  # flags the shape; the lookup is what makes it safe, and
+  # `ArbiterWeb.SessionTranscriptControllerTest` asserts the traversal attempt
+  # 404s).
+  @sobelow_skip ["Traversal.SendFile"]
   def raw(conn, %{"id" => id}) do
-    with {:ok, _session} <- Sessions.get(id),
-         path = Transcript.path_for(id),
+    with {:ok, session_id} <- session_id(id),
+         path = Transcript.path_for(session_id),
          true <- File.regular?(path) do
       conn
       |> put_resp_content_type("text/plain")
-      |> put_resp_header("content-disposition", ~s(attachment; filename="#{id}.raw"))
+      |> put_resp_header("content-disposition", ~s(attachment; filename="#{session_id}.raw"))
       |> send_file(200, path)
     else
-      _ -> not_found(conn, "no transcript for session #{id}")
+      _ -> not_found(conn, "no transcript for this session")
     end
   end
 
   @doc "The gzipped session JSONL, as archived on session end."
+  @sobelow_skip ["Traversal.SendFile"]
   def jsonl(conn, %{"id" => id}) do
-    with {:ok, _session} <- Sessions.get(id),
-         path = SessionArchive.path_for(id),
+    with {:ok, session_id} <- session_id(id),
+         path = SessionArchive.path_for(session_id),
          true <- File.regular?(path) do
       conn
       |> put_resp_content_type("application/gzip")
-      |> put_resp_header("content-disposition", ~s(attachment; filename="#{id}.jsonl.gz"))
+      |> put_resp_header("content-disposition", ~s(attachment; filename="#{session_id}.jsonl.gz"))
       |> send_file(200, path)
     else
-      _ -> not_found(conn, "no archived session JSONL for session #{id}")
+      _ -> not_found(conn, "no archived session JSONL for this session")
+    end
+  end
+
+  # The id of a session that exists, or nothing. Both halves matter: the UUID
+  # cast keeps anything path-shaped away from the lookup, and the lookup is
+  # what the file path is then built from.
+  defp session_id(id) when is_binary(id) do
+    with {:ok, uuid} <- Ecto.UUID.cast(id),
+         {:ok, session} <- Sessions.get(uuid) do
+      {:ok, session.id}
+    else
+      _ -> :error
     end
   end
 
