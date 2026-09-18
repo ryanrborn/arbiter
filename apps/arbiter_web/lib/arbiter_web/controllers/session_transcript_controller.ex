@@ -1,33 +1,104 @@
 defmodule ArbiterWeb.SessionTranscriptController do
   @moduledoc """
-  Downloads a coordinator session's phase 9 archive (`Arbiter.Worker.
-  SessionArchive`) — the durable, redacted copy of the session's own Claude
-  Code JSONL. bd-cvfjms: what the issue detail page's "Transcript" link
-  points at, so a refine session's conversation stays citable after the
-  session itself is gone and the dock has nothing left to replay.
+  The whole of a finished session's artefacts, for the operator who wants
+  more than the dock shows (bd-3tf4oo).
 
-  Not a LiveView page — `ArbiterWeb.Router`'s `/sessions` scope deliberately
-  has no `/sessions/:id` (phase 3 of the session dock moved every per-session
-  control into the dock window). This is a plain file download, not a page,
-  so it sits outside that rule the same way any other attachment route would.
+  The dock replays a **bounded tail** of the raw transcript
+  (`Arbiter.Sessions.TranscriptReplay`) — a 100 MB file is not something to
+  push into xterm. This is where the rest of it lives: `:raw` serves the
+  captured PTY stream verbatim, and `:jsonl` serves the session JSONL
+  `Arbiter.Worker.SessionArchive` wrote on session end, decompressed, which is
+  what the dock's "transcript unavailable" state links to when the raw stream
+  is gone but the archive is not, and what the issue detail page's
+  "Transcript" link points at for a refine session (bd-cvfjms).
+
+  ## Loopback only
+
+  Both files are the session's screen and its agent transcript — redacted on
+  write, but still the most sensitive bytes the dashboard can hand out. They
+  are served under the same rule the terminal socket applies (§10.4,
+  `ArbiterWeb.SessionSocket`): a peer on this box, or nothing. There is no
+  token path here on purpose; off-box access to a session is Remote Control's
+  problem (§8), and a download URL is exactly the sort of thing that gets
+  pasted somewhere it should not be.
   """
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Sessions
+  alias Arbiter.Sessions.Transcript
   alias Arbiter.Worker.SessionArchive
 
-  def download(conn, %{"id" => id}) do
-    with {:ok, id} <- Ecto.UUID.cast(id),
-         {:ok, jsonl} <- SessionArchive.read(id) do
+  plug :require_loopback
+
+  @doc "The raw PTY capture, verbatim — ANSI and all."
+  # The served path is never built from the URL. `session_id/1` accepts only a
+  # well-formed UUID *and* only one that is a real `Arbiter.Sessions.Session`
+  # row, and the path is then derived from the row's own id — so `..` never
+  # reaches `Path.join/2`, and `ArbiterWeb.SessionTranscriptControllerTest`
+  # asserts that a traversal attempt 404s. Annotated on the two functions that
+  # earn it rather than added to `.sobelow-conf`'s `ignore` list, so a new
+  # `send_file/3` anywhere else in the app still fails the scan.
+  # sobelow_skip ["Traversal.SendFile"]
+  def raw(conn, %{"id" => id}) do
+    with {:ok, session_id} <- session_id(id),
+         path = Transcript.path_for(session_id),
+         true <- File.regular?(path) do
+      conn
+      |> put_resp_content_type("text/plain")
+      |> put_resp_header("content-disposition", ~s(attachment; filename="#{session_id}.raw"))
+      |> send_file(200, path)
+    else
+      _ -> not_found(conn, "no transcript for this session")
+    end
+  end
+
+  @doc """
+  The session JSONL archived on session end, decompressed.
+
+  Read whole rather than streamed off disk: the archive is gzipped on disk and
+  a reader wants the ndjson, not a `.gz` to unpack by hand. `SessionArchive`
+  notes the largest observed archive is single-digit MB, so the whole-file read
+  is affordable; `:raw`, which really can be huge, streams with `send_file/3`.
+  """
+  def jsonl(conn, %{"id" => id}) do
+    with {:ok, session_id} <- session_id(id),
+         {:ok, ndjson} <- SessionArchive.read(session_id) do
       conn
       |> put_resp_content_type("application/x-ndjson")
-      |> put_resp_header("content-disposition", ~s(attachment; filename="#{id}.jsonl"))
-      |> send_resp(200, jsonl)
+      |> put_resp_header("content-disposition", ~s(attachment; filename="#{session_id}.jsonl"))
+      |> send_resp(200, ndjson)
     else
-      _ ->
-        conn
-        |> put_status(:not_found)
-        |> text("transcript not found")
+      _ -> not_found(conn, "no archived session JSONL for this session")
     end
+  end
+
+  # The id of a session that exists, or nothing. Both halves matter: the UUID
+  # cast keeps anything path-shaped away from the lookup, and the lookup is
+  # what the file path is then built from.
+  defp session_id(id) when is_binary(id) do
+    with {:ok, uuid} <- Ecto.UUID.cast(id),
+         {:ok, session} <- Sessions.get(uuid) do
+      {:ok, session.id}
+    else
+      _ -> :error
+    end
+  end
+
+  defp require_loopback(conn, _opts) do
+    if ArbiterWeb.Loopback.loopback?(conn.remote_ip) do
+      conn
+    else
+      conn
+      |> put_resp_content_type("text/plain")
+      |> send_resp(403, "session transcripts are served to a loopback peer only")
+      |> halt()
+    end
+  end
+
+  defp not_found(conn, detail) do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(404, detail)
   end
 end

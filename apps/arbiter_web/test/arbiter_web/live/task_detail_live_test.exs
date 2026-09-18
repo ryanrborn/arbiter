@@ -2561,7 +2561,14 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#panel-refine-session", "promoted")
-      assert has_element?(view, "#refine-session-transcript-link")
+
+      # The archived JSONL, not the raw PTY stream the dock replays
+      # (bd-3tf4oo gave `/sessions/:id/transcript` to the raw capture).
+      assert has_element?(
+               view,
+               ~s(#refine-session-transcript-link[href="/sessions/#{session.id}/jsonl"])
+             )
+
       assert has_element?(view, "#refine-session-cost", "$3.25")
     end
 
