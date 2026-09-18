@@ -1,0 +1,298 @@
+defmodule Arbiter.Accounts.MigrateTest do
+  @moduledoc """
+  Phase P2 (`docs/provider-account-design.md` §7.2–§7.5): applying an
+  operator-edited census plan.
+
+  These drive `Arbiter.Accounts.Migrate` directly (the mix task's own coverage
+  lives in `Mix.Tasks.Arbiter.Accounts.MigrateTest`). The invariants under test
+  are the ones §7.3/§7.5 name: only allowlisted keys move, a Vault-encrypted
+  backup row is written *before* the workspace is touched, and the whole thing
+  is idempotent enough to re-run after a partial failure.
+  """
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Accounts.Census
+  alias Arbiter.Accounts.Migrate
+  alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Accounts.ProviderAccountMigrationBackup, as: Backup
+  alias Arbiter.Accounts.ProviderCredential
+  alias Arbiter.Accounts.WorkspaceProviderAccount
+  alias Arbiter.Tasks.Workspace
+
+  @token "sk-ant-oat01-qZ7fLx2NvUwJh4Tk9RmDbYcE6sApGnX1"
+  @openai "sk-proj-9mXvQ2rTzKpLbN4wYhJdCgA6eSuF8oRi"
+
+  defp seed!(name, env) do
+    worker_env = Map.new(env, fn {k, v} -> {k, %{"value" => v, "secret" => true}} end)
+    Ash.create!(Workspace, %{name: name, worker_env: worker_env})
+  end
+
+  defp plan_for_current_install do
+    Census.run() |> Census.plan()
+  end
+
+  defp reload!(workspace), do: Ash.get!(Workspace, workspace.id)
+
+  describe "apply_plan/2 — accounts, credentials and join rows (acceptance 1)" do
+    test "creates the rows the plan describes" do
+      ws = seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token, "LOG_LEVEL" => "debug"})
+
+      {:ok, result} = Migrate.apply_plan(plan_for_current_install())
+
+      assert [account] = Ash.read!(ProviderAccount)
+      assert account.provider == :claude
+      assert account.slug == "claude-1"
+      # §4.4: the migration default is no account ceiling.
+      assert account.max_concurrent == nil
+
+      assert [credential] = Ash.read!(ProviderCredential)
+      assert credential.provider_account_id == account.id
+      assert credential.env_var == "CLAUDE_CODE_OAUTH_TOKEN"
+      assert credential.kind == :oauth_token
+      assert credential.fingerprint == Census.fingerprint(@token)
+      assert credential.active
+      assert ProviderCredential.secret(credential) == @token
+
+      assert [join] = Ash.read!(WorkspaceProviderAccount)
+      assert join.workspace_id == ws.id
+      assert join.provider_account_id == account.id
+      assert join.provider == :claude
+
+      assert result.accounts_created == 1
+      assert result.credentials_created == 1
+      assert result.workspaces_attached == 1
+    end
+
+    test "removes only the allowlisted keys from worker_env (acceptance 1, 6)" do
+      ws =
+        seed!("default", %{
+          "CLAUDE_CODE_OAUTH_TOKEN" => @token,
+          "LOG_LEVEL" => "debug",
+          "GITHUB_TOKEN" => "ghp_not_a_provider_credential",
+          "MY_SECRET" => "hunter2"
+        })
+
+      {:ok, _} = Migrate.apply_plan(plan_for_current_install())
+
+      env = ws |> reload!() |> Workspace.worker_env_map()
+
+      refute Map.has_key?(env, "CLAUDE_CODE_OAUTH_TOKEN")
+
+      assert env == %{
+               "LOG_LEVEL" => "debug",
+               "GITHUB_TOKEN" => "ghp_not_a_provider_credential",
+               "MY_SECRET" => "hunter2"
+             }
+
+      # worker_env_meta is kept in lockstep by MergeWorkerEnv (§7.3).
+      names = ws |> reload!() |> Workspace.worker_env_keys() |> Enum.map(& &1.name)
+      assert Enum.sort(names) == ["GITHUB_TOKEN", "LOG_LEVEL", "MY_SECRET"]
+    end
+
+    test "one account per distinct fingerprint, across providers and workspaces" do
+      a = seed!("alpha", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+      b = seed!("beta", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token, "OPENAI_API_KEY" => @openai})
+
+      {:ok, result} = Migrate.apply_plan(plan_for_current_install())
+
+      accounts = ProviderAccount |> Ash.read!() |> Enum.sort_by(& &1.slug)
+      assert Enum.map(accounts, & &1.slug) == ["claude-1", "codex-1"]
+      assert result.accounts_created == 2
+
+      joins = WorkspaceProviderAccount |> Ash.read!()
+      assert length(joins) == 3
+
+      claude = Enum.find(accounts, &(&1.provider == :claude))
+
+      assert joins
+             |> Enum.filter(&(&1.provider_account_id == claude.id))
+             |> Enum.map(& &1.workspace_id)
+             |> Enum.sort() == Enum.sort([a.id, b.id])
+    end
+
+    test "is idempotent — re-applying the same plan creates nothing new" do
+      seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+      plan = plan_for_current_install()
+
+      {:ok, _} = Migrate.apply_plan(plan)
+      {:ok, second} = Migrate.apply_plan(plan)
+
+      assert second.accounts_created == 0
+      assert second.credentials_created == 0
+      assert second.workspaces_attached == 0
+      assert length(Ash.read!(ProviderAccount)) == 1
+      assert length(Ash.read!(ProviderCredential)) == 1
+      assert length(Ash.read!(WorkspaceProviderAccount)) == 1
+    end
+  end
+
+  describe "apply_plan/2 — the backup row (acceptance 2)" do
+    test "writes an encrypted backup of the pre-change worker_env" do
+      ws = seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token, "LOG_LEVEL" => "debug"})
+
+      {:ok, result} = Migrate.apply_plan(plan_for_current_install())
+
+      assert [backup] = Ash.read!(Backup)
+      assert backup.workspace_id == ws.id
+      assert backup.migration_id == result.migration_id
+      assert backup.removed_keys == ["CLAUDE_CODE_OAUTH_TOKEN"]
+      assert backup.restored_at == nil
+
+      assert Backup.worker_env_map(backup) == %{
+               "CLAUDE_CODE_OAUTH_TOKEN" => @token,
+               "LOG_LEVEL" => "debug"
+             }
+
+      assert backup.worker_env_meta == %{
+               "CLAUDE_CODE_OAUTH_TOKEN" => %{"secret" => true},
+               "LOG_LEVEL" => %{"secret" => true}
+             }
+    end
+
+    test "no plaintext secret survives in any TEXT column (§7.4's sweep)" do
+      seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+
+      {:ok, _} = Migrate.apply_plan(plan_for_current_install())
+
+      needle = String.slice(@token, 0, 12)
+
+      for table <- ~w(provider_accounts provider_credentials workspace_provider_accounts
+                      provider_account_migration_backups workspaces) do
+        %{rows: rows} = Arbiter.Repo.query!("SELECT * FROM #{table}")
+
+        dump =
+          rows
+          |> List.flatten()
+          |> Enum.map_join(" ", fn
+            value when is_binary(value) -> value
+            value -> inspect(value)
+          end)
+
+        refute String.contains?(dump, needle), "#{table} contains the plaintext secret"
+      end
+    end
+  end
+
+  describe "apply_plan/2 — refusals" do
+    test "refuses a plan whose credential fingerprint no longer matches the workspace" do
+      seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+      plan = plan_for_current_install()
+
+      tampered =
+        update_in(plan, ["accounts", Access.at(0), "credentials", Access.at(0)], fn credential ->
+          Map.put(credential, "fingerprint", String.duplicate("0", 64))
+        end)
+
+      assert {:error, message} = Migrate.apply_plan(tampered)
+      assert message =~ "fingerprint"
+      assert Ash.read!(ProviderAccount) == []
+    end
+
+    test "refuses to move a key that is not on the §7.3 allowlist" do
+      seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token, "GITHUB_TOKEN" => "ghp_abc"})
+      plan = plan_for_current_install()
+
+      tampered =
+        update_in(plan, ["accounts", Access.at(0), "workspaces", Access.at(0)], fn workspace ->
+          Map.put(workspace, "env_key", "GITHUB_TOKEN")
+        end)
+
+      assert {:error, message} = Migrate.apply_plan(tampered)
+      assert message =~ "GITHUB_TOKEN"
+      assert message =~ "allowlist"
+    end
+
+    test "refuses a document that is not an accounts plan" do
+      assert {:error, message} = Migrate.apply_plan(%{"kind" => "something.else", "version" => 1})
+      assert message =~ "arbiter.accounts.plan"
+    end
+
+    test "refuses a plan version it does not understand" do
+      seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+      plan = plan_for_current_install() |> Map.put("version", 99)
+
+      assert {:error, message} = Migrate.apply_plan(plan)
+      assert message =~ "version"
+    end
+  end
+
+  describe "apply_plan/2 — dry run" do
+    test "writes nothing and reports what it would do" do
+      ws = seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+
+      {:ok, result} = Migrate.apply_plan(plan_for_current_install(), dry_run?: true)
+
+      assert result.dry_run?
+      assert result.accounts_created == 1
+      assert Ash.read!(ProviderAccount) == []
+      assert Ash.read!(Backup) == []
+      assert Map.has_key?(Workspace.worker_env_map(reload!(ws)), "CLAUDE_CODE_OAUTH_TOKEN")
+    end
+  end
+
+  describe "rollback/2 (acceptance 3)" do
+    test "restores the removed keys through MergeWorkerEnv" do
+      ws = seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token, "LOG_LEVEL" => "debug"})
+
+      {:ok, %{migration_id: migration_id}} = Migrate.apply_plan(plan_for_current_install())
+      refute Map.has_key?(Workspace.worker_env_map(reload!(ws)), "CLAUDE_CODE_OAUTH_TOKEN")
+
+      {:ok, result} = Migrate.rollback(migration_id: migration_id)
+
+      assert result.restored == 1
+
+      assert Workspace.worker_env_map(reload!(ws)) == %{
+               "CLAUDE_CODE_OAUTH_TOKEN" => @token,
+               "LOG_LEVEL" => "debug"
+             }
+
+      assert [backup] = Ash.read!(Backup)
+      assert backup.restored_at
+
+      # Re-running is a no-op: a restored backup is not applied twice.
+      {:ok, again} = Migrate.rollback(migration_id: migration_id)
+      assert again.restored == 0
+    end
+
+    test "leaves keys the operator added after the migration alone" do
+      ws = seed!("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+      {:ok, %{migration_id: migration_id}} = Migrate.apply_plan(plan_for_current_install())
+
+      ws
+      |> reload!()
+      |> Ash.update!(%{worker_env: %{"ADDED_LATER" => %{"value" => "1", "secret" => false}}})
+
+      {:ok, _} = Migrate.rollback(migration_id: migration_id)
+
+      assert Workspace.worker_env_map(reload!(ws)) == %{
+               "CLAUDE_CODE_OAUTH_TOKEN" => @token,
+               "ADDED_LATER" => "1"
+             }
+    end
+
+    test "errors when there is no backup for the given migration id" do
+      assert {:error, message} = Migrate.rollback(migration_id: "nope")
+      assert message =~ "nope"
+    end
+  end
+
+  describe "Release N is additive (acceptance 4)" do
+    test ":provider_accounts_enabled exists and defaults to false" do
+      assert Arbiter.Accounts.enabled?() == false
+      assert Application.get_env(:arbiter, :provider_accounts_enabled) == false
+    end
+
+    test "no read path consults the new tables yet" do
+      for path <- [
+            "lib/arbiter/agents/claude/config_dir.ex",
+            "lib/arbiter/agents/gemini/config_dir.ex",
+            "lib/arbiter/worker/worker_env.ex"
+          ] do
+        source = File.read!(Path.join(File.cwd!(), path))
+
+        refute source =~ "Arbiter.Accounts",
+               "#{path} reads the provider-account tables; that is P3, not this release (§7.5)"
+      end
+    end
+  end
+end
