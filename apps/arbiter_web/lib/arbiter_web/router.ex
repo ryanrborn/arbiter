@@ -60,6 +60,11 @@ defmodule ArbiterWeb.Router do
 
     get("/about", PageController, :home)
 
+    # A file download, not a page — sits outside the "no /sessions/:id" rule
+    # the live_session comment below documents (bd-cvfjms: the issue detail
+    # page's transcript link).
+    get("/sessions/:id/transcript", SessionTranscriptController, :download)
+
     live_session :default,
       # bd-dlc136: every route here is wrapped in the live layout, whose only
       # job is to render the sticky session dock. It has to be a layout the

@@ -167,6 +167,29 @@ defmodule Arbiter.Sessions.Refine do
   end
 
   @doc """
+  The most recent session bound to `issue_id`, live or ended — the read-only
+  counterpart to `live_session/1` for once the conversation is over (bd-cvfjms:
+  the issue detail page's transcript link + cost reads this, not
+  `live_session/1`, since by the time there's anything to show the session has
+  usually ended).
+
+  `nil` for an issue that was never refined, or was refined before
+  `issue_id` bound sessions existed.
+  """
+  @spec latest_session(String.t() | nil) :: Session.t() | nil
+  def latest_session(nil), do: nil
+  def latest_session(""), do: nil
+
+  def latest_session(issue_id) when is_binary(issue_id) do
+    Session
+    |> Ash.Query.filter(issue_id == ^issue_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  end
+
+  @doc """
   The session's display name — `Refine <id>: <title>`.
 
   Passed through to `claude --name` at launch, so the dock's title bar, the
