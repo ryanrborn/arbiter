@@ -153,6 +153,7 @@ defmodule Arbiter.Accounts.Migrate do
     * `:migration_id` — every un-restored backup one `apply_plan/2` run wrote.
     * `:backup_id` — one specific backup row.
     * `:workspace` — a workspace name or id; its most recent un-restored backup.
+    * `:all` — every un-restored backup, whichever run wrote it.
 
   ## Other options
 
@@ -912,8 +913,14 @@ defmodule Arbiter.Accounts.Migrate do
       reference = Keyword.get(opts, :workspace) ->
         select_workspace_backup(reference)
 
+      Keyword.get(opts, :all, false) ->
+        case Backup |> Ash.Query.filter(is_nil(restored_at)) |> Ash.read!() do
+          [] -> {:error, "no un-restored provider-account migration backups"}
+          backups -> {:ok, Enum.sort_by(backups, & &1.created_at, DateTime)}
+        end
+
       true ->
-        {:error, "give one of --migration-id, --backup-id or --workspace"}
+        {:error, "give one of --migration-id, --backup-id, --workspace or --all"}
     end
   end
 

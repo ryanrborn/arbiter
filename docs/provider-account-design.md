@@ -569,6 +569,29 @@ Three releases, with exactly one point of no return, and it is late:
 Splitting the read flip from the destructive step is what makes N+1 free to
 reverse. Do not collapse them to save a release.
 
+**What P2 actually shipped (bd-77j2if), and how it differs from the three
+releases above.** The P2 ticket folded the `worker_env` removal, the encrypted
+backup row and `mix arbiter.accounts.rollback` into a single release — matching
+the P2 row of §10's phase table ("move allowlisted keys, encrypted backup row,
+`mix arbiter.accounts.rollback`") rather than the N / N+1 / N+2 split written
+here. The properties that made the split worth having are preserved a different
+way:
+
+* **Reversibility is per-workspace and immediate, not per-release.** The backup
+  row is written before the blob is touched, and `mix arbiter.accounts.rollback
+  --migration-id <id>` merges it straight back through `MergeWorkerEnv`. That
+  is N+2's restore path, available from the first release rather than the third.
+* **Nothing reads the new tables.** `:provider_accounts_enabled` is `false` and
+  no read path consults it, so dropping `provider_accounts`,
+  `provider_credentials`, `workspace_provider_accounts` and
+  `provider_account_migration_backups` is still a lossless rollback of the
+  schema half.
+* **The cost of the fold is real and is the operator's to absorb**: between P2
+  and P3 a workspace whose key was moved no longer supplies it to a spawned
+  worker from the blob. `mix arbiter.accounts.migrate` says so in its own
+  output and prints the rollback command. Run it on an install only when P3 is
+  close behind, or when the credential reaches workers by another route.
+
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
 The key is considered exposed (printed into a transcript, 2026-09-12). The
