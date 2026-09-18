@@ -99,6 +99,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.CircuitBreaker
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
+  alias Arbiter.Reviews.GateActivity
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Worker
@@ -324,7 +325,38 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp dispatch_candidate?(%{number: pr_number} = mr, state) do
     not backing_off?(pr_number, state) and
       author_allowed?(mr, state.workspace) and
-      not deduped?(pr_number, state.workspace_id)
+      not deduped?(pr_number, state.workspace_id) and
+      not review_gate_holds?(pr_number, state)
+  end
+
+  # bd-bq8c8a: the ReviewGate owns the branch while it is running, and nothing
+  # else may commit to it.
+  #
+  # `author_allowed?/2` is scoped to the fleet identity precisely so patrol
+  # answers review threads on the fleet's OWN PRs — which is also every PR the
+  # gate could be holding. On 2026-09-17 that overlap fired: two inline Copilot
+  # comments landed on a fleet PR whose task was still at
+  # `:awaiting_review_gate`, patrol filed a follow-up, and its fix worker
+  # pushed to `origin/<branch>` twenty seconds before the gate's round-1
+  # implementer committed on the worktree. The gate's push was rejected
+  # `:diverged` and the task parked `head_not_pushed`.
+  #
+  # The comments are HELD, not dropped: nothing is written, nothing is
+  # consumed, and the threads stay unresolved — so the first tick after the
+  # gate converges files exactly the follow-up this one declined to. Last in
+  # the `and` chain so a deduped PR (the steady state) never pays for the read.
+  defp review_gate_holds?(pr_number, state) do
+    case GateActivity.engaged(state.workspace_id, pr_number, state.repo) do
+      :clear ->
+        false
+
+      {:gated, _reason, _task} = gated ->
+        Logger.info(
+          "PRPatrol: holding #{state.repo}##{pr_number} — #{GateActivity.describe(gated)}"
+        )
+
+        true
+    end
   end
 
   # One batched forge request for every candidate's trigger signals (bd-3byp1n),
