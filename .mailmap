@@ -1,0 +1,6 @@
+# Canonical identity for this repository. Any commit that lands under a stray
+# author or committer email collapses to this one in `git log`, `git shortlog`
+# and `git blame` without needing another history rewrite.
+Ryan Born <ryanrborn@gmail.com>
+Ryan Born <ryanrborn@gmail.com> <3237598+ryanrborn@users.noreply.github.com>
+Ryan Born <ryanrborn@gmail.com> <rybor16@gmail.com>
