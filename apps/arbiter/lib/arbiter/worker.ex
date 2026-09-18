@@ -4168,30 +4168,31 @@ defmodule Arbiter.Worker do
           "Detail: #{inspect(other)}."
       end
 
-    denial_blurb =
-      case Map.get(meta || %{}, :denied_command) do
-        cmd when is_binary(cmd) and cmd != "" ->
-          "\n\nbd-25ivqe: this looks like a strict-policy bootstrap failure, not a " <>
-            "missing deliverable — the worker's `#{cmd}` call was auto-denied under " <>
-            ":strict permissions before it could do any work. Check the workspace's " <>
-            "`permissions.allow` for a `command(#{cmd})` rule."
-
-        _ ->
-          ""
-      end
-
     """
     bd-5lc99r notes gate tripped for task #{task_id}: this is a `task`-type
     directive whose deliverable is a findings summary in `notes`, but `notes`
     is blank and `arb done` was signalled.
 
-    #{detail_blurb}#{denial_blurb}
+    #{detail_blurb}#{notes_gate_denial_blurb(meta)}
 
     The directive cannot close without its findings. Re-dispatch it and ensure
     the worker writes its results to `notes` via the `task_update_progress` MCP
     tool before completing.
     """
     |> String.trim()
+  end
+
+  defp notes_gate_denial_blurb(meta) do
+    case Map.get(meta || %{}, :denied_command) do
+      cmd when is_binary(cmd) and cmd != "" ->
+        "\n\nbd-25ivqe: this looks like a strict-policy bootstrap failure, not a " <>
+          "missing deliverable — the worker's `#{cmd}` call was auto-denied under " <>
+          ":strict permissions before it could do any work. Check the workspace's " <>
+          "`permissions.allow` for a `command(#{cmd})` rule."
+
+      _ ->
+        ""
+    end
   end
 
   defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary)
