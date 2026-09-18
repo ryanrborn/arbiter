@@ -38,7 +38,9 @@ defmodule Arbiter.Boot.ConfigMigratorTest do
       assert [result] = ConfigMigrator.migrate_rig_paths()
       assert result.workspace == "legacy"
       assert result.status == :migrated
-      assert result.repos == ["tonic", "apex-specs"]
+      # `:repos` is documented as the SORTED repo list (`Enum.sort` in
+      # `ConfigMigrator.plan/1`), so the order is alphabetical, not the map's.
+      assert result.repos == ["apex-specs", "tonic"]
 
       config = reload!(ws).config
 
