@@ -87,6 +87,27 @@ defmodule Arbiter.Sessions.RefineLifecycleTest do
       assert ended.end_reason == "promoted"
     end
 
+    test "ends the session when the session's own task_promote call revokes its in-flight token",
+         %{issue: issue} do
+      start_subscriber()
+      session = open_refine_session!(issue)
+
+      scope = %Arbiter.MCP.Scope{
+        tier: :refine,
+        workspace_id: issue.workspace_id,
+        issue_id: issue.id,
+        session_id: session.id
+      }
+
+      assert {:ok, _result} =
+               Arbiter.MCP.Tools.Task.task_promote(scope, %{"id" => issue.id})
+
+      ended = await_ended(session.id)
+      assert ended
+      assert ended.end_reason == "promoted"
+      refute is_nil(ended.mcp_token_revoked_at)
+    end
+
     test "promoting an already-refined issue again does not re-end an already-ended session",
          %{issue: issue} do
       start_subscriber()

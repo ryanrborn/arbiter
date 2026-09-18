@@ -900,6 +900,14 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> assign(:refine_session, session)
     |> assign(:refine_session_archived?, session != nil and SessionArchive.archived?(session.id))
     |> assign(:refine_session_usage, session && SessionUsage.for_session(session))
+  rescue
+    e ->
+      Logger.warning("Failed to resolve refine session for #{id}: #{inspect(e)}")
+
+      socket
+      |> assign(:refine_session, nil)
+      |> assign(:refine_session_archived?, false)
+      |> assign(:refine_session_usage, nil)
   end
 
   defp refresh_refine_session(socket) do

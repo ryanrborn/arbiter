@@ -54,4 +54,10 @@ defmodule ArbiterWeb.SessionTranscriptControllerTest do
     conn = get(conn, ~p"/sessions/#{Ash.UUID.generate()}/transcript")
     assert response(conn, 404)
   end
+
+  test "GET /sessions/:id/transcript 404s on a path-traversal id instead of reading the filesystem",
+       %{conn: conn} do
+    conn = get(conn, "/sessions/..%2F..%2F..%2Fetc%2Fpasswd/transcript")
+    assert response(conn, 404)
+  end
 end

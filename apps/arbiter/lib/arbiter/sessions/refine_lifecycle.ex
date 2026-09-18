@@ -29,9 +29,11 @@ defmodule Arbiter.Sessions.RefineLifecycle do
   *this* issue) is silently a no-op. That is what keeps promoting a **child**
   issue from ending the session that filed it: a child has its own `id`, so
   its `:updated` event never matches the bound issue's `live_session/1`
-  lookup. The refine doctrine already tells the agent to promote children and
-  the bound issue together, last — this module doesn't need to enforce an
-  order, because only the bound issue's own promotion can ever be the trigger.
+  lookup. `Arbiter.Sessions.RefineDoctrine` tells the agent to promote the
+  bound issue **last** of the batch, because promoting it ends this session
+  and revokes its token immediately — but this module itself does not
+  enforce that order; it can only end the session once the bound issue's own
+  promotion actually lands, whenever that happens to be.
 
   ## Why `:promote_to_ready` broadcasts post-commit
 
@@ -39,18 +41,21 @@ defmodule Arbiter.Sessions.RefineLifecycle do
   `after_transaction` hook (matching `:close`'s own reasoning, stated on that
   action: a separate-connection subscriber must see the committed row). This
   module writes a fallback summary note to the same issue row it just read
-  off the broadcast (`ensure_summary/1`) — reading and writing that row from
+  off the broadcast (`ensure_summary/2`) — reading and writing that row from
   this process, before the promoting transaction has committed, would be the
   exact race `:close`'s comment warns about.
 
   ## The refinement summary fallback
 
   The refine doctrine instructs the agent to write a short summary via
-  `task_update`'s `notes` field before promoting. An agent that skips this
-  (the conversation ran out of context, an ended session, an operator
-  promoting from the dashboard without ever opening a refine session) must
-  not leave the issue with nothing — so `ensure_summary/1` writes a plain
-  system note only when `notes` is still blank at end time. It never
+  `task_update`'s `notes` field before promoting. An agent that promotes
+  without ever writing one (it ran out of context, or just forgot) must not
+  leave the issue with nothing — so `ensure_summary/2` writes a plain system
+  note only when `notes` is still blank at end time. This only runs when a
+  *live* refine session actually ends here; an issue promoted with no live
+  refine session bound to it (e.g. from the dashboard, long after any refine
+  session on it had already ended) gets no note from this module at all. It
+  never
   overwrites a summary the agent did write.
 
   ## Gating

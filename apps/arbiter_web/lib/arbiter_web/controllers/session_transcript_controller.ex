@@ -17,14 +17,14 @@ defmodule ArbiterWeb.SessionTranscriptController do
   alias Arbiter.Worker.SessionArchive
 
   def download(conn, %{"id" => id}) do
-    case SessionArchive.read(id) do
-      {:ok, jsonl} ->
-        conn
-        |> put_resp_content_type("application/x-ndjson")
-        |> put_resp_header("content-disposition", ~s(attachment; filename="#{id}.jsonl"))
-        |> send_resp(200, jsonl)
-
-      {:error, _reason} ->
+    with {:ok, _} <- Ecto.UUID.cast(id),
+         {:ok, jsonl} <- SessionArchive.read(id) do
+      conn
+      |> put_resp_content_type("application/x-ndjson")
+      |> put_resp_header("content-disposition", ~s(attachment; filename="#{id}.jsonl"))
+      |> send_resp(200, jsonl)
+    else
+      _ ->
         conn
         |> put_status(:not_found)
         |> text("transcript not found")
