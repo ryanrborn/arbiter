@@ -10,12 +10,24 @@ defmodule Arbiter.Agents.CredentialWatchdogTest.FakeAdapterB do
   @moduledoc false
 end
 
+# bd-svczq4: a probe that always outruns the watchdog. `Arbiter.Agents.Preflight`
+# answers a timeout with `{:warn, reason}` — advisory, never evidence about the
+# credentials — and this adapter is how the Watchdog's handling of that verdict
+# is driven deterministically, without a real CLI.
+defmodule Arbiter.Agents.CredentialWatchdogTest.SlowProbeAdapter do
+  @moduledoc false
+  def provider, do: "slowprobe"
+  def spawn_env(_opts \\ []), do: []
+  def auth_probe_argv(_opts \\ []), do: {:ok, ["sh", "-c", "sleep 30"]}
+end
+
 defmodule Arbiter.Agents.CredentialWatchdogTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.CredentialWatchdogTest.FakeAdapterA
   alias Arbiter.Agents.CredentialWatchdogTest.FakeAdapterB
+  alias Arbiter.Agents.CredentialWatchdogTest.SlowProbeAdapter
   alias Arbiter.Settings
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
@@ -170,6 +182,60 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
 
       :ok = CredentialWatchdog.reset(pid)
       refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+    end
+  end
+
+  # ---- a probe timeout is advisory, never a credential verdict (bd-svczq4) --
+
+  describe "probe timeout ({:warn, reason})" do
+    setup do
+      previous = Application.get_env(:arbiter, Arbiter.Agents.Preflight)
+      Application.put_env(:arbiter, Arbiter.Agents.Preflight, timeout_ms: 150)
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:arbiter, Arbiter.Agents.Preflight, previous)
+        else
+          Application.delete_env(:arbiter, Arbiter.Agents.Preflight)
+        end
+      end)
+
+      :ok
+    end
+
+    # Enabled (a disabled Watchdog's `:check` is a no-op), but with intervals
+    # long enough that only the explicit `send(pid, :check)` below ever ticks it.
+    defp start_watchdog_live(adapters) do
+      start_watchdog(
+        adapters: adapters,
+        enabled: true,
+        interval_ms: 60_000,
+        recovery_interval_ms: 60_000
+      )
+    end
+
+    test "a slow probe does not mark the adapter expired" do
+      pid = start_watchdog_live([SlowProbeAdapter])
+
+      send(pid, :check)
+      _ = :sys.get_state(pid)
+
+      refute CredentialWatchdog.expired?(SlowProbeAdapter, pid)
+    end
+
+    test "a slow probe does not recover an adapter a worker just flagged" do
+      pid = start_watchdog_live([SlowProbeAdapter])
+
+      :ok = CredentialWatchdog.mark_expired(SlowProbeAdapter, auth_expired_reason(), pid)
+      assert_eventually(fn -> CredentialWatchdog.expired?(SlowProbeAdapter, pid) end)
+
+      # The probe times out rather than answering. That says nothing about the
+      # credentials, so the mark must survive it — a `{:warn, _}` treated as a
+      # healthy probe would silently clear a real expiry.
+      send(pid, :check)
+      _ = :sys.get_state(pid)
+
+      assert CredentialWatchdog.expired?(SlowProbeAdapter, pid)
     end
   end
 

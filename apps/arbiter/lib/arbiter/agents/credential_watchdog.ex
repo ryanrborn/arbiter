@@ -297,6 +297,20 @@ defmodule Arbiter.Agents.CredentialWatchdog do
           record_expiry(state, adapter, reason, :periodic_probe)
         end
 
+      # bd-svczq4: the probe outran its own watchdog. That is the one outcome
+      # that says nothing about the credentials, so it is advisory only — it
+      # must neither mark the adapter expired (which would refuse every
+      # dispatch fleet-wide off a slow probe) nor count as a healthy probe and
+      # clear a mark a dying worker just set. Leave the state exactly as it is.
+      # See the decision section in `Arbiter.Agents.Preflight`'s moduledoc.
+      {:warn, %StopReason{} = reason} ->
+        Logger.warning(
+          "CredentialWatchdog: #{adapter_name(adapter)} probe timed out, " <>
+            "leaving its state unchanged — #{reason.summary}"
+        )
+
+        state
+
       {:error, %StopReason{}} ->
         # Rate-limit, crash, or other non-auth failure — don't mark as
         # credential-expired. The periodic poll will keep running.

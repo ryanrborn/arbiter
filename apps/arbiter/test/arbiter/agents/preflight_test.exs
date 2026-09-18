@@ -57,15 +57,21 @@ defmodule Arbiter.Agents.PreflightTest do
       assert reason.summary =~ "not found"
     end
 
-    test "a hung probe is refused via the timeout path" do
-      assert {:error, reason} =
+    # bd-svczq4: a hung probe no longer *refuses* by default — a timeout is the
+    # one outcome that says nothing about the credentials, and a nondeterministic
+    # probe blocking valid work is what this ticket was filed about. It reports
+    # `{:warn, ...}` with its own category so the caller can log and proceed; see
+    # `Arbiter.Agents.PreflightProbeTest` for the `on_timeout: :refuse` lever.
+    test "a hung probe warns with a pre-flight-specific reason, not a worker stall" do
+      assert {:warn, reason} =
                Preflight.check(Claude,
                  probe_command: ["sh", "-c", "sleep 5"],
                  probe_env: [],
                  timeout_ms: 80
                )
 
-      assert reason.category == :stalled
+      assert reason.category == :preflight_timeout
+      refute reason.category == :stalled
     end
   end
 
