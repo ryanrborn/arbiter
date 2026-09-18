@@ -32,6 +32,27 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   known-expired the Watchdog polls at the shorter `:recovery_interval_ms` so it
   detects credential restoration promptly.
 
+  ## This is the only live probe left (bd-2jgs2h)
+
+  `Arbiter.Worker.Dispatch` used to run its own live CLI probe on every
+  dispatch and resume (`Arbiter.Worker.Dispatch.run_preflight/2`, via
+  `Arbiter.Agents.Preflight.check/2`) — ~760 billed probes/day fleet-wide
+  against 10 auth failures in 90 days, half of them mid-run and thus
+  unreachable by any pre-flight check anyway. That probe was retired
+  2026-09-18; `Dispatch`'s guard is now a free call to `expired?/1` on this
+  module's held state, never a live CLI call. See `docs/quota-and-auth.md`
+  for the full evidence and posture.
+
+  That makes this module's own periodic probe (below) the *only* live probe
+  left anywhere in the fleet, and an entirely optional one: the dispatch
+  guard, `mark_expired/2` (from a dying worker) and `mark_recovered/2` (from
+  the usage-poll signal) all keep working off held state with **no probing at
+  all**. Setting `:adapters` to `[]` — as already done for `gemini` here,
+  cutting it from ~180 probes/day to 26 — is a supported, intentional
+  low-cost posture, not a gap to route around. See "Configuration" below for
+  what you give up by doing so (organic detection + auto-recovery for
+  adapters nothing else watches).
+
   ## Configuration
 
   Resolution order for `:adapters`, `:interval_ms` and `:recovery_interval_ms`
