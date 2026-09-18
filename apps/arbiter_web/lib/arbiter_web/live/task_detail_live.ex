@@ -76,7 +76,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Worker.SessionArchive
   alias Arbiter.Workers.Run
+  alias Arbiter.Sessions.Refine
+  alias ArbiterWeb.SessionUsage
   alias ArbiterWeb.TaskForm
   require Ash.Query
   require Logger
@@ -869,6 +872,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> refresh_skills()
     |> refresh_messages()
     |> follow_messages()
+    |> refresh_refine_session()
   end
 
   defp refresh_task(socket) do
@@ -881,6 +885,28 @@ defmodule ArbiterWeb.TaskDetailLive do
     socket
     |> assign(:task, task)
     |> assign(:acceptance_items, acceptance_items(task && task.acceptance))
+  end
+
+  # bd-cvfjms: the refine session bound to this issue (if it was ever
+  # refined), plus whether its phase 9 archive exists and what it cost — the
+  # issue page's "Transcript" link + cost, so the refinement conversation
+  # stays citable once the session itself is gone. `Refine.latest_session/1`
+  # (not `live_session/1`) on purpose: by the time there's anything archived
+  # to show, the session has almost always ended.
+  defp refresh_refine_session(%{assigns: %{task: %Issue{id: id}}} = socket) when is_binary(id) do
+    session = Refine.latest_session(id)
+
+    socket
+    |> assign(:refine_session, session)
+    |> assign(:refine_session_archived?, session != nil and SessionArchive.archived?(session.id))
+    |> assign(:refine_session_usage, session && SessionUsage.for_session(session))
+  end
+
+  defp refresh_refine_session(socket) do
+    socket
+    |> assign(:refine_session, nil)
+    |> assign(:refine_session_archived?, false)
+    |> assign(:refine_session_usage, nil)
   end
 
   # bd-8j9i9p (design bd-9jj5lf §3): worker spend so far, the percentile range
@@ -2021,6 +2047,42 @@ defmodule ArbiterWeb.TaskDetailLive do
                       {@task.acceptance_waived}
                     </p>
                   </div>
+                </div>
+              </.panel>
+
+              <%!-- bd-cvfjms: once this issue has been through a refine session
+                 (live or long since ended), a link to its archived transcript
+                 and what it cost — so the refinement conversation stays
+                 citable after the session/dock is gone. --%>
+              <.panel
+                :if={@refine_session}
+                id="panel-refine-session"
+                title="REFINEMENT SESSION"
+                class="order-7"
+              >
+                <div class="flex flex-wrap items-center gap-3 text-[12.5px] text-[var(--text-secondary)]">
+                  <span :if={@refine_session.status == :ended}>
+                    Ended:
+                    <span class="font-[family-name:var(--font-mono)]">
+                      {@refine_session.end_reason || "—"}
+                    </span>
+                  </span>
+                  <span :if={@refine_session.status != :ended}>Session in progress</span>
+                  <.link
+                    :if={@refine_session_archived?}
+                    href={~p"/sessions/#{@refine_session.id}/transcript"}
+                    id="refine-session-transcript-link"
+                    class="link"
+                  >
+                    Transcript
+                  </.link>
+                  <span
+                    :if={@refine_session_usage}
+                    id="refine-session-cost"
+                    class="font-[family-name:var(--font-mono)]"
+                  >
+                    {ArbiterWeb.CoreComponents.Data.format_usd(@refine_session_usage.total_cost_usd)}
+                  </span>
                 </div>
               </.panel>
 

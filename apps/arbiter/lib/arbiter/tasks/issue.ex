@@ -487,10 +487,23 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria, []}
       change set_attribute(:refined, true)
 
-      change after_action(fn _, issue, _ ->
-               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
-               {:ok, issue}
-             end)
+      # `after_transaction` (post-commit), not `after_action`: bd-cvfjms's
+      # `Arbiter.Sessions.RefineLifecycle` reacts to this broadcast from a
+      # separate process/connection to end the bound refine session, and
+      # writes a fallback summary onto this same issue row if the agent left
+      # `notes` blank. Reading (and writing) that row from a separate
+      # connection before this transaction commits is exactly the race
+      # `:close`'s own `after_transaction` above exists to avoid.
+      change fn changeset, _context ->
+        Ash.Changeset.after_transaction(changeset, fn
+          _changeset, {:ok, issue} ->
+            Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+            {:ok, issue}
+
+          _changeset, error ->
+            error
+        end)
+      end
     end
   end
 

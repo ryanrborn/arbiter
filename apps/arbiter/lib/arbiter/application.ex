@@ -154,6 +154,14 @@ defmodule Arbiter.Application do
       # Inert in test (auto_start? false → does not subscribe). Placed after both
       # patrol supervisors + registries so they exist when it reacts.
       Arbiter.Workflows.PatrolLifecycle,
+      # Ends a refine session when its bound issue is promoted or closed
+      # (bd-cvfjms, child 4 of epic bd-cksar2): subscribes to the same
+      # `"tasks"` topic as `PatrolLifecycle` above and shares its
+      # `:auto_start_refineries` gate for the same reason — inert in test so
+      # a global instance never touches an issue/session outside whatever
+      # sandbox connection a given test allowed it. See
+      # Arbiter.Sessions.RefineLifecycle.
+      Arbiter.Sessions.RefineLifecycle,
       {Registry, keys: :unique, name: Arbiter.Workflows.MergedPRFinalizerRegistry},
       MergedPRFinalizerSupervisor,
       # Per-workspace quota-aware dispatch queues (bd-7cd38f). Holds dispatches
