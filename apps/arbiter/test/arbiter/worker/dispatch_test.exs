@@ -465,13 +465,14 @@ defmodule Arbiter.Worker.DispatchTest do
     test "the guard is skipped when start_claude is false (default path unaffected)", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no guard", workspace_id: ws.id})
 
-      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
-        category: :auth_expired,
-        summary: "401",
-        remediation: nil,
-        exit_status: 1,
-        signal: nil
-      })
+      :ok =
+        CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401",
+          remediation: nil,
+          exit_status: 1,
+          signal: nil
+        })
 
       eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
 
@@ -490,13 +491,14 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
 
-      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
-        category: :auth_expired,
-        summary: "401",
-        remediation: nil,
-        exit_status: 1,
-        signal: nil
-      })
+      :ok =
+        CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401",
+          remediation: nil,
+          exit_status: 1,
+          signal: nil
+        })
 
       eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
 
