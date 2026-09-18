@@ -323,6 +323,7 @@ defmodule Arbiter.MCP.Tools do
       finding_count: r.finding_count,
       reviewer_model: r.reviewer_model,
       reviewer_tier: r.reviewer_tier,
+      reviewer_provider: r.reviewer_provider,
       cost_usd: r.cost_usd,
       converged: r.converged,
       inserted_at: iso(r.inserted_at)

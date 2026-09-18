@@ -43,6 +43,11 @@ defmodule ArbiterWeb.Api.ReviewGateRoundController do
       findings: r.findings,
       finding_count: r.finding_count,
       reviewer_model: r.reviewer_model,
+      # bd-3hb4ih: which provider ran the pass. The only way to see a reviewer
+      # print-timeout rotation (one `:timed_out` row per provider that hit its
+      # CLI's own wall, then the verdict row naming the one that answered)
+      # without re-reading transcripts.
+      reviewer_provider: r.reviewer_provider,
       cost_usd: r.cost_usd,
       converged: r.converged,
       inserted_at: iso(r.inserted_at)
