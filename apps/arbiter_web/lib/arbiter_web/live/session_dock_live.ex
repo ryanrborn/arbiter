@@ -126,6 +126,8 @@ defmodule ArbiterWeb.SessionDockLive do
   alias Arbiter.Sessions
   alias Arbiter.Sessions.BridgeVerification
   alias Arbiter.Sessions.DisplayName
+  alias Arbiter.Sessions.Transcript
+  alias Arbiter.Sessions.TranscriptReplay
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.SessionIndexLive
   alias ArbiterWeb.SessionUsage
@@ -1394,19 +1396,89 @@ defmodule ArbiterWeb.SessionDockLive do
     required: true,
     doc: "the client reported this viewport cannot fit a side panel and a usable page"
 
+  # What a window whose session is over has to show (bd-3tf4oo).
+  #
+  # Only asked for the one case that needs it: an *expanded* window with
+  # nothing to attach to and no frozen pane from this browser session. A live
+  # window never stats the filesystem, and a frozen one keeps the scrollback
+  # it already has — styling and all — rather than swapping it for a replay of
+  # the same bytes.
+  #
+  # `transcript?` — "replay this file into an xterm" — additionally needs a
+  # loopback peer, for the same reason a live pane does (§10.4): the bytes are
+  # the session's screen, and `ArbiterWeb.SessionTranscriptController` refuses
+  # them off-box too.
+  defp assign_transcript(assigns) do
+    transcript =
+      if assigns.expanded? and not assigns.attachable? and not assigns.frozen? do
+        TranscriptReplay.describe(assigns.session)
+      end
+
+    assigns
+    |> assign(:transcript, transcript)
+    |> assign(:transcript?, !!transcript and transcript.available? and assigns.loopback?)
+  end
+
+  # Why an ended window is showing no transcript. `loopback_only` is not a
+  # property of the file — the transcript is there, this browser is just not
+  # on the box — and saying "never captured" for it would be a lie.
+  defp unavailable_reason(nil, _loopback?), do: "never_captured"
+  defp unavailable_reason(%{available?: true}, false), do: "loopback_only"
+  defp unavailable_reason(%{reason: reason}, _loopback?), do: to_string(reason)
+
+  defp unavailable_detail("retention_deleted") do
+    "Its transcript was deleted by the retention sweep, which keeps a session's raw output for " <>
+      "#{Transcript.retention_days()} days after it ends."
+  end
+
+  defp unavailable_detail("empty") do
+    "Its transcript was captured but holds nothing — the pane printed no output that survived."
+  end
+
+  defp unavailable_detail("loopback_only") do
+    "Its transcript is on the box but is served to a loopback peer only. Forward the port over " <>
+      "SSH to read it."
+  end
+
+  defp unavailable_detail(_never_captured) do
+    "No transcript was captured for it — it ended before Arbiter recorded session output, or " <>
+      "its reader never started."
+  end
+
+  # Byte figures an operator reads, not a number of bytes. Deliberately terse:
+  # this sits in a 10px line inside a terminal's chrome.
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576 do
+    "#{Float.round(bytes / 1_048_576, 1)} MB"
+  end
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1024 do
+    "#{Float.round(bytes / 1024, 1)} KB"
+  end
+
+  defp format_bytes(bytes) when is_integer(bytes), do: "#{bytes} B"
+
+  defp format_ended_at(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp format_ended_at(_), do: nil
+
   defp window(assigns) do
     assigns =
       assigns
       # A *live* pane: an xterm with a `/session` socket under it. Only the
       # expanded window ever has one, and only on loopback.
       |> assign(:live?, assigns.expanded? and assigns.attachable? and assigns.loopback?)
-      # Any pane at all — live, or frozen at the last thing the agent printed.
+      |> assign_transcript()
+
+    assigns =
+      assigns
+      # Any pane at all — live, frozen at the last thing the agent printed, or
+      # a replay of a finished session's persisted transcript (bd-3tf4oo).
       # A frozen pane outlives collapsing on purpose: the acceptance is "until
       # explicitly dismissed", and a collapse is not that. It holds no socket,
       # so eight of them cost eight xterms and zero connections.
       |> assign(
         :pane?,
-        (assigns.expanded? and assigns.attachable? and assigns.loopback?) or assigns.frozen?
+        (assigns.expanded? and assigns.attachable? and assigns.loopback?) or assigns.frozen? or
+          assigns.transcript?
       )
       |> assign(:name, DisplayName.resolve(assigns.session))
       |> assign(:running?, assigns.session.status == :running and not assigns.frozen?)
@@ -1515,14 +1587,17 @@ defmodule ArbiterWeb.SessionDockLive do
           </span>
         </div>
 
-        <%!-- The session ended under this window (bd-a292yj). The pane below
-              stays exactly as the agent left it, read-only; this says so, says
-              why it ended, and offers the one act that throws it away. --%>
+        <%!-- The session ended under this window (bd-a292yj), or ended before
+              this browser session and is being replayed from its persisted
+              transcript (bd-3tf4oo). Either way the pane below is a record,
+              not a client: this says so, says why the session ended, and — for
+              a replay — how much of the file is on screen and where the whole
+              of it is. --%>
         <div
-          :if={@frozen?}
+          :if={@frozen? or @transcript?}
           id={"session-dock-ended-#{@session.id}"}
           class={[
-            "flex shrink-0 items-center gap-2 px-2.5 py-1",
+            "flex shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-2.5 py-1",
             "border-b border-solid border-[var(--border-default)]",
             "bg-[var(--surface-field)]",
             "text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-body)]"
@@ -1533,7 +1608,33 @@ defmodule ArbiterWeb.SessionDockLive do
           <span :if={@session.end_reason} class="text-[var(--text-label)] truncate">
             {@session.end_reason}
           </span>
-          <span class="ml-auto shrink-0 text-[var(--text-label)]">read-only</span>
+          <span :if={@transcript? and @transcript.truncated?} class="text-[var(--text-label)]">
+            ·
+          </span>
+          <%!-- The replay is a *tail* once the file is over the cap: say which
+                part of it this is, rather than let it read as the whole
+                session (AC 2). --%>
+          <span
+            :if={@transcript? and @transcript.truncated?}
+            id={"session-dock-transcript-truncated-#{@session.id}"}
+            class="text-[var(--text-label)]"
+          >
+            showing last {format_bytes(@transcript.replay_bytes)} of {format_bytes(
+              @transcript.total_bytes
+            )}
+          </span>
+          <.link
+            :if={@transcript?}
+            id={"session-dock-transcript-download-#{@session.id}"}
+            href={~p"/sessions/#{@session.id}/transcript"}
+            download={"#{@session.id}.raw"}
+            class="text-[var(--text-link)] no-underline hover:underline"
+          >
+            download full transcript
+          </.link>
+          <span class="ml-auto shrink-0 text-[var(--text-label)]">
+            {if @transcript?, do: "transcript · read-only", else: "read-only"}
+          </span>
         </div>
 
         <%!-- Not inside the status strip: that is `phx-update="ignore"` and
@@ -1579,7 +1680,8 @@ defmodule ArbiterWeb.SessionDockLive do
             phx-hook=".SessionTerminal"
             phx-update="ignore"
             data-arb-terminal
-            data-readonly={if @frozen?, do: "true"}
+            data-readonly={if @frozen? or @transcript?, do: "true"}
+            data-transcript={if @transcript?, do: "true"}
             data-session-id={@session.id}
             class="grow min-w-[640px] p-1.5"
           >
@@ -1631,24 +1733,38 @@ defmodule ArbiterWeb.SessionDockLive do
           </p>
         </div>
 
-        <%!-- Ended, and this dock never held its pane: either it ended before
-              this browser session, or its window was dismissed and re-opened.
-              Either way there is no scrollback here to show and none to fetch
-              until transcript persistence lands (bd-5pelo2, phase 9) — so it
-              says so and points at the index, rather than rendering an empty
-              terminal that reads like a live one with nothing on it. --%>
+        <%!-- Ended, this dock never held its pane, and there is no transcript
+              to replay either (bd-3tf4oo). That is three different situations
+              and they are named as three, because "nothing here" with no
+              reason is what made this window read as broken (#1818): the
+              retention sweep took it, it was never captured, or the capture is
+              empty. Never a blank terminal — and when the session's JSONL was
+              archived, that is linked, because it is the other half of the
+              record. --%>
         <div
           :if={not @pane? and not @attachable?}
           id={"session-dock-unavailable-#{@session.id}"}
+          data-reason={unavailable_reason(@transcript, @loopback?)}
           class="grow min-h-0 flex flex-col items-center justify-center gap-1.5 px-4 text-center text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
         >
           <.icon name="hero-power" class="size-5" />
           <p class="text-[var(--text-body)]">
-            This session has ended{if @session.end_reason, do: " (#{@session.end_reason})"}.
+            This session has ended{if @session.end_reason, do: " (#{@session.end_reason})"}<span :if={
+              format_ended_at(@session.ended_at)
+            }>, {format_ended_at(@session.ended_at)}</span>.
           </p>
           <p>
-            Its output is not available here — the dock was not watching it when it ended.
+            {unavailable_detail(unavailable_reason(@transcript, @loopback?))}
           </p>
+          <.link
+            :if={@transcript && @transcript.archived?}
+            id={"session-dock-jsonl-#{@session.id}"}
+            href={~p"/sessions/#{@session.id}/jsonl"}
+            download={"#{@session.id}.jsonl.gz"}
+            class="text-[var(--text-link)] no-underline hover:underline"
+          >
+            Download the archived session JSONL
+          </.link>
           <.link
             navigate={~p"/sessions"}
             class="text-[var(--text-link)] no-underline hover:underline"
@@ -1805,6 +1921,18 @@ defmodule ArbiterWeb.SessionDockLive do
           class="shrink min-w-0 max-w-[7rem] truncate text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
         >
           {@session.end_reason || "ended"}
+        </span>
+
+        <%!-- When it ended, next to why (bd-3tf4oo AC 1). Expanded only: a
+              collapsed title bar is 11rem wide and the reason is the half an
+              operator scanning the strip needs. --%>
+        <span
+          :if={not @running? and @expanded? and @session.ended_at}
+          id={"session-dock-ended-at-#{@session.id}"}
+          title={format_ended_at(@session.ended_at)}
+          class="shrink-0 text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+        >
+          {format_ended_at(@session.ended_at)}
         </span>
 
         <%!-- The size control (bd-covojz). Only the expanded window has a size
