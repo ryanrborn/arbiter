@@ -850,11 +850,15 @@ defmodule Arbiter.Worker.ClaudeSession do
       occurred_at: DateTime.utc_now()
     })
 
-    Map.put(
-      session,
-      :denied_command,
-      Arbiter.Agents.Gemini.Stream.agy_denied_command_token(step["tool_name"], params)
-    )
+    if permission_denial?(error) do
+      Map.put(
+        session,
+        :denied_command,
+        Arbiter.Agents.Gemini.Stream.agy_denied_command_token(step["tool_name"], params)
+      )
+    else
+      session
+    end
   end
 
   defp capture_steps(%{provider: "gemini"} = session, _event), do: session
@@ -870,6 +874,17 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   defp capture_steps(session, _event), do: session
+
+  # bd-25ivqe finding 2: an agy `ERROR` tool step isn't always a permission
+  # denial — it's also how agy reports an ordinary tool failure (a malformed
+  # call, a missing path). Only agy's own denial signature, verbatim on
+  # `tool_info.error`, justifies attributing the run's eventual notes-gate
+  # trip to a strict-policy bootstrap failure instead of the generic
+  # `:blank_notes_at_completion`.
+  defp permission_denial?(error) when is_binary(error),
+    do: String.contains?(error, "permission check failed")
+
+  defp permission_denial?(_error), do: false
 
   defp remember_tool_use(%{"type" => "tool_use", "id" => id, "name" => name} = block, session)
        when is_binary(id) do

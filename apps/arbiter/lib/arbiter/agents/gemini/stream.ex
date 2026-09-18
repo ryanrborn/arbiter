@@ -500,7 +500,8 @@ defmodule Arbiter.Agents.Gemini.Stream do
   out of `"arb inbox bd-ci0y74"` — for surfacing a concrete "strict policy
   denied required command `<x>`" failure reason
   (`Arbiter.Worker.ClaudeSession.capture_steps/2`) instead of a generic
-  blank-notes failure. `nil` for a non-command tool or an unparseable one.
+  blank-notes failure. Returns the tool name verbatim for a non-command tool;
+  `nil` only when the step carried no tool name at all.
   """
   @spec agy_denied_command_token(String.t() | nil, map()) :: String.t() | nil
   def agy_denied_command_token(name, params) do

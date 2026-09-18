@@ -291,6 +291,21 @@ defmodule Arbiter.Worker.RunStepsTest do
     assert session.denied_command == "arb"
   end
 
+  test "an agy ERROR tool step that is NOT a permission denial does not stash denied_command (bd-25ivqe finding 2)" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+    session =
+      new_session(task_id, provider: "gemini")
+      |> feed([
+        agy_tool_error_event(3,
+          command: "rm -rf ./tmp",
+          error: "no such file or directory"
+        )
+      ])
+
+    refute Map.has_key?(session, :denied_command)
+  end
+
   test "secret-marked env values are redacted out of ERROR tool input/output summaries" do
     task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
     secret = "super-secret-token-value"

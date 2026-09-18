@@ -82,12 +82,20 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
     end
 
     test "strict mode always allows the worker-protocol bootstrap commands (bd-25ivqe AC1)" do
-      allow = Security.settings(mode("strict"))["permissions"]["allow"]
+      settings = Security.settings(mode("strict"))
+      allow = settings["permissions"]["allow"]
+      deny = settings["permissions"]["deny"]
 
       assert "command(arb)" in allow
       assert "command(git status)" in allow
       assert "command(git diff)" in allow
       assert "command(git log)" in allow
+
+      # The bootstrap baseline widens `allow` with read/exec commands only —
+      # it must never carry an out-of-worktree write, so `write_file(/etc/**)`
+      # stays denied under :strict the same way it does under :bypass.
+      assert "write_file(/etc/**)" in deny
+      refute Enum.any?(allow, &String.starts_with?(&1, "write_file("))
     end
 
     test "the bootstrap baseline is present alongside operator allow rules, not replaced by them" do
