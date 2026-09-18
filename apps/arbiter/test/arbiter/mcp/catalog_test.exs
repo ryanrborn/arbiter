@@ -31,7 +31,7 @@ defmodule Arbiter.MCP.CatalogTest do
                                 tracker_claim tracker_sync worker_review graph_create workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
                                 external_review_list skill_create skill_update skill_list skill_get
-                                transcript_capture_stats
+                                transcript_capture_stats dep_list
                                 loop_pending_list loop_pending_diff loop_pending_apply
                                 loop_pending_reject breaker_list breaker_reset)
 

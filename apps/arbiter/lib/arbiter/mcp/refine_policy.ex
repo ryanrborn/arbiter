@@ -63,6 +63,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     repo_show
     skill_list
     skill_get
+    dep_list
   )
 
   # --- allowed: the subtree write surface ----------------------------------

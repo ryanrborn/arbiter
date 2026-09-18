@@ -147,7 +147,9 @@ defmodule ArbiterWeb.Router do
     post("/issues/:id/verify", IssueController, :verify)
 
     # Dependencies
+    get("/dependencies", DependencyController, :index)
     post("/dependencies", DependencyController, :create)
+    get("/dependencies/:issue_id", DependencyController, :show)
     delete("/dependencies/:from/:to", DependencyController, :delete)
 
     # Loop-analysis pass (Stage 1, bd-dyfaq3) — operator-invoked, report-only.

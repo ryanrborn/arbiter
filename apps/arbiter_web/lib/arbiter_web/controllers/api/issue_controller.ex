@@ -27,6 +27,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dedup
+  alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   alias Arbiter.Tasks.Verification
@@ -83,11 +84,17 @@ defmodule ArbiterWeb.Api.IssueController do
       # the index would pay a ledger scan per row for a number nobody reads
       # in a list.
       # bd-18vl9q: same for the epic cost rollup — nil for a non-epic issue.
+      # bd-1defgu: same reasoning for dependency edges — `arb issue show` was
+      # write-only for them; the read already existed
+      # (`Arbiter.Tasks.Dependencies.list/1`), it just wasn't reachable here.
       {:ok, issue} ->
+        {:ok, dependencies} = Dependencies.list(issue_id: id)
+
         render(conn, :show,
           issue: issue,
           estimate: Estimate.payload(issue),
-          epic_rollup: Estimate.epic_cost_rollup(issue)
+          epic_rollup: Estimate.epic_cost_rollup(issue),
+          dependencies: dependencies
         )
 
       {:error, _} = err ->

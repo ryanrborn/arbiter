@@ -35,6 +35,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
+  | `dep_list` | worker + coordinator | `Arbiter.Tasks.Dependencies.list/1` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
   | `worker_resume` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.resume/2` |
   | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) / `Arbiter.Reviews.ExternalReview.dispatch/1` (`pr`) |
@@ -673,6 +674,38 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.dep_remove/2
+    },
+    %{
+      name: "dep_list",
+      tiers: @both,
+      description:
+        "List dependency edges in the workspace. Coordinator or worker — a worker with no " <>
+          "`workspace` arg sees its own workspace's edges; naming a different one is refused, " <>
+          "the same rule dep_add/dep_remove already apply. With no `issue_id`, lists every edge " <>
+          "in the workspace; with `issue_id`, lists that issue's edges in both directions " <>
+          "instead. Each row carries both endpoints' id/title/status/priority, so a live edge " <>
+          "is distinguishable from a closed↔closed one without a second lookup. A symmetric " <>
+          "edge (`conflicts_with`) is never doubled — it's stored once, directed, and appears " <>
+          "once no matter which endpoint you query from.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Workspace name or id. Optional; defaults to the scope's workspace."
+          },
+          "issue_id" => %{
+            "type" => "string",
+            "description" => "Scope the listing to one issue's edges instead of the workspace."
+          },
+          "type" => %{
+            "type" => "string",
+            "description" => "Optional edge type to filter by."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.dep_list/2
     },
     %{
       name: "worker_dispatch",

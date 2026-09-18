@@ -4,28 +4,52 @@ defmodule ArbiterWeb.Api.DependencyController do
 
   Routes:
 
+    * `GET    /api/dependencies[?workspace_id=&type=&issue_id=]` — :index
     * `POST   /api/dependencies` — :create  (from_issue_id, to_issue_id, type)
+    * `GET    /api/dependencies/:issue_id[?workspace_id=&type=]` — :show
     * `DELETE /api/dependencies/:from/:to[?type=...]` — :delete
 
-  Both actions go through `Arbiter.Tasks.Dependencies` (bd-apj0gq). This used to
-  be the *unvalidated* write path — a raw `Ash.create` with no workspace check —
-  and it is the one `arb dep add`, `arb dep rm` and `arb create --deps/--parent`
-  call, so operators got the weakest guarantees of any surface. It now enforces
-  exactly what MCP does: both endpoints resolve, both live in one workspace, no
-  gating cycle, and a `parent_of` write re-evaluates the parent's `auto_close`.
+  `create` and `delete` go through `Arbiter.Tasks.Dependencies` (bd-apj0gq).
+  This used to be the *unvalidated* write path — a raw `Ash.create` with no
+  workspace check — and it is the one `arb dep add`, `arb dep rm` and
+  `arb create --deps/--parent` call, so operators got the weakest guarantees
+  of any surface. It now enforces exactly what MCP does: both endpoints
+  resolve, both live in one workspace, no gating cycle, and a `parent_of`
+  write re-evaluates the parent's `auto_close`.
 
   Facade guard failures (`:invalid_type`, `:cross_workspace`, `:cyclic`) render
   as 400 `invalid_request` carrying the facade's message verbatim — the named
   cycle or the two workspace names are the whole point of the error. A missing
   endpoint is 404; resource-level rejections (self-reference, duplicate edge)
   stay 422, unchanged.
+
+  `index` / `show` (bd-1defgu) go through `Arbiter.Tasks.Dependencies.list/1`.
+  `index` requires at least one of `workspace_id` / `issue_id`; passing both
+  requires the issue to actually live in that workspace — a mismatch renders
+  400 `invalid_request`, the read-side analogue of `create`'s cross-workspace
+  rejection. `show` scopes to one issue by path segment and accepts the same
+  `workspace_id` / `type` filters as further narrowing, with the same
+  cross-workspace rejection when `workspace_id` doesn't contain the issue.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Tasks.Dependencies
+  alias Arbiter.Tasks.Issue
 
   action_fallback ArbiterWeb.Api.FallbackController
+
+  def index(conn, params) do
+    with {:ok, opts} <- list_opts(params) do
+      render_list(conn, opts)
+    end
+  end
+
+  def show(conn, %{"issue_id" => issue_id} = params) do
+    with {:ok, opts} <- list_opts(Map.put(params, "issue_id", issue_id)) do
+      render_list(conn, opts)
+    end
+  end
 
   def create(conn, params) do
     with {:ok, from} <- require_param(params, "from_issue_id"),
@@ -58,6 +82,66 @@ defmodule ArbiterWeb.Api.DependencyController do
         {:error, translate(reason)}
     end
   end
+
+  defp render_list(conn, opts) do
+    case Dependencies.list(opts) do
+      {:ok, edges} -> render(conn, :index, dependencies: edges)
+      {:error, reason} -> {:error, translate(reason)}
+    end
+  end
+
+  defp list_opts(params) do
+    ws_id = blank_to_nil(params["workspace_id"])
+    issue_id = blank_to_nil(params["issue_id"])
+
+    with :ok <- require_scope(ws_id, issue_id),
+         :ok <- require_issue_exists(issue_id),
+         :ok <- require_same_workspace(ws_id, issue_id) do
+      opts =
+        []
+        |> put_opt(:workspace_id, ws_id)
+        |> put_opt(:issue_id, issue_id)
+        |> put_opt(:type, blank_to_nil(params["type"]))
+
+      {:ok, opts}
+    end
+  end
+
+  defp require_scope(nil, nil),
+    do: {:error, {:invalid_request, "workspace_id or issue_id is required"}}
+
+  defp require_scope(_ws_id, _issue_id), do: :ok
+
+  defp require_issue_exists(nil), do: :ok
+
+  defp require_issue_exists(issue_id) do
+    case Ash.get(Issue, issue_id) do
+      {:ok, %Issue{}} -> :ok
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp require_same_workspace(nil, _issue_id), do: :ok
+  defp require_same_workspace(_ws_id, nil), do: :ok
+
+  defp require_same_workspace(ws_id, issue_id) do
+    case Ash.get(Issue, issue_id) do
+      {:ok, %Issue{workspace_id: ^ws_id}} ->
+        :ok
+
+      {:ok, %Issue{} = issue} ->
+        {:error,
+         {:invalid_request,
+          "issue #{issue_id} is in workspace #{issue.workspace_id}, not #{ws_id}"}}
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(v), do: v
 
   defp require_param(params, key) do
     case Map.get(params, key) do

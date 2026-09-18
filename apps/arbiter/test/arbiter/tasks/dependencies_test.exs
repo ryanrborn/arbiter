@@ -357,6 +357,102 @@ defmodule Arbiter.Tasks.DependenciesTest do
     end
   end
 
+  # ---- list/1 --------------------------------------------------------------
+
+  describe "list/1" do
+    test "with a workspace_id, returns every edge touching that workspace", %{
+      ws: ws,
+      a: a,
+      b: b,
+      c: c
+    } do
+      dep_ab = edge(a, b, :depends_on)
+      dep_ca = edge(c, a, :conflicts_with)
+
+      {:ok, results} = Dependencies.list(workspace_id: ws.id)
+
+      ids = Enum.map(results, & &1.edge.id) |> Enum.sort()
+      assert ids == Enum.sort([dep_ab.id, dep_ca.id])
+    end
+
+    test "a symmetric edge appears exactly once in a workspace-wide listing", %{
+      ws: ws,
+      a: a,
+      b: b
+    } do
+      _ = edge(a, b, :conflicts_with)
+
+      {:ok, results} = Dependencies.list(workspace_id: ws.id)
+      assert length(results) == 1
+    end
+
+    test "each row carries the loaded from/to issues", %{ws: ws, a: a, b: b} do
+      _ = edge(a, b, :blocks)
+
+      {:ok, [row]} = Dependencies.list(workspace_id: ws.id)
+      assert row.from.id == a.id
+      assert row.to.id == b.id
+    end
+
+    test "filters by type", %{ws: ws, a: a, b: b, c: c} do
+      _ = edge(a, b, :depends_on)
+      _ = edge(a, c, :conflicts_with)
+
+      {:ok, results} = Dependencies.list(workspace_id: ws.id, type: :conflicts_with)
+      assert [%{edge: %Dependency{type: :conflicts_with}}] = results
+    end
+
+    test "accepts a string type", %{ws: ws, a: a, b: b} do
+      _ = edge(a, b, :depends_on)
+
+      {:ok, results} = Dependencies.list(workspace_id: ws.id, type: "depends_on")
+      assert length(results) == 1
+    end
+
+    test "rejects an unknown type", %{ws: ws} do
+      assert {:error, {:invalid_type, msg}} =
+               Dependencies.list(workspace_id: ws.id, type: "bogus")
+
+      assert msg =~ "bogus"
+    end
+
+    test "scoped to an issue, returns edges touching it in either direction", %{a: a, b: b, c: c} do
+      _ = edge(a, b, :depends_on)
+      _ = edge(c, a, :parent_of)
+      # unrelated edge, must not appear
+      _ = edge(b, c, :relates_to)
+
+      {:ok, results} = Dependencies.list(issue_id: a.id)
+
+      assert length(results) == 2
+
+      refute Enum.any?(results, fn %{edge: e} ->
+               e.from_issue_id == b.id and e.to_issue_id == c.id
+             end)
+
+      assert Enum.all?(results, fn %{edge: e} ->
+               e.from_issue_id == a.id or e.to_issue_id == a.id
+             end)
+    end
+
+    test "a symmetric edge scoped to one of its endpoints appears exactly once", %{a: a, b: b} do
+      _ = edge(a, b, :conflicts_with)
+
+      {:ok, from_a} = Dependencies.list(issue_id: a.id)
+      {:ok, from_b} = Dependencies.list(issue_id: b.id)
+
+      assert length(from_a) == 1
+      assert length(from_b) == 1
+    end
+
+    test "with no options, returns every edge", %{a: a, b: b} do
+      _ = edge(a, b, :blocks)
+
+      {:ok, results} = Dependencies.list([])
+      assert length(results) >= 1
+    end
+  end
+
   # ---- audit + broadcast --------------------------------------------------
 
   describe "paper trail" do
