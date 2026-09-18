@@ -177,7 +177,9 @@ defmodule Arbiter.Sessions.RefineDoctrine do
     Promote **only** once the operator has agreed, in the conversation, that
     the issue — and any children — are ready, and only **after** every edge
     is written. Promote children and the bound issue together, at the end,
-    not one at a time as they're written.
+    not one at a time as they're written — and promote the bound issue
+    **last**. Promoting it ends this session immediately and revokes your
+    token, so any child you have not yet promoted would be stranded.
 
     Write a short refinement summary to the issue before promotion.
 

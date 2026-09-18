@@ -6,10 +6,11 @@ defmodule ArbiterWeb.SessionTranscriptController do
   The dock replays a **bounded tail** of the raw transcript
   (`Arbiter.Sessions.TranscriptReplay`) — a 100 MB file is not something to
   push into xterm. This is where the rest of it lives: `:raw` serves the
-  captured PTY stream verbatim, and `:jsonl` serves the gzipped session JSONL
-  `Arbiter.Worker.SessionArchive` wrote on session end, which is what the
-  dock's "transcript unavailable" state links to when the raw stream is gone
-  but the archive is not.
+  captured PTY stream verbatim, and `:jsonl` serves the session JSONL
+  `Arbiter.Worker.SessionArchive` wrote on session end, decompressed, which is
+  what the dock's "transcript unavailable" state links to when the raw stream
+  is gone but the archive is not, and what the issue detail page's
+  "Transcript" link points at for a refine session (bd-cvfjms).
 
   ## Loopback only
 
@@ -52,17 +53,21 @@ defmodule ArbiterWeb.SessionTranscriptController do
     end
   end
 
-  @doc "The gzipped session JSONL, as archived on session end."
-  # See `raw/2` above: the path comes from the looked-up row, not the URL.
-  # sobelow_skip ["Traversal.SendFile"]
+  @doc """
+  The session JSONL archived on session end, decompressed.
+
+  Read whole rather than streamed off disk: the archive is gzipped on disk and
+  a reader wants the ndjson, not a `.gz` to unpack by hand. `SessionArchive`
+  notes the largest observed archive is single-digit MB, so the whole-file read
+  is affordable; `:raw`, which really can be huge, streams with `send_file/3`.
+  """
   def jsonl(conn, %{"id" => id}) do
     with {:ok, session_id} <- session_id(id),
-         path = SessionArchive.path_for(session_id),
-         true <- File.regular?(path) do
+         {:ok, ndjson} <- SessionArchive.read(session_id) do
       conn
-      |> put_resp_content_type("application/gzip")
-      |> put_resp_header("content-disposition", ~s(attachment; filename="#{session_id}.jsonl.gz"))
-      |> send_file(200, path)
+      |> put_resp_content_type("application/x-ndjson")
+      |> put_resp_header("content-disposition", ~s(attachment; filename="#{session_id}.jsonl"))
+      |> send_resp(200, ndjson)
     else
       _ -> not_found(conn, "no archived session JSONL for this session")
     end

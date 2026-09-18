@@ -60,10 +60,14 @@ defmodule ArbiterWeb.Router do
 
     get("/about", PageController, :home)
 
-    # A finished session's artefacts (bd-3tf4oo). Not in the `live_session`
-    # below because these are file downloads, not pages: the dock's replay
-    # shows a bounded tail of the raw stream and links here for the whole of
-    # it, and for the archived JSONL when the raw stream is gone.
+    # A finished session's artefacts. Not in the `live_session` below because
+    # these are file downloads, not pages — they sit outside the "no
+    # /sessions/:id page" rule the live_session comment documents.
+    #
+    # bd-3tf4oo: the dock's replay shows a bounded tail of the raw PTY stream
+    # and links to `:raw` for the whole of it. bd-cvfjms: `:jsonl` is the
+    # phase 9 session archive — what the issue detail page's "Transcript" link
+    # points at, and what the dock offers when the raw stream is gone.
     get("/sessions/:id/transcript", SessionTranscriptController, :raw)
     get("/sessions/:id/jsonl", SessionTranscriptController, :jsonl)
 

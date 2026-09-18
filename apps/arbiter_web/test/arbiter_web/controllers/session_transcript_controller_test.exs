@@ -1,8 +1,9 @@
 defmodule ArbiterWeb.SessionTranscriptControllerTest do
   @moduledoc """
   Downloading a finished session's artefacts (bd-3tf4oo): the whole raw
-  transcript the dock only replays the tail of, and the gzipped session JSONL
-  the unavailable state links when one exists.
+  transcript the dock only replays the tail of, and the archived session JSONL
+  the unavailable state — and the issue detail page's "Transcript" link
+  (bd-cvfjms) — point at when one exists.
 
   Loopback-only, the same rule `ArbiterWeb.SessionSocket` applies to the
   terminal itself (§10.4) — these bytes are the session's screen and its
@@ -58,6 +59,19 @@ defmodule ArbiterWeb.SessionTranscriptControllerTest do
       assert conn.status == 404
     end
 
+    test "refuses a 16-byte path-traversal id (Ecto.UUID's raw-binary cast clause)", %{conn: conn} do
+      # "../../../../../x" is exactly 16 bytes, which `Ecto.UUID.cast/1`
+      # accepts via its raw-binary clause and re-encodes as a harmless-looking
+      # hex UUID. The served path must come from the looked-up row, never from
+      # the original string, or this reaches the filesystem outside the root.
+      traversal = "../../../../../x"
+      assert byte_size(traversal) == 16
+
+      conn = get(conn, "/sessions/" <> URI.encode(traversal, &(&1 != ?/)) <> "/transcript")
+
+      assert conn.status == 404
+    end
+
     test "refuses an off-box peer", %{conn: conn, session: session} do
       :ok = Transcript.append(session.id, "secret output")
 
@@ -69,19 +83,38 @@ defmodule ArbiterWeb.SessionTranscriptControllerTest do
   end
 
   describe "GET /sessions/:id/jsonl" do
-    test "serves the archived session JSONL", %{conn: conn, session: session} do
-      archive!(session.id, ~s({"type":"user"}\n))
+    test "serves the archived session JSONL, decompressed", %{conn: conn, session: session} do
+      archive!(session.id, ~s({"type":"assistant","text":"hello"}\n))
 
       conn = get(conn, ~p"/sessions/#{session.id}/jsonl")
 
       assert conn.status == 200
-      assert :zlib.gunzip(conn.resp_body) =~ ~s({"type":"user"})
+      assert conn.resp_body == ~s({"type":"assistant","text":"hello"}\n)
+
+      assert get_resp_header(conn, "content-disposition") == [
+               ~s(attachment; filename="#{session.id}.jsonl")
+             ]
     end
 
     test "404s when nothing was archived", %{conn: conn, session: session} do
       conn = get(conn, ~p"/sessions/#{session.id}/jsonl")
 
       assert conn.status == 404
+    end
+
+    test "404s on a path-traversal id instead of reading the filesystem", %{conn: conn} do
+      conn = get(conn, "/sessions/..%2F..%2F..%2Fetc%2Fpasswd/jsonl")
+
+      assert conn.status == 404
+    end
+
+    test "refuses an off-box peer", %{conn: conn, session: session} do
+      archive!(session.id, ~s({"type":"assistant","text":"secret"}\n))
+
+      conn = get(off_box(conn), ~p"/sessions/#{session.id}/jsonl")
+
+      assert conn.status == 403
+      refute conn.resp_body =~ "secret"
     end
   end
 

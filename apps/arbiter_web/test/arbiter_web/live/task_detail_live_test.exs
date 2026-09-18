@@ -2486,4 +2486,106 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#epic-cost-rollup-headline", "$0.00 spent")
     end
   end
+
+  describe "the refinement session panel (bd-cvfjms)" do
+    alias Arbiter.Sessions
+    alias Arbiter.Test.NoopRunner
+    alias Arbiter.Usage.Event
+
+    setup do
+      prev = Application.get_env(:arbiter, :output_log_root)
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "task-detail-refine-session-test-#{System.unique_integer([:positive])}"
+        )
+
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev do
+          Application.put_env(:arbiter, :output_log_root, prev)
+        else
+          Application.delete_env(:arbiter, :output_log_root)
+        end
+      end)
+
+      %{root: root}
+    end
+
+    defp seed_archive!(root, id) do
+      File.mkdir_p!(root)
+      File.write!(Path.join(root, id <> ".jsonl.gz"), :zlib.gzip(~s({"type":"assistant"}\n)))
+    end
+
+    test "an issue never refined shows no refinement session panel", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "never refined", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, "#panel-refine-session")
+    end
+
+    test "an ended, archived refine session shows its end reason, transcript link, and cost", %{
+      conn: conn,
+      ws: ws,
+      root: root
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "was refined", workspace_id: ws.id})
+
+      {:ok, session} =
+        Sessions.launch(issue_id: task.id, workspace_id: ws.id, runner: NoopRunner)
+
+      {:ok, session} = Sessions.record_provider_session(session, "prov-refine-1")
+
+      {:ok, _ev} =
+        Ash.create(Event, %{
+          task_id: nil,
+          source: :coordinator_session,
+          step: :other,
+          provider: "claude",
+          model: "claude-opus-4-7",
+          occurred_at: DateTime.utc_now(),
+          session_id: "prov-refine-1",
+          cost_usd: 3.25,
+          tokens_in: 1000,
+          tokens_out: 500
+        })
+
+      {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "promoted")
+      seed_archive!(root, session.id)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#panel-refine-session", "promoted")
+
+      # The archived JSONL, not the raw PTY stream the dock replays
+      # (bd-3tf4oo gave `/sessions/:id/transcript` to the raw capture).
+      assert has_element?(
+               view,
+               ~s(#refine-session-transcript-link[href="/sessions/#{session.id}/jsonl"])
+             )
+      assert has_element?(view, "#refine-session-cost", "$3.25")
+    end
+
+    test "an ended but unarchived refine session shows no transcript link", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "was refined, not archived", workspace_id: ws.id})
+
+      {:ok, session} =
+        Sessions.launch(issue_id: task.id, workspace_id: ws.id, runner: NoopRunner)
+
+      {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "issue_closed")
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#panel-refine-session", "issue_closed")
+      refute has_element?(view, "#refine-session-transcript-link")
+    end
+  end
 end

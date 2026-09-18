@@ -42,7 +42,10 @@ defmodule Arbiter.MCP.Tools.Task do
   # promotion so the rule travels with the action, not just the docs.
   @edges_before_promote "Edges before promote: Autopilot can claim this task within seconds " <>
                           "of it going Ready, so every parent_of child and depends_on edge it " <>
-                          "needs must already exist. Promote last."
+                          "needs must already exist. Promote last. If this is your bound issue " <>
+                          "in a refine session, promote it last of all — promoting it ends the " <>
+                          "session and revokes your token immediately, stranding any child not " <>
+                          "yet promoted."
 
   # ---- task_show ----------------------------------------------------------
 
