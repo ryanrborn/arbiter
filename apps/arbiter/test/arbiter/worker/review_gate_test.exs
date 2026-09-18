@@ -3342,6 +3342,63 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "[OBSOLETE]"
       # The diff the implementer actually produced, named explicitly.
       assert prompt =~ "lib/bar.ex"
+
+      # Nothing about this (ordinary) path is a remote-head restart, so the
+      # framing stays "an implementer addressed these".
+      assert prompt =~ "The implementer has addressed your prior findings"
+    end
+
+    test "rereview_prompt/1 does not claim an implementer ran when the branch moved instead",
+         %{ws: ws} do
+      # bd-bq8c8a: on `restart_on_remote_head/3`'s path no implementer is ever
+      # dispatched — a third party pushed and the fix round was skipped. The
+      # prior round's findings are still carried forward with the DISPOSITIONS
+      # instruction, so telling the reviewer "the implementer has addressed your
+      # prior findings" would invite it to mark them `[ADDRESSED]` against a
+      # commit that never targeted them (the bd-6r8caj property).
+      task = new_task(ws)
+
+      open =
+        Arbiter.Worker.ReviewFindings.extract(
+          "VERDICT: REQUEST_CHANGES\n- **Medium**: over-matches (lib/foo.ex:12)",
+          1
+        )
+
+      base = %{
+        task_id: task.id,
+        workspace_id: ws.id,
+        review_id: ReviewGate.reviewer_task_id(task.id),
+        branch: "feature/rev",
+        target_branch: "main",
+        round: 2,
+        thread: [],
+        open_findings: open,
+        revise_touched_files: nil,
+        head_sha: nil,
+        base_sha: nil,
+        worktree_path: nil,
+        pr_ref: nil
+      }
+
+      prompt =
+        ReviewGate.rereview_prompt(
+          Map.put(base, :restarted_on_remote_head, "aed4457deadbeefcafe0123456789abcdef01234")
+        )
+
+      refute prompt =~ "The implementer has addressed your prior findings"
+      assert prompt =~ "NO implementer ran for your prior findings"
+      assert prompt =~ "the branch moved on"
+      assert prompt =~ "aed4457deadb"
+      assert prompt =~ "re-check each one against the new code"
+
+      # The findings themselves are still carried, ids and all.
+      assert prompt =~ "OPEN FINDINGS CARRIED FORWARD"
+      assert prompt =~ "F1.1"
+      assert prompt =~ "DISPOSITIONS:"
+
+      # An absent key (every ordinary round) keeps the original framing.
+      assert ReviewGate.rereview_prompt(base) =~
+               "The implementer has addressed your prior findings"
     end
   end
 

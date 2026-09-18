@@ -497,9 +497,20 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {ReviewGate, :escalate_unpushed_head, 3},
         {ReviewGate, :escalate_pre_review_park, 2},
         {ReviewGate, :pushed_head, 1},
-        {ReviewGate, :fallback_head, 1}
+        {ReviewGate, :fallback_head, 1},
+        # bd-bq8c8a: the same question one step earlier in the round — has the
+        # remote moved PAST the head this round just reviewed, before a fix
+        # round is allowed to build on it?
+        {ReviewGate, :remote_advance, 1},
+        {ReviewGate, :restart_on_remote_head, 3}
       ],
-      anchors: ["push_gate", "escalate_unpushed_head", "pushed_head", ":head_not_pushed"],
+      anchors: [
+        "push_gate",
+        "escalate_unpushed_head",
+        "pushed_head",
+        ":head_not_pushed",
+        "remote_advance"
+      ],
       summary:
         "the head a round reviews (and the head a stamp/coverage row names) must be on the remote branch",
       policy_note:
@@ -507,7 +518,12 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "rejected push PARKS `:head_not_pushed` rather than force-pushing or " <>
           "reviewing a head the MR does not carry. Undeterminable push state (no " <>
           "`origin`, no worktree, git unavailable) fails OPEN — class B's posture, " <>
-          "and the reason an ad-hoc checkout is not an incident."
+          "and the reason an ad-hoc checkout is not an incident. " <>
+          "bd-bq8c8a added the pre-fix-round half: one fetch before the implementer " <>
+          "is dispatched, and a remote that STRICTLY advanced skips the fix round " <>
+          "and re-reviews the new head instead of producing an orphan commit that " <>
+          "could only park here. It has no terminal of its own — every shape other " <>
+          "than a clean fast-forward falls through to `push_gate/1` unchanged."
     }
   ]
 
@@ -1181,6 +1197,29 @@ defmodule Arbiter.Reviews.GuardRegistry do
       sites: [{PRPatrol, :author_allowed?, 2}],
       anchors: ["author_allowed?"],
       summary: "do not patrol third-party PRs"
+    },
+    %{
+      id: :review_gate_branch_hold,
+      doc_ref: "P8",
+      class: :f,
+      class_source: :doc,
+      bound: {:evaluations, 1},
+      episode: {:pr, :tick},
+      terminal: :skipped,
+      sites: [{PRPatrol, :review_gate_holds?, 2}],
+      anchors: ["review_gate_holds?", "GateActivity"],
+      summary:
+        "bd-bq8c8a: while the ReviewGate owns a branch, nothing else may commit to it — " <>
+          "fails CLOSED on an undeterminable read (§5.2: a guard on filing)",
+      policy_note:
+        "One evaluation per PR per tick, and the terminal is a SKIP, not a give-up: the " <>
+          "threads stay unresolved and the first tick after the gate converges files the " <>
+          "follow-up this one declined. So the fail-closed posture costs one ~60s interval " <>
+          "and consumes nothing, while failing open re-runs the reported collision. " <>
+          "Residual window (accepted): G18's companion `remote_advance/1` fetches before the " <>
+          "gate DISPATCHES its implementer, so a push landing during an already-running fix " <>
+          "round still degrades to G18's `:head_not_pushed` park — this hold is what closes " <>
+          "that window for the patrol as the pusher."
     }
   ]
 

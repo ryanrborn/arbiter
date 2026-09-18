@@ -771,7 +771,16 @@ defmodule Arbiter.Worker.ReviewGate do
       # resumed once to commit uncommitted work. Reset to false whenever a
       # round genuinely advances (finish_revise/1's dispatch_next_review/1) so
       # each new round gets its own one-shot nudge budget.
-      commit_nudge_used: false
+      commit_nudge_used: false,
+      # bd-bq8c8a: the sha this round is re-reviewing BECAUSE a third party
+      # pushed it, not because an implementer addressed anything
+      # (`restart_on_remote_head/3`). nil on every ordinary round. Read only by
+      # `rereview_prompt/1`, to state what actually happened instead of the
+      # default "the implementer has addressed your prior findings" — which on
+      # this path is false, and would bias the reviewer into dispositioning its
+      # own open findings `[ADDRESSED]` against a diff that never targeted them
+      # (the bd-6r8caj property).
+      restarted_on_remote_head: nil
     }
 
     Process.monitor(author)
@@ -1510,6 +1519,16 @@ defmodule Arbiter.Worker.ReviewGate do
     # (it may not have self-completed if it never printed `arb done`).
     stop_worker(state)
 
+    # bd-bq8c8a: fetch before handing the branch to an implementer. If the
+    # remote moved while this round was reviewing, a fix commit on top of the
+    # head the reviewer read can only be an orphan.
+    case remote_advance(state) do
+      {:advanced, remote_head} -> restart_on_remote_head(state, findings, remote_head)
+      :none -> launch_implementer(state, findings)
+    end
+  end
+
+  defp launch_implementer(state, findings) do
     impl_id = implementer_task_id(state.review_id, state.round)
 
     case launch_worker(
@@ -1545,6 +1564,104 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, finish(state, terminal_reject_verdict(state))}
     end
   end
+
+  # ---- the remote must not move under a fix round (bd-bq8c8a) --------------
+  #
+  # G18's companion, one step earlier in the round. `push_gate/1` asks "is the
+  # head I am about to review on the remote?" at the START of a round; this
+  # asks "has the remote moved past the head I just reviewed?" before a fix
+  # round is allowed to build on it.
+  #
+  # lt-20r7zu (admin_server PR #424, 2026-09-17): round 1 said REQUEST_CHANGES
+  # and dispatched an implementer; eighteen seconds later PRPatrol's fix worker
+  # pushed `aed4457` to `origin/<branch>`; twenty seconds after THAT the gate's
+  # implementer committed `19665a3` on the worktree — a sibling of the patrol
+  # commit, containing none of its work. The gate never fetched between the
+  # verdict and the commit, so the round could not notice, and `push_gate/1` at
+  # the end of the round could only report `:diverged` and park
+  # `head_not_pushed`. The round's whole cost was spent producing a commit that
+  # had to be thrown away by hand.
+  #
+  # The answer is not to reconcile the two lines of work — the gate cannot know
+  # whose commit is right — but to stop building on a head that is no longer
+  # the branch. A remote that STRICTLY ADVANCED (our head is an ancestor of it)
+  # is a fast-forward: sync onto it and open a fresh review round, which reads
+  # the new diff with this round's findings still on the thread, so nothing the
+  # reviewer said is lost.
+  #
+  # Every other shape is deliberately `:none` — off-branch worktree, no
+  # `origin`, git unavailable, a fetch that failed, or a branch that had
+  # ALREADY diverged before the round began. None of those is "the remote moved
+  # under us", and `push_gate/1` still owns them at the end of the round. This
+  # guard only ever *avoids* work; it never creates a new refusal.
+  @spec remote_advance(map()) :: {:advanced, String.t()} | :none
+  defp remote_advance(%{worktree_path: wt, branch: branch})
+       when is_binary(wt) and is_binary(branch) do
+    with {:ok, ^branch} <- Worktree.current_branch(wt),
+         {:ok, local} <- git_out(wt, ["rev-parse", "HEAD"]),
+         {:ok, _} <- git_out(wt, ["fetch", "--quiet", "origin", branch]),
+         {:ok, remote} <-
+           git_out(wt, ["rev-parse", "--verify", "--quiet", "origin/#{branch}^{commit}"]) do
+      if remote != local and ancestor?(wt, local, remote),
+        do: {:advanced, remote},
+        else: :none
+    else
+      _ -> :none
+    end
+  end
+
+  defp remote_advance(_state), do: :none
+
+  # The remote strictly advanced: fast-forward onto it and re-review, instead of
+  # dispatching a fix round that could only produce an orphan commit.
+  defp restart_on_remote_head(state, findings, remote_head) do
+    case Worktree.sync_from_origin(state.worktree_path, state.branch) do
+      {:ok, result} when result in [:up_to_date, :synced] ->
+        Logger.info(
+          "ReviewGate: task=#{state.task_id} round #{state.round} fix pass skipped — " <>
+            "`#{state.branch}` advanced to #{String.slice(remote_head, 0, 12)} on origin; " <>
+            "re-reviewing the new head instead"
+        )
+
+        state
+        |> record_thread(
+          :system,
+          "Round #{state.round} fix pass skipped — the branch moved on origin",
+          """
+          Another actor pushed to `origin/#{state.branch}` while this round was
+          reviewing: the branch is now #{String.slice(remote_head, 0, 12)}, and the head this
+          round read (#{state.head_sha}) is its ancestor.
+
+          A fix commit on top of the reviewed head would be a sibling of that push,
+          not a child — it could not be pushed, and the round's work would be
+          thrown away. No implementer was dispatched. The worktree has been
+          fast-forwarded onto the new head and the findings above are carried into
+          a fresh review round, which reads the pushed code.
+          """
+        )
+        |> Map.put(:commit_nudge_used, false)
+        |> then(&%{&1 | head_sha: current_head_sha(&1)})
+        |> dispatch_next_review(restarted_on_remote_head: remote_head)
+        |> keep_waiting()
+
+      other ->
+        # The fast-forward did not land (a race with yet another push, a git
+        # error). Fail open into the ordinary fix round — `push_gate/1` at the
+        # end of the round is still the backstop, exactly as before this guard.
+        Logger.warning(
+          "ReviewGate: task=#{state.task_id} could not fast-forward `#{state.branch}` onto " <>
+            "origin (#{inspect(other)}); proceeding with the fix round"
+        )
+
+        launch_implementer(state, findings)
+    end
+  end
+
+  # `dispatch_next_review/1` answers in the `:revising` loop's vocabulary
+  # (`:continue`); this call site is in the `:reviewing` loop, whose "keep
+  # waiting" token is `:revise`. Both mean `{:noreply, state}`.
+  defp keep_waiting({:continue, state}), do: {:revise, state}
+  defp keep_waiting({:done, state}), do: {:done, state}
 
   # The implementer finished addressing the round's findings. Capture its
   # transcript, post it back to the reviewer over the mailbox, and open the next
@@ -1639,7 +1756,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # pre-bd-2eyf9y behavior (proceed) rather than escalate on a guess.
   defp commit_gate_outcome(_state, _new_sha), do: {:advanced, nil}
 
-  defp dispatch_next_review(state) do
+  # `opts[:restarted_on_remote_head]` is the new remote sha when this round
+  # exists because the branch moved under us rather than because an implementer
+  # ran (bd-bq8c8a). It is set per-round — every ordinary caller leaves it nil,
+  # so the flag can never leak into a later round's prompt.
+  defp dispatch_next_review(state, opts \\ []) do
     # Reset the per-round retry budget so a reprompt used in this round does not
     # prevent a reprompt in the next round (bug bd-79goxj).
     # Also reset attempt counter so reprompts in the new round start fresh (bd-bgeo6i).
@@ -1650,7 +1771,8 @@ defmodule Arbiter.Worker.ReviewGate do
         retries_left: state.initial_retries,
         attempt: 0,
         verdict_scan: nil,
-        verdict_scans: []
+        verdict_scans: [],
+        restarted_on_remote_head: Keyword.get(opts, :restarted_on_remote_head)
     }
 
     review_id = reviewer_round_id(next.review_id, next.round)
@@ -3006,6 +3128,23 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp current_head_sha(_state), do: nil
 
+  # `{:ok, trimmed_stdout}` for a git command that succeeded in `path`, `:error`
+  # otherwise. Never raises: a missing worktree, a git that isn't there and a
+  # non-zero exit are all the same "cannot answer" to `remote_advance/1`.
+  defp git_out(path, args) do
+    case System.cmd("git", ["-C", path | args], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, String.trim(out)}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
+  defp ancestor?(path, a, b),
+    do: match?({:ok, _}, git_out(path, ["merge-base", "--is-ancestor", a, b]))
+
   # Return the FULL HEAD SHA for the worktree at `path`, or nil on any error.
   # Deliberately not the abbreviated form `current_head_sha_in/1` returns: this
   # one is compared against what the forge reports, and forges report 40 hex
@@ -3356,8 +3495,13 @@ defmodule Arbiter.Worker.ReviewGate do
   # (model + api keys), and the implementer role honors the worker `agent`
   # block. A workspace-less ReviewGate (ad-hoc run) falls back to today's
   # behaviour — `ClaudeSession`'s built-in default argv, no model flag.
-  defp build_session_opts(state, pid, _role, _prompt, command) when is_list(command) do
-    base = [owner: pid, worktree_path: state.worktree_path, command: command]
+  defp build_session_opts(state, pid, _role, prompt, command) when is_list(command) do
+    # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
+    # so the pass records what the agent was actually told
+    # (`ClaudeSession.start/1` forwards it as `:composed_prompt` →
+    # `Arbiter.Worker.PromptLog`). Without it a custom-argv pass leaves no
+    # record of its prompt at all.
+    base = [owner: pid, worktree_path: state.worktree_path, command: command, prompt: prompt]
 
     opts =
       case Map.get(state, :command_provider) do
@@ -4147,9 +4291,9 @@ defmodule Arbiter.Worker.ReviewGate do
   @spec rereview_prompt(map()) :: String.t()
   def rereview_prompt(state) do
     """
-    This is review round #{state.round} of a revise-and-rediscuss loop. The
-    implementer has addressed your prior findings. Re-review the UPDATED diff. For
-    each prior finding, decide whether to ACCEPT the fix/rebuttal or HOLD THE
+    This is review round #{state.round} of a revise-and-rediscuss loop.
+    #{why_rereviewing(state)}
+    For each prior finding, decide whether to ACCEPT the fix/rebuttal or HOLD THE
     LINE, then issue a fresh verdict on the current state of the branch.
 
     *** For EACH prior finding you are tempted to HOLD THE LINE on, re-open the
@@ -4165,6 +4309,33 @@ defmodule Arbiter.Worker.ReviewGate do
     ----------------------------------------------------------------------
 
     """ <> review_prompt(state)
+  end
+
+  # Why there is a new diff to read. bd-bq8c8a: on `restart_on_remote_head/3`'s
+  # path there is no implementer round behind this one — the head changed
+  # because a third party pushed to the branch, and that commit was not aimed
+  # at this reviewer's findings. Telling the reviewer otherwise invites it to
+  # disposition its own open findings `[ADDRESSED]` against a diff that never
+  # targeted them, which is the exact bd-6r8caj failure the open-findings
+  # briefing exists to prevent.
+  defp why_rereviewing(state) do
+    case Map.get(state, :restarted_on_remote_head) do
+      nil ->
+        """
+        The implementer has addressed your prior findings. Re-review the UPDATED
+        diff.
+        """
+
+      sha ->
+        """
+        NO implementer ran for your prior findings. Instead the branch moved on
+        origin: another actor pushed #{String.slice(sha, 0, 12)}, which is now the head, and
+        the fix round was skipped rather than build a commit that could not be
+        pushed. NOTHING in this diff was written in response to your findings —
+        re-check each one against the new code on its own terms, and do not
+        treat a finding as addressed unless the new head actually addresses it.
+        """
+    end
   end
 
   # bd-6r8caj: the open findings, by id, plus the DISPOSITIONS instruction that
