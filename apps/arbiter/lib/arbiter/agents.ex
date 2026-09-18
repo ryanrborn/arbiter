@@ -201,12 +201,25 @@ defmodule Arbiter.Agents do
   # they were written, with unrecognized entries dropped. A single string is a
   # one-entry pool. Shared by `reviewer_pool/1`; `agent_type/2` above keeps its
   # own (health-aware, single-answer) resolution.
+  #
+  # `safe_type_atom/1` is NOT sufficient on its own here: it only proves the
+  # atom exists somewhere in the VM, not that it names an adapter, so a typo'd
+  # `"nope"` can survive it whenever anything else in the system has ever used
+  # that atom. Every entry is checked against the adapter registry, because a
+  # pool entry is handed straight to `for_type/1`, which raises on an
+  # unregistered type.
   defp configured_types(config, role) do
     case get_in(config || %{}, [Atom.to_string(role), "type"]) do
-      type when is_binary(type) -> Enum.reject([safe_type_atom(type)], &is_nil/1)
-      types when is_list(types) -> types |> Enum.map(&safe_type_atom/1) |> Enum.reject(&is_nil/1)
+      type when is_binary(type) -> registered_types([type])
+      types when is_list(types) -> registered_types(types)
       _ -> []
     end
+  end
+
+  defp registered_types(types) do
+    types
+    |> Enum.map(&safe_type_atom/1)
+    |> Enum.filter(&Map.has_key?(@adapters, &1))
   end
 
   defp safe_type_atom(t) when is_binary(t) do

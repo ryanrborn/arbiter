@@ -121,10 +121,17 @@ defmodule Arbiter.Agents.MultiProviderRoutingTest do
       assert Agents.reviewer_pool(nil) == [:claude]
     end
 
-    test "drops unrecognized type strings rather than raising" do
-      ws = %Workspace{config: %{"review_agent" => %{"type" => ["nope", "claude"]}}}
+    # `:error` is deliberately a type string whose ATOM certainly exists in the
+    # VM — `String.to_existing_atom/1` alone would wave it through and hand
+    # `for_type/1` something it raises on. The pool must filter against the
+    # adapter registry, not merely against the atom table.
+    test "drops type strings with no registered adapter, even when the atom exists" do
+      ws = %Workspace{config: %{"review_agent" => %{"type" => ["error", "claude"]}}}
 
       assert Agents.reviewer_pool(ws) == [:claude]
+
+      bare = %Workspace{config: %{"review_agent" => %{"type" => "error"}}}
+      assert Agents.reviewer_pool(bare) == [:claude]
     end
   end
 end
