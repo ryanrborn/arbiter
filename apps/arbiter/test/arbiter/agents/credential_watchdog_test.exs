@@ -173,6 +173,31 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
     end
   end
 
+  # ---- empty adapter list is a supported no-probe posture (bd-2jgs2h) ------
+
+  describe "empty adapter list (:adapters set to [])" do
+    test "expired?/2, mark_expired/3 and mark_recovered/2 all still work with nothing probed" do
+      pid = start_watchdog(adapters: [], enabled: true, interval_ms: 50, recovery_interval_ms: 50)
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      assert_eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid) end)
+
+      # A live periodic tick over an empty adapter list must not clear (or
+      # otherwise disturb) a mark set out-of-band — nothing is probing it.
+      # Drive the tick directly instead of waiting on the timer, and use
+      # `:sys.get_state/1` as a deterministic barrier: it only replies once
+      # the `:check` message ahead of it in the mailbox has been handled.
+      send(pid, :check)
+      _ = :sys.get_state(pid)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid)
+      assert_eventually(fn -> not CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid) end)
+    end
+  end
+
   # ---- runtime configuration (bd-ajgve2) -----------------------------------
 
   describe "probe_adapters/1" do

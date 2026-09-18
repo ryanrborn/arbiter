@@ -56,7 +56,6 @@ defmodule Arbiter.Worker.Dispatch do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
-  alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.CircuitBreaker
@@ -103,7 +102,6 @@ defmodule Arbiter.Worker.Dispatch do
           security: map() | nil,
           security_mode: String.t() | atom() | nil,
           preflight: boolean(),
-          probe_command: [String.t()] | nil,
           agent_adapter: module() | nil,
           depth: non_neg_integer()
         ]
@@ -1468,17 +1466,26 @@ defmodule Arbiter.Worker.Dispatch do
     IssueRepo.configured_repos(ws_id)
   end
 
-  # Pre-flight auth check (bd-awi4nw): before transitioning the task and
-  # dispatching a (paid, autonomous) worker, verify the agent CLI can
-  # authenticate with a single cheap probe. If it can't — the confirmed
-  # OAuth-expiry case where every spawn 401s — REFUSE to dispatch, escalate to the
-  # coordinator with a re-auth remediation, and abort before any task/worktree state
-  # is mutated.
+  # Pre-flight auth guard (bd-awi4nw, retired to a guard-only check by bd-2jgs2h):
+  # before transitioning the task and dispatching a (paid, autonomous) worker,
+  # refuse immediately if `CredentialWatchdog` already knows this adapter's
+  # credentials are expired.
   #
-  # Only runs on the real-agent path: skipped unless `start_claude: true`, and
-  # skipped when a `:claude_command` test override is in play (no real CLI to
-  # probe) unless the caller injects a `:probe_command`. Opt out entirely with
-  # `preflight: false`.
+  # THIS NO LONGER RUNS A LIVE PROBE. Measured 2026-09-18: 10 auth-failed worker
+  # runs in 90 days (half of them mid-run, where no pre-flight probe could have
+  # helped anyway) against ~760 billed probes/day (~$23/week for Claude alone)
+  # spent asking "are you logged in?" before every single dispatch and resume.
+  # A rejected spawn bills nothing at the provider and the CLI exits in 3-5s, so
+  # the cheaper policy is: dispatch, and let a dead credential fail fast. What
+  # still has to be bounded is a *wave* of those fast failures against the same
+  # dead credential — that is what this guard does, for free, off state
+  # `Arbiter.Worker.fail_stopped/2` already writes via `CredentialWatchdog.mark_expired/2`
+  # when a worker dies with `:auth_expired`. See `Arbiter.Agents.CredentialWatchdog`'s
+  # moduledoc for the full posture, including how (and whether) an expired mark
+  # ever clears without a live probe.
+  #
+  # Only runs on the real-agent path: skipped unless `start_claude: true`.
+  # Opt out entirely with `preflight: false`.
   defp maybe_preflight(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :preflight, true) == false ->
@@ -1487,54 +1494,24 @@ defmodule Arbiter.Worker.Dispatch do
       not Keyword.get(opts, :start_claude, false) ->
         :ok
 
-      Keyword.has_key?(opts, :claude_command) and not Keyword.has_key?(opts, :probe_command) ->
-        :ok
-
       true ->
-        run_preflight(task, opts)
+        guard_known_expired(task, opts)
     end
   end
 
-  defp run_preflight(%Issue{} = task, opts) do
+  defp guard_known_expired(%Issue{} = task, opts) do
     workspace = load_workspace(task)
-    :ok = Agents.prepare(workspace, :agent)
     adapter = preflight_adapter(task, workspace, opts)
 
     # bd-5wchp1: if the CredentialWatchdog already knows this adapter's creds are
-    # expired, refuse immediately without re-running the expensive probe. The
+    # expired, refuse immediately — a plain state lookup, no process spawn. The
     # guard is skipped when the watchdog isn't running (returns false by default).
     if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
       reason = known_expired_stop_reason()
       escalate_preflight_failure(preflight_snapshot(task, opts), reason)
       {:error, {:auth_check_failed, reason}}
     else
-      # bd-bw3466: thread the workspace through as well. `Preflight.check/2`
-      # defaults the probe env to the adapter's `spawn_env/1`, which resolves
-      # CLAUDE_CODE_OAUTH_TOKEN from the workspace's encrypted `worker_env` —
-      # `preflight_opts/1`'s Keyword.take used to drop `:workspace`, so the
-      # probe ran unauthenticated whenever the install-wide fallback couldn't
-      # answer (several workspaces with different tokens), failing every
-      # dispatch with {:auth_check_failed, ...} before a worker ever spawned.
-      # The workspace is loaded right here at :1456 — there is no reason to
-      # lean on the install-wide fallback for this call site.
-      # bd-adyhvn: `:usage_task_id` so the pre-flight's own spend (~39K
-      # cache-read tokens a call, once per dispatch and once per resume) lands
-      # in the ledger attributed to the task it was gating. `:workspace` already
-      # carries the workspace the row is attributed to.
-      probe_opts =
-        preflight_opts(opts) ++ [workspace: workspace, usage_task_id: task.id]
-
-      case Preflight.check(adapter, probe_opts) do
-        :ok ->
-          :ok
-
-        :skipped ->
-          :ok
-
-        {:error, reason} ->
-          escalate_preflight_failure(preflight_snapshot(task, opts), reason)
-          {:error, {:auth_check_failed, reason}}
-      end
+      :ok
     end
   end
 
@@ -1568,22 +1545,17 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp preflight_opts(opts) do
-    opts
-    |> Keyword.take([:probe_command, :probe_env, :timeout_ms, :api_key, :model, :model_tier])
-  end
-
   @doc """
-  Page the coordinator about a refused pre-flight auth probe, behind the shared
+  Page the coordinator about a refused pre-flight auth guard, behind the shared
   circuit breaker (bd-5jr49o).
 
-  Both `run_preflight/2` refusal paths — the CredentialWatchdog's
-  known-expired short circuit and a live `Preflight.check/2` failure — funnel
-  through here, which is the choke point bd-8lnnnt's own fix picked for the
-  same reason: the breaker must be independent of *which* caller retried.
-  `Arbiter.Workflows.DispatchQueue`'s held-intent drain re-runs the doomed
-  probe on `CloudProbe`'s ~5-minute cadence, so one task stuck behind an
-  exhausted 5h window produced 14 identical pages in 75 minutes.
+  `guard_known_expired/2`'s refusal — the CredentialWatchdog's known-expired
+  short circuit — funnels through here, which is the choke point bd-8lnnnt's
+  own fix picked for the same reason: the breaker must be independent of
+  *which* caller retried. `Arbiter.Workflows.DispatchQueue`'s held-intent
+  drain would otherwise re-run this same refusal on `CloudProbe`'s ~5-minute
+  cadence, so one task stuck behind a known-expired credential produced 14
+  identical pages in 75 minutes.
 
   The breaker is keyed on task + refusal category, NOT on the reason summary,
   which carries the elapsed time and attempt number. Returns `:ok` when the
@@ -1601,9 +1573,9 @@ defmodule Arbiter.Worker.Dispatch do
           workspace_id: Map.get(snapshot, :workspace_id),
           task_ref: Map.get(snapshot, :task_id),
           detail:
-            "Pre-flight auth probe kept refusing dispatch for this task. Only an " <>
-              "operator or the clock can clear it — re-authenticate the agent CLI, or " <>
-              "wait for the usage window to reset."
+            "The CredentialWatchdog's known-expired guard kept refusing dispatch for " <>
+              "this task. Only an operator can clear it — re-authenticate the agent " <>
+              "CLI, then re-dispatch."
         ],
         fn -> CoordinatorNotifier.preflight_failed(snapshot, reason) end
       )

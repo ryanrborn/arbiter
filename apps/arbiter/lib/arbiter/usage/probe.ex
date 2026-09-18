@@ -5,8 +5,12 @@ defmodule Arbiter.Usage.Probe do
   One caller spends real plan quota without ever going through
   `Arbiter.Worker` — which is the only other path that writes `usage_events`:
 
-    * `Arbiter.Agents.Preflight` — one `claude --print "ping"` per dispatch
-      **and** per resume, plus the `CredentialWatchdog`'s periodic check.
+    * `Arbiter.Agents.Preflight` — as of bd-2jgs2h (2026-09-18), the
+      `CredentialWatchdog`'s periodic check is its only live caller; the
+      per-dispatch and per-resume auth probe was retired (see
+      `Arbiter.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`).
+      Task-attributed `:preflight` rows in `usage_events` predating that date
+      are historical.
 
   (A second caller, `Arbiter.Quota.RefreshProbe` — one `claude --print "ok"`
   per workspace whenever the quota snapshot needed refreshing — was deleted in
