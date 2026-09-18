@@ -84,10 +84,20 @@ function joinRefusal(err) {
  * finished marking running. Those are exactly what the first join after a
  * launch redirect can land in, and the client's job there is to keep asking.
  */
-const PERMANENT_REFUSALS = ["session_gone", "bad_topic"]
+const PERMANENT_REFUSALS = ["session_gone", "bad_topic", "transcript_unavailable"]
 
 /**
  * One attached terminal client.
+ *
+ * `mode: "transcript"` is the same client reading a session that is already
+ * over (bd-3tf4oo): the join asks the server to replay the persisted raw
+ * capture instead of attaching a reader, the bytes arrive as the one
+ * `snapshot` every other client path already knows how to paint, and then
+ * this stream *hangs up*. It puts nothing on the wire — no stdin, no resize,
+ * no redraw — and it never reports `"live"`: its statuses are `"connecting"`
+ * then `"transcript"`, or `"unavailable"` for a file that is gone. A finished
+ * session has nothing to reconnect to, and a client that kept trying would be
+ * the "is this live?" ambiguity this mode exists to remove.
  *
  * `sink` is the renderer-shaped side of it, all optional:
  *
@@ -99,7 +109,8 @@ const PERMANENT_REFUSALS = ["session_gone", "bad_topic"]
  *                          `{tokens_in, tokens_out, cache_creation,
  *                          cache_read, cost_usd, model, estimated}`
  *   status(state)          "connecting" | "live" | "reconnecting" |
- *                          "detached" | "ended"
+ *                          "detached" | "ended" | "transcript" |
+ *                          "unavailable"
  */
 export class SessionStream {
   constructor({
@@ -108,6 +119,7 @@ export class SessionStream {
     geometry,
     sink = {},
     lastSeq = null,
+    mode = null,
     stdinChunkBytes = DEFAULT_STDIN_CHUNK_BYTES,
     resizeDebounceMs = DEFAULT_RESIZE_DEBOUNCE_MS
   }) {
@@ -115,6 +127,9 @@ export class SessionStream {
     this.sessionId = sessionId
     this.geometry = geometry || (() => ({}))
     this.sink = sink
+    // `"transcript"` or nothing. Kept as the server's own word for it, since
+    // it goes back out in the join params verbatim.
+    this.mode = mode === "transcript" ? "transcript" : null
     this.stdinChunkBytes = stdinChunkBytes
     this.resizeDebounceMs = resizeDebounceMs
 
@@ -158,6 +173,8 @@ export class SessionStream {
     // wherever the very first connection started — a real trap, and a silent
     // one: the terminal would look fine and repaint the whole session.
     this.channel = this.socket.channel(`session:${this.sessionId}`, () => {
+      if (this.mode === "transcript") return { mode: "transcript" }
+
       const { cols, rows } = this.geometry() || {}
       return { last_seq: this._lastSeq, cols, rows }
     })
@@ -180,7 +197,7 @@ export class SessionStream {
       .receive("ok", (reply) => {
         this.joins += 1
         if (this.joins > 1) this.reconnects += 1
-        this._setStatus("live")
+        this._setStatus(this.mode === "transcript" ? "transcript" : "live")
         this._emit("joined", reply)
       })
       .receive("error", (err) => this._onJoinRefused(err))
@@ -203,7 +220,9 @@ export class SessionStream {
   }
 
   sendBytes(bytes) {
-    if (!this.channel || this.finished || bytes.length === 0) return false
+    if (!this.channel || this.finished || this.mode === "transcript" || bytes.length === 0) {
+      return false
+    }
 
     for (let offset = 0; offset < bytes.length; offset += this.stdinChunkBytes) {
       const chunk = bytes.subarray(offset, offset + this.stdinChunkBytes)
@@ -226,6 +245,7 @@ export class SessionStream {
    * *every* attached client, then makes the agent redraw.
    */
   resize(cols, rows) {
+    if (this.mode === "transcript") return
     if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return
 
     this._pendingResize = { cols, rows }
@@ -270,7 +290,7 @@ export class SessionStream {
    * its own. This is the explicit ask, and the server owns how to deliver it.
    */
   redraw() {
-    if (!this.channel || this.finished) return false
+    if (!this.channel || this.finished || this.mode === "transcript") return false
 
     this.channel.push("redraw", {})
     return true
@@ -340,6 +360,12 @@ export class SessionStream {
     const rejoin = this.joins > 1
     this._lastSeq = seq
     this._emit("repaint", seq, data, { rejoin })
+
+    // A transcript is one snapshot and then nothing, ever. Hanging up here —
+    // rather than leaving a socket open against a session that ended days ago
+    // — is what makes "no reconnect behaviour" true rather than merely
+    // unlikely, and it costs an ended window zero connections.
+    if (this.mode === "transcript") this._finish("transcript")
   }
 
   _onJoinRefused(err) {
@@ -351,7 +377,7 @@ export class SessionStream {
     if (PERMANENT_REFUSALS.includes(refusal.code)) {
       // phoenix.js would otherwise rejoin a topic that can never accept it,
       // every few seconds, for as long as the tab is open.
-      this._finish("ended")
+      this._finish(refusal.code === "transcript_unavailable" ? "unavailable" : "ended")
       return
     }
 

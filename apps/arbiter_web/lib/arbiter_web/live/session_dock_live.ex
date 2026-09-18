@@ -984,7 +984,9 @@ defmodule ArbiterWeb.SessionDockLive do
         live: "live",
         reconnecting: "reconnecting…",
         detached: "detached",
-        ended: "agent exited"
+        ended: "agent exited",
+        transcript: "transcript (read-only)",
+        unavailable: "transcript unavailable"
       }
 
       function formatTokens(n) {
@@ -998,18 +1000,26 @@ defmodule ArbiterWeb.SessionDockLive do
           this.sessionId = this.el.dataset.sessionId
           this.statusEl = document.getElementById(`session-dock-status-${this.sessionId}`)
 
-          // The server already knows this window is a record rather than a
-          // client: its session ended under a previous xterm and a LiveView
-          // rejoin has just rebuilt the element. Opening a `/session` socket
-          // for it would only sit at "reconnecting…" against a dead session,
-          // so this one is built read-only, painted from what the previous
-          // xterm left behind, and never connects.
-          const frozen = !!this.el.dataset.readonly
-          this.state = frozen ? "ended" : "connecting"
+          // Two kinds of read-only pane, and they are not the same kind.
+          //
+          // `data-transcript` is a session that ended *before this browser
+          // session* (bd-3tf4oo): nothing was kept in memory for it, so the
+          // pane joins the channel in transcript mode and is painted from the
+          // persisted raw capture the server replays.
+          //
+          // `data-readonly` on its own is the frozen pane of a session that
+          // ended under a previous xterm here and was rebuilt by a LiveView
+          // rejoin. It opens no socket at all — there is nothing on the other
+          // end of one — and is painted from what that xterm left behind.
+          const transcript = this.el.dataset.transcript === "true"
+          const frozen = !!this.el.dataset.readonly && !transcript
+          this.transcript = transcript
+          this.state = transcript ? "transcript" : frozen ? "ended" : "connecting"
           if (frozen) markFrozen(this.sessionId)
 
           this.terminal = createSessionTerminal(this.el, {
             sessionId: this.sessionId,
+            transcript,
             readOnly: frozen,
             restoredText: frozen ? finalScreenFor(this.sessionId) : null,
             // The resume point the *previous* xterm for this session left
@@ -1101,7 +1111,7 @@ defmodule ArbiterWeb.SessionDockLive do
           // xterm rather than about a stand-in.
           this.el.__arbTerminal = this.terminal
 
-          if (!frozen) this.terminal.focus()
+          if (!frozen && !transcript) this.terminal.focus()
         },
 
         // LiveView merges `data-*` attributes onto a `phx-update="ignore"`
@@ -1113,7 +1123,12 @@ defmodule ArbiterWeb.SessionDockLive do
           if (!this.terminal || !this.el.dataset.readonly) return
 
           this.terminal.setReadOnly()
-          markFrozen(this.sessionId)
+
+          // A replayed transcript is not this browser's scrollback: there is
+          // no final screen of ours to keep, and claiming the window is frozen
+          // would make a rejoin rebuild it from an empty one instead of
+          // replaying the file again.
+          if (this.el.dataset.transcript !== "true") markFrozen(this.sessionId)
         },
 
         // A LiveView rejoin re-runs `mount/3` — the strip is server-rendered as
@@ -1140,11 +1155,19 @@ defmodule ArbiterWeb.SessionDockLive do
           // its screen rather than an offset (bd-a292yj). A LiveView rejoin —
           // which re-renders the dock from an empty mount — is the one thing
           // that gets here with a window still open.
-          if (this.terminal.readOnly()) {
-            rememberFinalScreen(this.sessionId, this.terminal.snapshot())
+          //
+          // A *replayed* pane keeps neither: the file it was painted from is
+          // still on disk and is replayed again from scratch, so a kept screen
+          // would only be a staler copy of it, and its `lastSeq` is an offset
+          // into that file rather than into any live stream (bd-3tf4oo).
+          if (!this.transcript) {
+            if (this.terminal.readOnly()) {
+              rememberFinalScreen(this.sessionId, this.terminal.snapshot())
+            }
+
+            rememberResume(this.sessionId, this.terminal.stream.lastSeq)
           }
 
-          rememberResume(this.sessionId, this.terminal.stream.lastSeq)
           this.terminal.dispose()
           this.terminal = null
           this.el.__arbTerminal = null
