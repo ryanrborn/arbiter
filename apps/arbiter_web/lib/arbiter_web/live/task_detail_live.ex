@@ -61,6 +61,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Mergers
   alias Arbiter.Messages.Message
   alias Arbiter.ReviewGate.Round
+  alias Arbiter.Sessions.Refine
   alias Arbiter.Skills.Selection
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
@@ -78,7 +79,6 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Worker.SessionArchive
   alias Arbiter.Workers.Run
-  alias Arbiter.Sessions.Refine
   alias ArbiterWeb.SessionUsage
   alias ArbiterWeb.TaskForm
   require Ash.Query
