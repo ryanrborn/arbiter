@@ -16,6 +16,7 @@ defmodule Arbiter.Agents.PreflightProbeTest do
   alias Arbiter.Agents.Claude
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.Preflight
+  alias Arbiter.Usage
   alias Arbiter.Worker.StopReason
 
   setup do
@@ -198,6 +199,68 @@ defmodule Arbiter.Agents.PreflightProbeTest do
   end
 
   # Acceptance 8: a dispatch wave probes once, not once per dispatch.
+  # The probe's verdict must come from the CLI's own structured result, not from
+  # scraping the agent's intermediate telemetry for failure signatures.
+  #
+  # Captured live from agy 1.2.6 on 2026-09-18. `ping` is not a ping to an
+  # agentic CLI: carrying the Arbiter-worker `GEMINI.md` from its isolated HOME,
+  # agy answered it with a 14-step turn that shelled out to `arb prime`. The
+  # backlog that printed contained a task titled "…generalise the 401-shaped
+  # detection", and the line-scraping classifier read that text as proof the
+  # credentials had expired — on a probe that had authenticated fine and exited
+  # 0. Under `CredentialWatchdog` an `:auth_expired` verdict marks the adapter
+  # dead and refuses *every* dispatch for it, fleet-wide, until an operator
+  # resets it. The same run also drew `:context_thrash` from agy's falling
+  # per-step `input_tokens`.
+  describe "a structured success result is the verdict (bd-svczq4)" do
+    @agy_stream Path.join(__DIR__, "../../fixtures/agy_probe_stream.jsonl")
+
+    defp agy_stream_lines do
+      @agy_stream |> File.read!() |> String.split("\n", trim: true)
+    end
+
+    test "the captured stream really does carry an auth-shaped decoy" do
+      # Guards the fixture itself: if this stops classifying as :auth_expired the
+      # test below silently stops testing anything.
+      {_usage, diagnostic} = Usage.Probe.parse(agy_stream_lines())
+
+      assert StopReason.classify(0, diagnostic).category == :auth_expired
+    end
+
+    test "a healthy agy probe is :ok despite auth-shaped text in its tool output" do
+      script = "cat #{@agy_stream}; exit 0"
+
+      assert :ok =
+               Preflight.check(Gemini, probe_command: ["sh", "-c", script], probe_env: [])
+    end
+
+    test "the structured result still feeds the ledger" do
+      {usage, _diagnostic} = Usage.Probe.parse(agy_stream_lines())
+
+      assert usage.tokens_in == 71_410
+      assert usage.tokens_out == 2_460
+      assert usage.thinking_tokens == 1_982
+    end
+
+    test "a non-zero exit is still classified from the output" do
+      script = "echo 'API key not valid. Please pass a valid API key.'; exit 1"
+
+      assert {:error, reason} =
+               Preflight.check(Gemini, probe_command: ["sh", "-c", script], probe_env: [])
+
+      assert reason.category == :auth_expired
+    end
+
+    test "a CLI that prints an auth failure and exits 0 without a result is still refused" do
+      script = "echo '401 invalid authentication credentials'; exit 0"
+
+      assert {:error, reason} =
+               Preflight.check(Gemini, probe_command: ["sh", "-c", script], probe_env: [])
+
+      assert reason.category == :auth_expired
+    end
+  end
+
   # Acceptance 6: the fail-open decision has to be *findable*, not just coded.
   describe "documented decision" do
     test "the moduledoc records the fail-open decision" do

@@ -92,6 +92,31 @@ defmodule Arbiter.Agents.Preflight do
   `:spawn_executable` child, and the agy probe that triggered this ticket
   outlived the watchdog by 72 seconds, still calling the API.
 
+  ## The CLI's own result is the verdict (bd-svczq4)
+
+  A clean exit *plus* a successful structured result object is conclusive: the
+  probe authenticated. The lines around it are not re-scanned for failure
+  signatures, because they are the agent's work product, not a diagnostic about
+  our credentials — and treating them as one was dangerous. Measured live on
+  2026-09-18: agy, carrying the Arbiter-worker `GEMINI.md` from its isolated
+  HOME, answered `ping` with a 14-step agentic turn that shelled out to
+  `arb prime`. The backlog it printed contained a task titled "…generalise the
+  401-shaped detection", and the classifier read that text as `:auth_expired` —
+  which, from the `CredentialWatchdog`, marks the adapter dead and refuses every
+  dispatch for it fleet-wide. The same run also drew `:context_thrash` from
+  agy's falling per-step `input_tokens`.
+
+  `Arbiter.Usage.Probe.parse/1` only yields usage for a *successful* result
+  payload (Claude's `is_error`, agy's non-SUCCESS `status`), so a CLI that
+  reports its own failure still falls through to the classifier, as does one
+  that prints an auth error and exits 0 without any result object at all.
+
+  That the probe is *still an agentic turn* — 7 `run_command` calls and ~71K
+  input tokens to say "pong" — is not fixed here. The neutral cwd (below) means
+  it has no repo to wander into, and bd-2jgs2h means it no longer runs per
+  dispatch, so what remains is cost and noise on the Watchdog's poll rather than
+  a correctness problem.
+
   ## The spend this costs (bd-adyhvn, bd-2jgs2h)
 
   A probe is not free: a one-word prompt still ships the CLI's whole system
@@ -297,7 +322,7 @@ defmodule Arbiter.Agents.Preflight do
     {usage, diagnostic_lines} = Usage.Probe.parse(lines)
     record_usage(adapter, usage, status, opts, elapsed)
 
-    verdict(outcome, diagnostic_lines, adapter, timeout, elapsed)
+    verdict(outcome, diagnostic_lines, adapter, timeout, elapsed, usage != nil)
   rescue
     e -> {:error, probe_unavailable(Exception.message(e))}
   end
@@ -348,7 +373,7 @@ defmodule Arbiter.Agents.Preflight do
   # accept when it sees no failure signature.
   # A timeout is the one outcome that says nothing about the credentials, so it
   # fails open by default — see the moduledoc's decision section.
-  defp verdict(:timeout, lines, adapter, timeout, elapsed) do
+  defp verdict(:timeout, lines, adapter, timeout, elapsed, _structured_result?) do
     reason =
       StopReason.preflight_timeout(
         timeout_ms: timeout,
@@ -365,10 +390,24 @@ defmodule Arbiter.Agents.Preflight do
     end
   end
 
-  defp verdict({:exit, status}, lines, _adapter, _timeout, _elapsed),
-    do: verdict_for_exit(status, lines)
+  defp verdict({:exit, status}, lines, _adapter, _timeout, _elapsed, structured_result?),
+    do: verdict_for_exit(status, lines, structured_result?)
 
-  defp verdict_for_exit(0, lines) do
+  # bd-svczq4: when the CLI exited 0 *and* returned its own successful result
+  # object, that is the verdict — full stop. Scraping the lines around it for
+  # failure signatures is reading the agent's work product as a diagnostic about
+  # our credentials, and it is actively dangerous: a healthy agy probe (which,
+  # carrying the Arbiter-worker `GEMINI.md`, answers "ping" with a real agentic
+  # turn) shelled out to `arb prime`, and the backlog it printed contained a
+  # task titled "…generalise the 401-shaped detection". The classifier called
+  # that `:auth_expired`. Under `CredentialWatchdog` that verdict marks the
+  # adapter dead and refuses every dispatch for it, fleet-wide, off a probe that
+  # had authenticated perfectly. `Arbiter.Usage.Probe.parse/1` only yields usage
+  # for a *successful* result payload — a failed one (Claude's `is_error`, agy's
+  # non-SUCCESS `status`) stays in the haystack below.
+  defp verdict_for_exit(0, _lines, true), do: :ok
+
+  defp verdict_for_exit(0, lines, false) do
     reason = StopReason.classify(0, lines)
 
     case reason.category do
@@ -381,7 +420,8 @@ defmodule Arbiter.Agents.Preflight do
     end
   end
 
-  defp verdict_for_exit(status, lines), do: {:error, StopReason.classify(status, lines)}
+  defp verdict_for_exit(status, lines, _structured_result?),
+    do: {:error, StopReason.classify(status, lines)}
 
   defp record_usage(adapter, usage, status, opts, elapsed_ms) do
     Usage.Probe.record(:preflight, usage,

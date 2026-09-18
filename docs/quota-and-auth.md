@@ -141,6 +141,32 @@ the operator to a worker transcript that does not exist. The `:stalled`
 category it used to borrow no longer claims "produced no output" when output
 did in fact arrive — that branch keyed on `exit_status == nil` alone.
 
+### The CLI's own result is the verdict
+
+Bounding the probe surfaced a second, sharper defect. Measured live on
+2026-09-18 with the bounded argv above: agy answered `ping` with a **14-step
+agentic turn** — 7 `run_command` calls, ~71K input tokens, 31.9s — because the
+Arbiter-worker `GEMINI.md` in its isolated `$HOME` tells it it is a worker with
+a task. One of those commands was `arb prime`. The backlog it printed contained
+a task titled *"Auth pre-flight P2: free expiry signals for codex and agy —
+generalise the 401-shaped detection"*, and Arbiter's line-scraping classifier
+read that text as proof its own credentials had expired. On a probe that
+authenticated fine and exited 0.
+
+From the `CredentialWatchdog` an `:auth_expired` verdict marks the adapter dead
+and refuses **every** dispatch for it, fleet-wide, until an operator resets it.
+So: a clean exit plus a successful structured result object is now conclusive,
+and the surrounding lines are not re-scanned. They are the agent's work product,
+not a diagnostic about our credentials. A CLI that reports its own failure
+(Claude's `is_error`, agy's non-SUCCESS `status`), or that prints an auth error
+and exits 0 with no result object, still falls through to the classifier.
+
+What is *not* fixed: the probe is still an agentic turn. The neutral cwd means
+it has no repo to wander into, and it no longer runs per dispatch, so what
+remains is cost and noise on the Watchdog's poll rather than a correctness
+problem. Making the probe non-agentic (a deny-all tool posture, or dropping the
+model round-trip entirely) is follow-up work.
+
 ## Out of scope here
 
 Two follow-ups were filed instead of folded in:
