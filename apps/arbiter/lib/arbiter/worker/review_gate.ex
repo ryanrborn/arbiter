@@ -3495,8 +3495,13 @@ defmodule Arbiter.Worker.ReviewGate do
   # (model + api keys), and the implementer role honors the worker `agent`
   # block. A workspace-less ReviewGate (ad-hoc run) falls back to today's
   # behaviour — `ClaudeSession`'s built-in default argv, no model flag.
-  defp build_session_opts(state, pid, _role, _prompt, command) when is_list(command) do
-    base = [owner: pid, worktree_path: state.worktree_path, command: command]
+  defp build_session_opts(state, pid, _role, prompt, command) when is_list(command) do
+    # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
+    # so the pass records what the agent was actually told
+    # (`ClaudeSession.start/1` forwards it as `:composed_prompt` →
+    # `Arbiter.Worker.PromptLog`). Without it a custom-argv pass leaves no
+    # record of its prompt at all.
+    base = [owner: pid, worktree_path: state.worktree_path, command: command, prompt: prompt]
 
     opts =
       case Map.get(state, :command_provider) do
