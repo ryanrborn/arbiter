@@ -319,14 +319,18 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # No CredentialWatchdog expiry mark, so the guard is a plain state
       # lookup — no CLI probe is spawned. The dispatch still fails downstream
-      # (no worktree provisioned), just never via a probe.
+      # (no worktree provisioned), just never via a probe. Deliberately no
+      # `claude_command:` override here: the old `maybe_preflight/2` had a
+      # clause that skipped the probe whenever `claude_command` was set
+      # without `probe_command`, which would have made this assertion pass
+      # even against the pre-change code. That clause is gone — the guard
+      # never spawns a probe at all now — so this exercises the real path.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
-                 provision_worktree: false,
-                 claude_command: ["sh", "-c", "exit 0"]
+                 provision_worktree: false
                )
 
       # A live probe (the old `Preflight.check/2` call inside `run_preflight/2`)

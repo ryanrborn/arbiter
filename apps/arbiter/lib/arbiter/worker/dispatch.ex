@@ -1573,9 +1573,9 @@ defmodule Arbiter.Worker.Dispatch do
           workspace_id: Map.get(snapshot, :workspace_id),
           task_ref: Map.get(snapshot, :task_id),
           detail:
-            "Pre-flight auth probe kept refusing dispatch for this task. Only an " <>
-              "operator or the clock can clear it — re-authenticate the agent CLI, or " <>
-              "wait for the usage window to reset."
+            "The CredentialWatchdog's known-expired guard kept refusing dispatch for " <>
+              "this task. Only an operator can clear it — re-authenticate the agent " <>
+              "CLI, then re-dispatch."
         ],
         fn -> CoordinatorNotifier.preflight_failed(snapshot, reason) end
       )

@@ -129,7 +129,8 @@ defmodule Arbiter.CircuitBreaker do
       kind: :preflight_auth_failed,
       module: Arbiter.Worker.Dispatch,
       description:
-        "Pre-flight auth-check escalation raised when Agents.Preflight refuses a dispatch. " <>
+        "Pre-flight auth-check escalation raised when the CredentialWatchdog's " <>
+          "known-expired guard refuses a dispatch (`Arbiter.Worker.Dispatch.guard_known_expired/2`). " <>
           "Bounds the bd-8lnnnt shape: 14 identical pages in 75 minutes for one " <>
           "exhausted usage window. The default sits well above the retry volume " <>
           "bd-8lnnnt's own uncleared-page dedupe already absorbs, so this only fires on a " <>

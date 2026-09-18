@@ -186,7 +186,11 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
 
       # A live periodic tick over an empty adapter list must not clear (or
       # otherwise disturb) a mark set out-of-band — nothing is probing it.
-      Process.sleep(150)
+      # Drive the tick directly instead of waiting on the timer, and use
+      # `:sys.get_state/1` as a deterministic barrier: it only replies once
+      # the `:check` message ahead of it in the mailbox has been handled.
+      send(pid, :check)
+      _ = :sys.get_state(pid)
       assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
       :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid)
