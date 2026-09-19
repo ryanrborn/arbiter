@@ -49,6 +49,8 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.ReviewGate, :coverage_net_diff_id, 1,
      "bd-203cl5: computes net_diff_id for the coverage row; its {:error, _} means " <>
        "'no fingerprint', consumed by the page above, and blocks no merge"},
+    {Arbiter.Worker.ReviewGate, :worker_meta, 2,
+     "bd-2exkl0: provider fallback visibility: notifies coordinator on fallback, not a refusal"},
 
     # --- watchdog.ex ---
     {Arbiter.Worker.Watchdog, :maybe_notify_awaiting_manual_merge, 2,
