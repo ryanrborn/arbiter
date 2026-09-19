@@ -300,6 +300,26 @@ defmodule Arbiter.Agents.Claude do
     )
   end
 
+  # bd-1zz5mn / bd-606zlr: the Claude CLI's OWN markers for "an asynchronous
+  # wait is now armed" — text this Arbiter build did not write and the agent
+  # did not choose the wording of. Emitted when a `Bash` call is backgrounded
+  # (either up front or after blowing its tool timeout), when a `Monitor`
+  # starts, or when a `ScheduleWakeup` is booked. Matching the CLI's phrasing
+  # rather than the agent's prose ("I'll wait for the notification") is
+  # deliberate: the prose is unbounded paraphrase, the markers are fixed
+  # strings.
+  @async_arm_signature ~r/
+      you[ _]will[ _]be[ _]notified
+    | moved[ _]to[ _]the[ _]background[ _]\(id:
+    | running[ _]in[ _]the[ _]background[ _]with[ _]id:
+    | command[ _]running[ _]in[ _]background[ _]with[ _]id:
+    | monitor[ _]started[ _]\(task
+    | wakeup[ _]scheduled
+  /ix
+
+  @impl true
+  def async_arm_signature, do: @async_arm_signature
+
   @impl true
   def usage_attrs(session),
     do: ClaudeSession.usage_summary(session) |> Map.put(:provider, provider())

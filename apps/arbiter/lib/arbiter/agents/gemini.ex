@@ -189,6 +189,23 @@ defmodule Arbiter.Agents.Gemini do
       "    in this environment and will abort your session prematurely."
   end
 
+  # bd-1zz5mn: agy's OWN markers for "a tool call went async and the turn
+  # ended before it drained" — despite `async_tool_instruction/0` above telling
+  # it not to, agy's `run_command` backgrounds a call once it outlasts
+  # `WaitMsBeforeAsync` regardless, the model ends its turn, and the CLI is
+  # non-interactive: there is no session left to deliver a completion
+  # notification to. None of these match the Claude CLI's wording, so the
+  # shared Claude-shaped signature never fired for agy and every one of these
+  # early-quits was misclassified as a plain `:exited_without_done`.
+  @async_arm_signature ~r/
+      step[ _]is[ _]still[ _]running
+    | status:[ _]running
+    | was[ _]canceled[ _]with[ _]result:[ _]tool[ _]execution[ _]was[ _]canceled
+  /ix
+
+  @impl true
+  def async_arm_signature, do: @async_arm_signature
+
   @impl true
   def init_session(_opts \\ []) do
     %{
