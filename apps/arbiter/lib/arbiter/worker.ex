@@ -1947,7 +1947,13 @@ defmodule Arbiter.Worker do
     new_state = %State{state | claude_sessions: sessions, meta: meta}
     new_state = sync_session_meta(new_state, port)
 
-    backfill_session_dispatch(new_state.run_id, new_state.task_id, provider, config_dir, session_config)
+    backfill_session_dispatch(
+      new_state.run_id,
+      new_state.task_id,
+      provider,
+      config_dir,
+      session_config
+    )
 
     {:reply, {:ok, port}, new_state}
   rescue
