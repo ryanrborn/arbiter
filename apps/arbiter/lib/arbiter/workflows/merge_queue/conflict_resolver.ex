@@ -44,6 +44,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   git.
   """
 
+  alias Arbiter.Agents
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
@@ -53,6 +55,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
+  alias Arbiter.Workers.Run
 
   require Logger
 
@@ -128,6 +131,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   @optional_callbacks escalate_unresolved: 4, notify_resolution: 3
 
+  @doc "Alias for resolve/1 for interface uniformity."
+  def dispatch(args), do: resolve(args)
+
   @doc """
   Default implementation of `resolve/1`. Spawns a real Worker with a
   ClaudeSession running the resolver prompt inside a fresh worktree.
@@ -137,28 +143,40 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   """
   @impl true
   @spec resolve(resolve_args()) :: resolve_result()
-  def resolve(%{task_id: task_id} = args) when is_binary(task_id) do
-    with {:ok, task} <- load_task(task_id),
-         {:ok, context} <- resolve_context(task, args) do
-      if zero_divergence?(context) do
-        Logger.info(
-          "ConflictResolver: task=#{task_id} branch=#{context.branch} has zero divergence " <>
-            "from target=#{context.target_branch} — nothing to rebase, skipping dispatch"
-        )
+  def resolve(%{} = args) do
+    task_id = Map.get(args, :task_id) || (is_map(args[:task]) && args[:task].id)
 
-        {:ok, :no_op}
-      else
-        dispatch(task, context, args)
+    if is_binary(task_id) and task_id != "" do
+      with {:ok, task} <- load_task_or_use(task_id, args),
+           {:ok, context} <- resolve_context(task, args) do
+        if zero_divergence?(context) do
+          Logger.info(
+            "ConflictResolver: task=#{task_id} branch=#{context.branch} has zero divergence " <>
+              "from target=#{context.target_branch} — nothing to rebase, skipping dispatch"
+          )
+
+          {:ok, :no_op}
+        else
+          dispatch(task, context, args)
+        end
       end
+    else
+      {:error, :missing_task_id}
     end
   end
 
   def resolve(_), do: {:error, :missing_task_id}
 
+  defp load_task_or_use(_task_id, %{task: %Issue{} = task}), do: {:ok, task}
+  defp load_task_or_use(task_id, _args), do: load_task(task_id)
+
   defp dispatch(task, context, args) do
     with {:ok, worktree_path} <- create_worktree(context),
-         {:ok, worker_pid} <- start_worker(task, context, worktree_path),
-         {:ok, _port} <- maybe_start_claude(worker_pid, worktree_path, context, args) do
+         {provider, fallback_reason} <- resolve_pass_provider(task, context),
+         {:ok, worker_pid} <-
+           start_worker(task, context, worktree_path, provider, fallback_reason),
+         {:ok, _port} <-
+           maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
       {:ok,
        %{
          worker_pid: worker_pid,
@@ -166,6 +184,22 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
          branch: context.branch
        }}
     end
+  end
+
+  defp resolve_pass_provider(task, context) do
+    workspace = context.workspace || maybe_load_workspace(task.workspace_id)
+    {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, workspace)
+
+    if fallback_reason do
+      CoordinatorNotifier.provider_fallback(
+        %{workspace_id: task.workspace_id, task_id: task.id},
+        Run.latest_authoring_provider(task.id),
+        provider,
+        fallback_reason
+      )
+    end
+
+    {provider, fallback_reason}
   end
 
   # ---- belt-and-braces pre-flight divergence check (bd-1x4r25) -----------
@@ -392,9 +426,11 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  defp start_worker(%Issue{} = task, context, worktree_path) do
+  defp start_worker(%Issue{} = task, context, worktree_path, provider, fallback_reason) do
     meta = %{
       role: :conflict_resolver,
+      provider: Atom.to_string(provider),
+      provider_fallback: fallback_reason,
       worktree_path: worktree_path,
       branch: nil,
       target_branch: context.target_branch,
@@ -442,7 +478,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   # `:start_claude` defaults to `true` for production. Tests pass
   # `start_claude: false` (and a `:claude_command` argv) so they can verify
   # the resolver was invoked without spawning a real Claude subprocess.
-  defp maybe_start_claude(worker_pid, worktree_path, context, args) do
+  defp maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
     case Map.get(args, :start_claude, true) do
       false ->
         {:ok, nil}
@@ -453,7 +489,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
             owner: worker_pid,
             worktree_path: worktree_path
           ]
-          |> add_command_or_prompt(context, args)
+          |> add_command_or_prompt(context, args, worktree_path, provider)
 
         case ClaudeSession.start(session_opts) do
           {:ok, port} ->
@@ -466,10 +502,50 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  defp add_command_or_prompt(opts, context, args) do
+  defp add_command_or_prompt(opts, context, args, worktree_path, provider) do
     case Map.get(args, :claude_command) do
-      cmd when is_list(cmd) and cmd != [] -> Keyword.put(opts, :command, cmd)
-      _ -> Keyword.put(opts, :prompt, prompt_for(context))
+      cmd when is_list(cmd) and cmd != [] ->
+        opts
+        |> Keyword.put(:command, cmd)
+        |> Keyword.put(:provider, Atom.to_string(provider))
+        |> Keyword.put(:prompt, prompt_for(context))
+
+      _ ->
+        if context.workspace do
+          :ok = Agents.prepare(context.workspace, :agent)
+        end
+
+        adapter = Agents.for_type(provider)
+        prompt = prompt_for(context)
+
+        agent_opts = [
+          workspace: context.workspace,
+          worktree_path: worktree_path
+        ]
+
+        case adapter.default_argv(prompt, agent_opts) do
+          {:ok, argv} ->
+            env = safe_spawn_env(adapter, agent_opts)
+
+            opts
+            |> Keyword.put(:command, argv)
+            |> Keyword.put(:env, env)
+            |> Keyword.put(:provider, Atom.to_string(provider))
+            |> Keyword.put(:prompt, prompt)
+
+          {:error, _} ->
+            opts
+            |> Keyword.put(:prompt, prompt)
+            |> Keyword.put(:provider, Atom.to_string(provider))
+        end
+    end
+  end
+
+  defp safe_spawn_env(adapter, agent_opts) do
+    if function_exported?(adapter, :spawn_env, 1) do
+      adapter.spawn_env(agent_opts)
+    else
+      []
     end
   end
 

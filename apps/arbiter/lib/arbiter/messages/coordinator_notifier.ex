@@ -251,6 +251,64 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   def credential_expired(_snapshot, _adapter, _reason), do: :ok
 
   @doc """
+  Escalate an unexpected provider fallback to the coordinator (bd-2exkl0).
+
+  Fired when a worker spawn (revision pass, resume, fix pass, conflict resolver)
+  cannot use its original provider (e.g. credentials flagged expired) and must
+  fall back to an alternative provider.
+
+  Posts an addressed `:escalation` message to the coordinator so provider
+  switches are never silent. Best-effort, returns `:ok`.
+  """
+  @spec provider_fallback(map(), atom() | String.t(), atom() | String.t(), String.t()) :: :ok
+  def provider_fallback(
+        %{workspace_id: ws_id} = snapshot,
+        orig_provider,
+        fallback_provider,
+        reason
+      )
+      when is_binary(ws_id) do
+    task_id = Map.get(snapshot, :task_id, "system")
+    orig_str = to_string(orig_provider)
+    fb_str = to_string(fallback_provider)
+
+    subject = "[provider fallback] #{task_id}: #{orig_str} -> #{fb_str}"
+
+    body = """
+    ## Provider Fallback on #{task_id}
+
+    Original provider: #{orig_str}
+    Fallback provider: #{fb_str}
+    Reason: #{reason}
+
+    The spawn could not use #{orig_str} and fell back to #{fb_str} to continue
+    progress without stalling. Check the provider's credentials or configuration.
+    """
+
+    send_unless_broken(ws_id, task_id, subject, fn ->
+      Message.send_mail(%{
+        kind: :escalation,
+        to_ref: Message.coordinator_ref(),
+        from_ref: task_id || "system",
+        workspace_id: ws_id,
+        task_ref: task_id,
+        subject: subject,
+        body: body
+      })
+    end)
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("CoordinatorNotifier.provider_fallback swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def provider_fallback(_snapshot, _orig, _fb, _reason), do: :ok
+
+  @doc """
   Escalate a failed external-tracker sync to the coordinator (bd-c4cfuv).
 
   Fired by `Arbiter.Trackers.Sync` / `Arbiter.Tasks.Issue.Changes.SyncTracker`

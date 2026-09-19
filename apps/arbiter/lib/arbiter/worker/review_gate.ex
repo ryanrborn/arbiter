@@ -3693,19 +3693,45 @@ defmodule Arbiter.Worker.ReviewGate do
   # notification, no MergeQueue pickup for the synthetic id — while still recording
   # its own run row.
   defp spawn_worker(state, id, role, prompt, command) do
-    with {:ok, pid} <- start_worker_process(state, id, role),
-         :ok <- start_worker_session(state, pid, role, prompt, command) do
+    # bd-2exkl0 (finding 6): resolve the implementer's provider ONCE per spawn
+    # and thread the same {provider, fallback_reason} tuple through
+    # worker_meta/3, adapter_for/4 and build_session_opts/6 — re-resolving at
+    # each call site risked the adapter actually spawned diverging from the
+    # provider recorded in the run's meta if availability flipped mid-spawn
+    # (e.g. the CredentialWatchdog flagging a provider between calls).
+    revision = resolve_revision(state, role)
+
+    with {:ok, pid} <- start_worker_process(state, id, role, revision),
+         :ok <- start_worker_session(state, pid, role, prompt, command, revision) do
       _ = Worker.advance(pid, step_for(role))
       {:ok, pid}
     end
   end
 
-  defp start_worker_process(state, id, role) do
+  defp resolve_revision(state, :implementer) do
+    ws = load_workspace(state.workspace_id)
+    {provider, fallback_reason} = Agents.resolve_revision_provider(state.task_id, ws)
+
+    if fallback_reason do
+      CoordinatorNotifier.provider_fallback(
+        %{workspace_id: state.workspace_id, task_id: state.task_id},
+        Run.latest_authoring_provider(state.task_id),
+        provider,
+        fallback_reason
+      )
+    end
+
+    {provider, fallback_reason}
+  end
+
+  defp resolve_revision(_state, :reviewer), do: nil
+
+  defp start_worker_process(state, id, role, revision) do
     case Worker.start(
            task_id: id,
            repo: state.repo,
            workspace_id: nil,
-           meta: worker_meta(state, role)
+           meta: worker_meta(state, role, revision)
          ) do
       {:ok, pid} -> {:ok, pid}
       {:error, {:already_started, pid}} -> {:ok, pid}
@@ -3713,19 +3739,25 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp worker_meta(state, :reviewer) do
+  defp worker_meta(state, :reviewer, revision) do
+    ws = load_workspace(state.workspace_id)
+    {rev_adapter, _} = adapter_for(state, ws, :reviewer, revision)
+
     %{
       role: :reviewer,
       reviews: state.task_id,
-      difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id)
+      difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id),
+      provider: rev_adapter.provider()
     }
   end
 
-  defp worker_meta(state, :implementer) do
+  defp worker_meta(state, :implementer, {provider, fallback_reason}) do
     %{
       role: :implementer,
       revises: state.task_id,
-      difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id)
+      difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id),
+      provider: Atom.to_string(provider),
+      provider_fallback: fallback_reason
     }
   end
 
@@ -3765,8 +3797,8 @@ defmodule Arbiter.Worker.ReviewGate do
   defp step_for(:reviewer), do: :reviewing
   defp step_for(:implementer), do: :revising
 
-  defp start_worker_session(state, pid, role, prompt, command) do
-    case build_session_opts(state, pid, role, prompt, command) do
+  defp start_worker_session(state, pid, role, prompt, command, revision) do
+    case build_session_opts(state, pid, role, prompt, command, revision) do
       {:ok, session_opts} ->
         case ClaudeSession.start(session_opts) do
           {:ok, _port} -> :ok
@@ -3785,7 +3817,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # (model + api keys), and the implementer role honors the worker `agent`
   # block. A workspace-less ReviewGate (ad-hoc run) falls back to today's
   # behaviour — `ClaudeSession`'s built-in default argv, no model flag.
-  defp build_session_opts(state, pid, _role, prompt, command) when is_list(command) do
+  defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
     # so the pass records what the agent was actually told
     # (`ClaudeSession.start/1` forwards it as `:composed_prompt` →
@@ -3793,24 +3825,46 @@ defmodule Arbiter.Worker.ReviewGate do
     # record of its prompt at all.
     base = [owner: pid, worktree_path: state.worktree_path, command: command, prompt: prompt]
 
-    opts =
+    prov_str =
       case Map.get(state, :command_provider) do
-        provider when is_binary(provider) -> base ++ [provider: provider]
-        _ -> base
+        provider when is_binary(provider) ->
+          provider
+
+        _ ->
+          case role do
+            :implementer ->
+              {provider, _fallback_reason} = revision
+              Atom.to_string(provider)
+
+            :reviewer ->
+              ws = load_workspace(state.workspace_id)
+              {adapter, _} = adapter_for(state, ws, :reviewer, revision)
+              adapter.provider()
+          end
       end
 
-    {:ok, opts}
+    {:ok, base ++ [provider: prov_str]}
   end
 
-  defp build_session_opts(state, pid, role, prompt, nil) do
+  defp build_session_opts(state, pid, role, prompt, nil, revision) do
     base = [owner: pid, worktree_path: state.worktree_path]
 
     case load_workspace(state.workspace_id) do
       nil ->
-        {:ok, base ++ [prompt: prompt]}
+        prov_str =
+          case role do
+            :implementer ->
+              {provider, _fallback_reason} = revision
+              Atom.to_string(provider)
+
+            :reviewer ->
+              "claude"
+          end
+
+        {:ok, base ++ [prompt: prompt, provider: prov_str]}
 
       %Workspace{} = ws ->
-        {adapter, role_atom} = adapter_for(state, ws, role)
+        {adapter, role_atom} = adapter_for(state, ws, role, revision)
         :ok = Agents.prepare(ws, role_atom)
 
         # The reviewer/implementer worker gets the same per-domain security
@@ -3837,13 +3891,15 @@ defmodule Arbiter.Worker.ReviewGate do
         # the operator's `~/.gemini`. Adapters that don't recognise it ignore
         # it.
         agent_opts =
-          agent_opts_for_role(ws, role_atom, state.task_id) ++
+          agent_opts_for_role(ws, role_atom, state.task_id, adapter) ++
             [
               security: SecurityPolicy.resolve(ws, %{}, state.repo),
               workspace: ws,
               worktree_path: state.worktree_path,
               timeout_ms: state.timeout_ms
             ]
+
+        session_model = resolved_model_for(adapter, agent_opts)
 
         # bd-dzz6ly: same provenance backfill the main dispatch path reports
         # (Arbiter.Worker.Dispatch.build_agent_session_opts/4), so a reviewer
@@ -3858,6 +3914,15 @@ defmodule Arbiter.Worker.ReviewGate do
           thinking: Keyword.get(agent_opts, :thinking)
         })
 
+        if role == :implementer do
+          Worker.report(pid, :routing_config, %{
+            provider: adapter.provider(),
+            model: session_model || Keyword.get(agent_opts, :model),
+            model_tier: Keyword.get(agent_opts, :model_tier),
+            thinking: Keyword.get(agent_opts, :thinking)
+          })
+        end
+
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)
@@ -3865,7 +3930,15 @@ defmodule Arbiter.Worker.ReviewGate do
             # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
             # resolution — it's carried purely so `Arbiter.Worker` can persist
             # what this reviewer/implementer was actually told.
-            {:ok, base ++ [command: argv, prompt: prompt, env: env, provider: adapter.provider()]}
+            {:ok,
+             base ++
+               [
+                 command: argv,
+                 prompt: prompt,
+                 env: env,
+                 provider: adapter.provider(),
+                 model: session_model
+               ]}
 
           {:error, reason} ->
             {:error, reason}
@@ -3879,15 +3952,19 @@ defmodule Arbiter.Worker.ReviewGate do
   # timed out. Every unpinned pass (`reviewer_provider: nil`, the default and
   # the only state a single-provider workspace ever reaches) resolves exactly
   # as before.
-  defp adapter_for(%{reviewer_provider: provider}, %Workspace{}, :reviewer)
+  defp adapter_for(%{reviewer_provider: provider}, _ws, :reviewer, _revision)
        when is_atom(provider) and not is_nil(provider),
        do: {Agents.for_type(provider), :review_agent}
 
-  defp adapter_for(_state, %Workspace{} = ws, :reviewer),
+  defp adapter_for(_state, %Workspace{} = ws, :reviewer, _revision),
     do: {Agents.reviewer_for_workspace(ws), :review_agent}
 
-  defp adapter_for(_state, %Workspace{} = ws, :implementer),
-    do: {Agents.for_workspace(ws), :agent}
+  defp adapter_for(_state, nil, :reviewer, _revision),
+    do: {Agents.for_type(:claude), :review_agent}
+
+  defp adapter_for(_state, _ws, :implementer, {provider, _fallback_reason}) do
+    {Agents.for_type(provider), :agent}
+  end
 
   # bd-dzz6ly: the reviewer slot is configured directly (`review_agent.config`)
   # and never goes through `Arbiter.Agents.Routing` — record that plainly
@@ -3904,7 +3981,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # from the configured block; `model_tier` defaults to the task's own tier
   # bumped one step (bd-3xultf, `reviewer_model_tier/2`) unless the block
   # pins one explicitly.
-  defp agent_opts_for_role(%Workspace{config: config}, :review_agent, task_id) do
+  defp agent_opts_for_role(%Workspace{config: config}, :review_agent, task_id, _adapter) do
     block =
       get_in(config || %{}, ["review_agent", "config"]) ||
         get_in(config || %{}, ["agent", "config"]) || %{}
@@ -3922,27 +3999,45 @@ defmodule Arbiter.Worker.ReviewGate do
   # `:by_difficulty` / ...) so a revise round picks the same model the
   # initial dispatch would have, not a flat workspace default. Best-effort:
   # a missing task falls back to the workspace's `agent.config`.
-  defp agent_opts_for_role(%Workspace{} = ws, :agent, task_id) do
-    case load_issue(task_id) do
-      nil ->
-        block = get_in(ws.config || %{}, ["agent", "config"]) || %{}
+  defp agent_opts_for_role(%Workspace{} = ws, :agent, task_id, adapter) do
+    choice =
+      case load_issue(task_id) do
+        nil ->
+          block = get_in(ws.config || %{}, ["agent", "config"]) || %{}
+          %{type: Agents.agent_type(ws, :agent) || :claude, config: block}
 
-        [
-          model: Map.get(block, "model"),
-          model_tier: Map.get(block, "model_tier"),
-          thinking: Map.get(block, "thinking"),
-          config: block
-        ]
+        %Issue{} = task ->
+          Routing.choose(task, ws, %{})
+      end
 
-      %Issue{} = task ->
-        config = task |> Routing.choose(ws, %{}) |> Map.get(:config) || %{}
+    provider_atom =
+      Enum.find_value(Agents.adapters(), fn {type, mod} ->
+        if mod == adapter, do: type
+      end) || :claude
 
-        [
-          model: Map.get(config, "model"),
-          model_tier: Map.get(config, "model_tier"),
-          thinking: Map.get(config, "thinking"),
-          config: config
-        ]
+    choice = apply_agent_type_override(choice, provider_atom)
+    config = choice.config || %{}
+
+    [
+      model: Map.get(config, "model"),
+      model_tier: Map.get(config, "model_tier"),
+      thinking: Map.get(config, "thinking"),
+      config: config
+    ]
+  end
+
+  defp apply_agent_type_override(%{type: type} = choice, type), do: choice
+
+  defp apply_agent_type_override(choice, type) when is_atom(type) and not is_nil(type) do
+    config = Map.drop(choice.config || %{}, ["model"])
+    %{choice | type: type, config: config}
+  end
+
+  defp apply_agent_type_override(choice, _), do: choice
+
+  defp resolved_model_for(adapter, agent_opts) do
+    if function_exported?(adapter, :resolved_model, 1) do
+      adapter.resolved_model(agent_opts)
     end
   end
 
