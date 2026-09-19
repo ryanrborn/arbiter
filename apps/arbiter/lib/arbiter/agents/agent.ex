@@ -199,6 +199,7 @@ defmodule Arbiter.Agents.Agent do
   default (the Claude async block), so existing adapters remain unaffected.
   """
   @callback async_tool_instruction() :: String.t()
+  @callback async_tool_instruction(String.t(), String.t() | nil, keyword()) :: String.t()
 
   @doc """
   The harness's OWN fixed markers for "an asynchronous wait is now armed" —
@@ -228,6 +229,7 @@ defmodule Arbiter.Agents.Agent do
     auth_probe_argv: 1,
     resolved_model: 1,
     async_tool_instruction: 0,
+    async_tool_instruction: 3,
     async_arm_signature: 0
   ]
 end

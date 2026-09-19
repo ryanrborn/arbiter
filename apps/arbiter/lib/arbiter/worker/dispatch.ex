@@ -1983,6 +1983,7 @@ defmodule Arbiter.Worker.Dispatch do
           opts
           |> Keyword.put(:worktree_path, worktree_path)
           |> Keyword.put(:tracker_context, tracker_context)
+          |> Keyword.put(:adapter, adapter)
           |> then(&prompt_for_task(task, &1))
 
         provider = Atom.to_string(choice.type)

@@ -215,10 +215,38 @@ defmodule Arbiter.Agents.Codex do
 
   @impl true
   def async_tool_instruction do
+    # A reviewer is forbidden from pushing code, so "commit before verifying"
+    # is meaningless guidance on that surface — same as Claude/Gemini's /0.
+    async_tool_instruction("your VERDICT or `arb done`", nil, commit_first: false)
+  end
+
+  # The `coda` and `:commit_first` guidance is provider-agnostic — "commit
+  # before you verify" is about not losing work to a killed session, which has
+  # nothing to do with which CLI is running. Before this block was routed
+  # through the adapter, codex workers received it via the hard-coded Claude
+  # text; dropping it here would have quietly regressed a whole provider's
+  # prompt while fixing another's.
+  @impl true
+  def async_tool_instruction(completion_signal, coda \\ nil, opts \\ []) do
+    commit_line =
+      if Keyword.get(opts, :commit_first, true) do
+        "    COMMIT correct work BEFORE running any long verification — verification\n" <>
+          "    confirms work; it must never be the thing that loses it.\n"
+      else
+        ""
+      end
+
+    tail =
+      case coda do
+        nil -> "."
+        extra -> " —\n    #{String.replace(extra, "\n", "\n    ")}."
+      end
+
     "*** TOOLS: Run tools and wait inline for each result before proceeding.\n" <>
       "    Codex `exec` executes commands synchronously; do not attempt to background\n" <>
-      "    long-running commands, and do not print your VERDICT or `arb done` until\n" <>
-      "    every command you started has finished and you have read its output."
+      "    long-running commands, and do not print #{completion_signal} until\n" <>
+      "    every command you started has finished and you have read its output" <>
+      tail <> "\n" <> commit_line
   end
 
   @impl true
