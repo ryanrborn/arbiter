@@ -839,4 +839,39 @@ defmodule Arbiter.Agents.GeminiTest do
       refute "--print-timeout" in argv
     end
   end
+
+  describe "async_tool_instruction" do
+    test "async_tool_instruction/0 renders reviewer instruction without Claude tools or disproven flags" do
+      text = Gemini.async_tool_instruction()
+
+      assert text =~ "manage_task status"
+      assert text =~ "RUNNING"
+      assert text =~ "your VERDICT"
+      assert text =~ "terminates the session and discards the work"
+      refute text =~ "Monitor"
+      refute text =~ "ScheduleWakeup"
+      refute text =~ "TaskOutput"
+      assert text =~ "WaitMsBeforeAsync"
+      assert text =~ "Blocking"
+      refute text =~ "COMMIT correct work BEFORE"
+    end
+
+    test "async_tool_instruction/3 respects completion signal, coda, and commit_first option" do
+      work_text =
+        Gemini.async_tool_instruction("`arb done`", "extra explanation", commit_first: true)
+
+      assert work_text =~ "COMMIT correct work BEFORE"
+      assert work_text =~ "before you print `arb done` —\nextra explanation."
+      assert work_text =~ "manage_task status"
+      assert work_text =~ "RUNNING"
+      refute work_text =~ "Monitor"
+      refute work_text =~ "ScheduleWakeup"
+      assert work_text =~ "WaitMsBeforeAsync"
+      assert work_text =~ "Blocking"
+
+      no_commit = Gemini.async_tool_instruction("`arb done`", nil, commit_first: false)
+      refute no_commit =~ "COMMIT correct work BEFORE"
+      assert no_commit =~ "before you print `arb done`."
+    end
+  end
 end

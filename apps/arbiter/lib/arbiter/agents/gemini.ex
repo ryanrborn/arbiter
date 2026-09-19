@@ -182,11 +182,52 @@ defmodule Arbiter.Agents.Gemini do
 
   @impl true
   def async_tool_instruction do
-    "*** TOOLS: Run all tools synchronously — wait inline for each result\n" <>
-      "    before proceeding to the next. Do not use background execution modes. When\n" <>
-      "    calling `run_command`, you MUST set `WaitMsBeforeAsync` to `10000` to prevent\n" <>
-      "    the command from being backgrounded, as background execution is not supported\n" <>
-      "    in this environment and will abort your session prematurely."
+    async_tool_instruction(
+      "your VERDICT",
+      "a VERDICT issued while a background task is still running is invalid,\n" <>
+        "you would be judging on incomplete evidence",
+      commit_first: false
+    )
+  end
+
+  @impl true
+  def async_tool_instruction(completion_signal, coda \\ nil, opts \\ []) do
+    tail =
+      case coda do
+        nil -> "before you print #{completion_signal}."
+        extra -> "before you print #{completion_signal} —\n#{extra}."
+      end
+
+    commit_bullet =
+      if Keyword.get(opts, :commit_first, true) do
+        """
+          * COMMIT correct work BEFORE running any long verification. Verification
+            confirms work; it must never be the thing that loses it.
+        """
+      else
+        ""
+      end
+
+    """
+    *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+    turn ends the session outright, and no notification can ever reach you
+    afterward. The process that would receive it no longer exists. If you
+    background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+    similar) and end your turn to "wait" for it, the run ends on the spot, the
+    command is killed with it, and any uncommitted work is lost. So:
+
+    #{commit_bullet}\
+      * When calling `run_command`, you MUST set `"Blocking": true` with
+        `"WaitMsBeforeAsync": 0` so the command executes synchronously in the
+        foreground and returns its output inline.
+      * NEVER end your turn expecting to be woken up later. There is no "later"
+        in a headless session. If a task goes to the background and is RUNNING,
+        you MUST keep calling `manage_task status` repeatedly within the SAME turn
+        until the task reports finished. Ending a turn while a task reports
+        RUNNING terminates the session and discards the work.
+
+    You MUST read every command's full output #{tail}\
+    """
   end
 
   # bd-1zz5mn: agy's OWN markers for "a tool call went async and the turn

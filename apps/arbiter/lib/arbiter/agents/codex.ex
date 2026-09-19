@@ -215,9 +215,14 @@ defmodule Arbiter.Agents.Codex do
 
   @impl true
   def async_tool_instruction do
+    async_tool_instruction("your VERDICT or `arb done`", nil, [])
+  end
+
+  @impl true
+  def async_tool_instruction(completion_signal, _coda \\ nil, _opts \\ []) do
     "*** TOOLS: Run tools and wait inline for each result before proceeding.\n" <>
       "    Codex `exec` executes commands synchronously; do not attempt to background\n" <>
-      "    long-running commands, and do not print your VERDICT or `arb done` until\n" <>
+      "    long-running commands, and do not print #{completion_signal} until\n" <>
       "    every command you started has finished and you have read its output."
   end
 

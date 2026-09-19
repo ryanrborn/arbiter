@@ -4426,6 +4426,12 @@ defmodule Arbiter.Worker.ReviewGate do
   def revise_prompt(state, findings) do
     task = load_task(state.task_id)
 
+    adapter =
+      state
+      |> Map.get(:workspace_id)
+      |> load_workspace()
+      |> Arbiter.Agents.for_workspace()
+
     """
     You are an IMPLEMENTER worker. A reviewer (a ReviewGate) has reviewed the work
     on branch `#{state.branch}` and REQUESTED CHANGES. Your job is to address each
@@ -4461,7 +4467,7 @@ defmodule Arbiter.Worker.ReviewGate do
     *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
     no `mix run`. (Reading files, editing, and running `git` is fine.)
 
-    #{PromptBuilder.async_tools_section("`arb done`", nil)}
+    #{PromptBuilder.async_tools_section(adapter, "`arb done`", nil)}
 
     When you have addressed every finding, print, on a line by itself:
 
@@ -4725,10 +4731,20 @@ defmodule Arbiter.Worker.ReviewGate do
     # without `Code.ensure_loaded?/1` first this was an order-dependent bug.
     block =
       if Code.ensure_loaded?(adapter) and
-           function_exported?(adapter, :async_tool_instruction, 0) do
-        adapter.async_tool_instruction()
+           function_exported?(adapter, :async_tool_instruction, 3) do
+        adapter.async_tool_instruction(
+          "your VERDICT",
+          "a VERDICT issued while a background task is still running is invalid,\n" <>
+            "you would be judging on incomplete evidence",
+          commit_first: false
+        )
       else
-        Arbiter.Agents.Claude.async_tool_instruction()
+        Arbiter.Agents.Claude.async_tool_instruction(
+          "your VERDICT",
+          "a VERDICT issued while a background task is still running is invalid,\n" <>
+            "you would be judging on incomplete evidence",
+          commit_first: false
+        )
       end
 
     String.trim_trailing(block)
