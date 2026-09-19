@@ -9,7 +9,6 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.CredentialWatchdog
-  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
@@ -152,7 +151,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       :ok = seed_feature_branch(repo, branch)
 
       # Create author's main run record with provider: "gemini"
-      {:ok, author_run} =
+      {:ok, _author_run} =
         Ash.create(Run, %{
           task_id: task.id,
           base_task_id: task.id,
@@ -178,7 +177,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
         review_timeout_ms: 30_000
       }
 
-      {:ok, worker_pid} =
+      {:ok, _worker_pid} =
         Worker.start(
           task_id: task.id,
           repo: "test/repo",
@@ -313,7 +312,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
   describe "Unavailable provider fallback (AC4)" do
     test "when original provider credentials are flagged expired, falls back to available provider with coordinator visibility",
-         %{repo: repo, stub_dir: stub_dir, log: log} do
+         %{repo: _repo, stub_dir: stub_dir, log: log} do
       write_stub(stub_dir, "claude", """
       echo "claude $@" >> #{log}
       if [ -f feature.txt ]; then
