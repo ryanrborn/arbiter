@@ -1488,6 +1488,59 @@ defmodule Arbiter.Worker.DispatchTest do
       assert routing.model == nil
     end
 
+    # bd-2exkl0 finding 2: every other test in this suite/branch seeds
+    # `Run.provider` directly via `Ash.create(Run, %{provider: "gemini"})`, so
+    # none of them prove the WRITE half of the chain — that a real main
+    # dispatch with NO explicit `--provider`/`agent_type` opt (the live
+    # bd-629sb8 shape: `agent.type` is a workspace-config pool, not a CLI
+    # flag) ever lands "gemini" on the `:main` run row in the first place.
+    # `default_run_provider/2` deliberately returns nil for `:main` — the
+    # only writer here is the post-spawn backfill
+    # (`Worker.backfill_session_dispatch/5`, fed by `build_agent_session_opts/4`'s
+    # `Routing.choose/3` + `apply_agent_type_override/2` resolution of the
+    # workspace's `agent.type`). This test seeds nothing and reads the run
+    # row back to prove that code path actually fires.
+    test "main dispatch with no explicit provider writes Run.provider from the workspace's resolved agent type (bd-2exkl0)",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "gem-write-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gem-write-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gw/repo" => repo})
+
+      # Workspace pool defaults to gemini — mirrors bd-629sb8's
+      # `review_agent.type: ["gemini","claude"]` shape, but for the WORKER pool.
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{"agent" => %{"type" => ["gemini", "claude"]}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "gemini write-path task", workspace_id: ws.id})
+
+      # No `agent_type:` opt — the resolved provider must come purely from
+      # the workspace's `agent.type` pool, exactly as a live dispatch with no
+      # `--provider` flag would resolve it.
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          repo: "gw/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      refute File.exists?(claude_file)
+
+      run = latest_run(task.id)
+      assert run.worker_type == :main
+
+      assert run.provider == "gemini",
+             "the :main run's provider must be written by the real spawn, not seeded"
+    end
+
     test "agent_type: :codex dispatches the Codex adapter, not Claude (bd-dcvo3n)",
          %{ws: ws, tmp: tmp} do
       claude_file = Path.join(tmp, "claude-argv.txt")

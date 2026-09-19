@@ -525,6 +525,56 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       assert fallback_reason =~ "fell back from gemini"
       assert fallback_reason =~ "credentials flagged expired"
     end
+
+    # Round 2 finding 3: an ad-hoc, workspace-less caller (e.g. ReviewGate's
+    # `resolve_revision/2` when `load_workspace/1` returns nil) used to only
+    # ever consider :claude as a fallback candidate, so an expired-claude
+    # original provider reported "no provider available" even when gemini
+    # was healthy. Assert the nil-workspace path searches the full
+    # [:claude, :gemini, :codex] candidate list, same as the %Workspace{} path.
+    test "with a nil workspace and an expired original provider, falls back to another healthy adapter instead of reporting none available" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-fallback-nil-#{System.unique_integer([:positive])}",
+          prefix: "rn"
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "nil-workspace fallback task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          worker_type: :main,
+          role: "base",
+          provider: "claude",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      stop_reason = %Arbiter.Worker.StopReason{
+        category: :auth_expired,
+        summary: "credentials expired"
+      }
+
+      CredentialWatchdog.mark_expired(Agents.Claude, stop_reason)
+      _ = :sys.get_state(CredentialWatchdog)
+
+      {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, nil)
+
+      assert provider == :gemini,
+             "nil-workspace fallback must consider gemini/codex, not just report claude as the only option"
+
+      assert fallback_reason =~ "fell back from claude"
+      refute fallback_reason =~ "no provider available"
+    end
   end
 
   describe "Fallback is not sticky across rounds (finding 4)" do

@@ -207,10 +207,11 @@ defmodule Arbiter.Agents do
   end
 
   defp fallback_for_workspace(nil, orig) do
-    if orig != :claude and provider_available?(:claude) do
-      {:ok, :claude}
-    else
-      :error
+    candidates = [:claude, :gemini, :codex]
+
+    case Enum.find(candidates, fn t -> t != orig and provider_available?(t) end) do
+      nil -> :error
+      t -> {:ok, t}
     end
   end
 
