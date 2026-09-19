@@ -13,6 +13,20 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
 
+  require Ash.Query
+
+  defp runs_for_task(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.read!()
+  end
+
+  defp runs_for_worker_type(base_task_id, worker_type) do
+    Run
+    |> Ash.Query.filter(base_task_id == ^base_task_id and worker_type == ^worker_type)
+    |> Ash.read!()
+  end
+
   defp write_stub(dir, name, body) do
     path = Path.join(dir, name)
     File.write!(path, "#!/bin/sh\n" <> body)
@@ -95,7 +109,14 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
     prepend_path(stub_dir)
 
+    CredentialWatchdog.mark_recovered(Agents.Gemini)
+    CredentialWatchdog.mark_recovered(Agents.Claude)
+    _ = :sys.get_state(CredentialWatchdog)
+
     on_exit(fn ->
+      CredentialWatchdog.mark_recovered(Agents.Gemini)
+      CredentialWatchdog.mark_recovered(Agents.Claude)
+      _ = :sys.get_state(CredentialWatchdog)
       File.rm_rf!(tmp)
     end)
 
@@ -177,13 +198,17 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
         review_timeout_ms: 30_000
       }
 
-      {:ok, _worker_pid} =
+      {:ok, worker_pid} =
         Worker.start(
           task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
           meta: meta
         )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
 
       # Wait for review gate to start, reviewer to request changes, and implementer to be spawned
       impl_task_id = "#{task.id}#review#impl1"
@@ -199,13 +224,13 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
       # Verify run records
       wait_until(fn ->
-        case Ash.read(Run, filter: [task_id: impl_task_id]) do
-          {:ok, [%Run{provider: p}]} when not is_nil(p) -> true
+        case runs_for_task(impl_task_id) do
+          [%Run{provider: p}] when not is_nil(p) -> true
           _ -> false
         end
       end)
 
-      {:ok, [impl_run]} = Ash.read(Run, filter: [task_id: impl_task_id])
+      [impl_run] = runs_for_task(impl_task_id)
       assert impl_run.provider == "gemini", "implementer pass must record provider as gemini"
       assert impl_run.worker_type == :impl
     end
@@ -277,13 +302,17 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
         review_timeout_ms: 30_000
       }
 
-      {:ok, _worker_pid} =
+      {:ok, worker_pid} =
         Worker.start(
           task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
           meta: meta
         )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
 
       rev_task_id = "#{task.id}#review"
 
@@ -298,13 +327,13 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
       # Reviewer run record shows claude
       wait_until(fn ->
-        case Ash.read(Run, filter: [task_id: rev_task_id]) do
-          {:ok, [%Run{provider: p}]} when not is_nil(p) -> true
+        case runs_for_task(rev_task_id) do
+          [%Run{provider: p}] when not is_nil(p) -> true
           _ -> false
         end
       end)
 
-      {:ok, [rev_run]} = Ash.read(Run, filter: [task_id: rev_task_id])
+      [rev_run] = runs_for_task(rev_task_id)
       assert rev_run.provider == "claude"
       assert rev_run.worker_type == :review
     end
@@ -361,6 +390,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
         summary: "credentials expired"
       }
       CredentialWatchdog.mark_expired(Agents.Gemini, stop_reason)
+      _ = :sys.get_state(CredentialWatchdog)
 
       # Attempt resolution for revision
       {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, ws)
@@ -423,22 +453,21 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
         workspace: ws
       }
 
-      {:ok, pid} = Arbiter.Workflows.MergeQueue.FixPassDispatcher.dispatch(context)
+      {:ok, %{worker_pid: pid}} = Arbiter.Workflows.MergeQueue.FixPassDispatcher.dispatch(context)
 
       wait_until(fn ->
         calls(log) |> Enum.any?(&String.starts_with?(&1, "agy"))
       end)
 
       # Ensure fix_pass run record has provider: "gemini"
-      fixpass_task_id = task.id <> ":fixpass"
       wait_until(fn ->
-        case Ash.read(Run, filter: [task_id: fixpass_task_id]) do
-          {:ok, [%Run{provider: p}]} when not is_nil(p) -> true
+        case runs_for_worker_type(task.id, :fix_pass) do
+          [%Run{provider: p}] when not is_nil(p) -> true
           _ -> false
         end
       end)
 
-      {:ok, [fix_run]} = Ash.read(Run, filter: [task_id: fixpass_task_id])
+      [fix_run] = runs_for_worker_type(task.id, :fix_pass)
       assert fix_run.provider == "gemini"
       assert fix_run.worker_type == :fix_pass
 
@@ -475,6 +504,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       branch = "task-#{task.id}"
       :ok = seed_feature_branch(repo, branch)
 
+      File.write!(Path.join(repo, "other.txt"), "other\n")
+      {_, 0} = git(["add", "other.txt"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "other work"], repo)
+      {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
       # Author run used gemini
       {:ok, _author_run} =
         Ash.create(Run, %{
@@ -498,21 +532,20 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
         workspace: ws
       }
 
-      {:ok, pid} = Arbiter.Workflows.MergeQueue.ConflictResolver.dispatch(context)
+      {:ok, %{worker_pid: pid}} = Arbiter.Workflows.MergeQueue.ConflictResolver.dispatch(context)
 
       wait_until(fn ->
         calls(log) |> Enum.any?(&String.starts_with?(&1, "agy"))
       end)
 
-      conflict_task_id = task.id <> ":conflict"
       wait_until(fn ->
-        case Ash.read(Run, filter: [task_id: conflict_task_id]) do
-          {:ok, [%Run{provider: p}]} when not is_nil(p) -> true
+        case runs_for_worker_type(task.id, :conflict) do
+          [%Run{provider: p}] when not is_nil(p) -> true
           _ -> false
         end
       end)
 
-      {:ok, [conflict_run]} = Ash.read(Run, filter: [task_id: conflict_task_id])
+      [conflict_run] = runs_for_worker_type(task.id, :conflict)
       assert conflict_run.provider == "gemini"
       assert conflict_run.worker_type == :conflict
 
