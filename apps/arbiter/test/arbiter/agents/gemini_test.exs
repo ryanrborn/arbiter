@@ -873,5 +873,26 @@ defmodule Arbiter.Agents.GeminiTest do
       refute no_commit =~ "COMMIT correct work BEFORE"
       assert no_commit =~ "before you print `arb done`."
     end
+
+    # bd-apq1g6: the spike invoked `"Blocking": true` / `"WaitMsBeforeAsync": 0`
+    # verbatim and agy backgrounded the command anyway. The instruction may
+    # still tell the worker to pass those arguments, but it must not promise
+    # they produce foreground/synchronous execution — that claim is disproven,
+    # and a worker that believes it will be surprised by empty inline output.
+    test "does not promise that Blocking/WaitMsBeforeAsync produce synchronous execution" do
+      for text <- [
+            Gemini.async_tool_instruction(),
+            Gemini.async_tool_instruction("`arb done`", nil, commit_first: true)
+          ] do
+        refute text =~ "executes synchronously"
+        refute text =~ "returns its output inline"
+        refute text =~ ~r/synchronously in the\s+foreground/
+
+        # the corrected framing: flags are set, but backgrounding is expected
+        # and the drain is the polling loop.
+        assert text =~ "does NOT keep a long"
+        assert text =~ "manage_task status"
+      end
+    end
   end
 end

@@ -180,6 +180,18 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
+  # bd-apq1g6 (spike, answered 2026-09-19): agy print mode has NO flag-based
+  # way to force a long command to run synchronously. The documented
+  # synchronous form from agy's own stock system prompt — `"Blocking": true`
+  # with `"WaitMsBeforeAsync": 0` — was invoked verbatim against a `sleep 20`
+  # and agy backgrounded it anyway ("The command has been launched in the
+  # background"), then terminated the task ~5s later on exit. Both arguments
+  # are accepted; neither is honoured as a wait switch. So this text must NOT
+  # promise foreground/synchronous execution — the only remedy with a positive
+  # control behind it is behavioural: bd-40h2to measured 1-2 `manage_task
+  # status` polls in the runs that died against 73 in the run that survived.
+  # Keep the instruction anchored on "never end a turn while a task is
+  # RUNNING", not on the flags.
   @impl true
   def async_tool_instruction do
     async_tool_instruction(
@@ -217,9 +229,11 @@ defmodule Arbiter.Agents.Gemini do
     command is killed with it, and any uncommitted work is lost. So:
 
     #{commit_bullet}\
-      * When calling `run_command`, you MUST set `"Blocking": true` with
-        `"WaitMsBeforeAsync": 0` so the command executes synchronously in the
-        foreground and returns its output inline.
+      * When calling `run_command`, set `"Blocking": true` with
+        `"WaitMsBeforeAsync": 0`. Be aware that this does NOT keep a long
+        command in the foreground: agy accepts both arguments and backgrounds
+        the command anyway once it runs long. Treat every command you start as
+        one that may go to the background, and drain it yourself as below.
       * NEVER end your turn expecting to be woken up later. There is no "later"
         in a headless session. If a task goes to the background and is RUNNING,
         you MUST keep calling `manage_task status` repeatedly within the SAME turn
