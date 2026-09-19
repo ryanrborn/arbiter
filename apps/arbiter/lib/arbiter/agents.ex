@@ -134,6 +134,67 @@ defmodule Arbiter.Agents do
   @spec adapters() :: %{atom() => adapter}
   def adapters, do: @adapters
 
+  @doc """
+  Check whether an agent provider is currently available to run.
+  Returns false if the adapter is unknown or its credentials are flagged expired.
+  """
+  @spec provider_available?(atom()) :: boolean()
+  def provider_available?(provider) when is_atom(provider) do
+    case Map.get(@adapters, provider) do
+      nil ->
+        false
+
+      adapter ->
+        not Arbiter.Agents.CredentialWatchdog.expired?(adapter)
+    end
+  end
+
+  @doc """
+  Resolve the provider to use for a revision, resume, or fix pass on `task_id`.
+
+  Reads the provider from the most recent authoring run via
+  `Arbiter.Workers.Run.latest_authoring_provider/1`. If that provider is
+  available, returns `{provider, nil}`.
+
+  If the original provider cannot be used (e.g. credentials flagged expired),
+  it falls back to an available provider and returns
+  `{fallback_provider, fallback_reason}` so the fallback is visible and recorded.
+
+  If no prior run exists, falls back to the workspace default `{default_provider, nil}`.
+  """
+  @spec resolve_revision_provider(String.t(), Workspace.t() | nil) ::
+          {provider :: atom(), fallback_reason :: String.t() | nil}
+  def resolve_revision_provider(task_id, workspace) when is_binary(task_id) do
+    case Arbiter.Workers.Run.latest_authoring_provider(task_id) do
+      orig when is_atom(orig) and not is_nil(orig) ->
+        if provider_available?(orig) do
+          {orig, nil}
+        else
+          fallback = fallback_for_workspace(workspace, orig)
+          reason = "fell back from #{orig}: credentials flagged expired"
+          {fallback, reason}
+        end
+
+      nil ->
+        {default_agent_type(workspace), nil}
+    end
+  end
+
+  defp default_agent_type(%Workspace{} = ws), do: agent_type(ws, :agent) || :claude
+  defp default_agent_type(nil), do: :claude
+
+  defp fallback_for_workspace(%Workspace{} = ws, orig) do
+    pool = configured_types(ws.config, :agent)
+    candidates = (pool ++ [:claude, :gemini, :codex]) |> Enum.uniq()
+
+    case Enum.find(candidates, fn t -> t != orig and provider_available?(t) end) do
+      nil -> :claude
+      t -> t
+    end
+  end
+
+  defp fallback_for_workspace(nil, _orig), do: :claude
+
   @doc "Returns the list of valid agent type strings (for workspace-config validation)."
   @spec valid_agent_types() :: [String.t()]
   def valid_agent_types, do: @valid_agent_types
@@ -178,7 +239,11 @@ defmodule Arbiter.Agents do
 
   # ---- Internals --------------------------------------------------------
 
-  defp agent_type(%Workspace{config: config}, role) do
+  @doc "Returns the resolved agent type atom for the given workspace and role (:agent or :review_agent)."
+  @spec agent_type(Workspace.t() | nil, atom()) :: atom() | nil
+  def agent_type(workspace, role)
+
+  def agent_type(%Workspace{config: config}, role) do
     case get_in(config || %{}, [Atom.to_string(role), "type"]) do
       type when is_binary(type) ->
         safe_type_atom(type)
@@ -196,6 +261,9 @@ defmodule Arbiter.Agents do
         nil
     end
   end
+
+  def agent_type(nil, :agent), do: :claude
+  def agent_type(nil, _role), do: nil
 
   # The type strings configured for `role`, mapped to adapter atoms in the order
   # they were written, with unrecognized entries dropped. A single string is a

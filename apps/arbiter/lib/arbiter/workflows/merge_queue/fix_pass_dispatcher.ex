@@ -39,7 +39,9 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   boot a real Claude session or shell out to git.
   """
 
+  alias Arbiter.Agents
   alias Arbiter.Mergers.Merger
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -47,6 +49,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Worktree
+  alias Arbiter.Workers.Run
 
   require Logger
 
@@ -108,17 +111,45 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   """
   @impl true
   @spec dispatch(dispatch_args()) :: dispatch_result()
-  def dispatch(%{task_id: task_id} = args) when is_binary(task_id) do
-    with {:ok, task} <- load_task(task_id),
-         {:ok, context} <- resolve_context(task, args),
-         {:ok, worktree_path} <- create_worktree(context),
-         {:ok, worker_pid} <- start_worker(task, context, worktree_path),
-         {:ok, _port} <- maybe_start_claude(worker_pid, worktree_path, context, args) do
-      {:ok, %{worker_pid: worker_pid, worktree_path: worktree_path, branch: context.branch}}
+  def dispatch(%{} = args) do
+    task_id = Map.get(args, :task_id) || (is_map(args[:task]) && args[:task].id)
+
+    if is_binary(task_id) and task_id != "" do
+      with {:ok, task} <- load_task_or_use(task_id, args),
+           {:ok, context} <- resolve_context(task, args),
+           {:ok, worktree_path} <- create_worktree(context),
+           {provider, fallback_reason} <- resolve_pass_provider(task, context),
+           {:ok, worker_pid} <-
+             start_worker(task, context, worktree_path, provider, fallback_reason),
+           {:ok, _port} <-
+             maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
+        {:ok, %{worker_pid: worker_pid, worktree_path: worktree_path, branch: context.branch}}
+      end
+    else
+      {:error, :missing_task_id}
     end
   end
 
   def dispatch(_), do: {:error, :missing_task_id}
+
+  defp load_task_or_use(_task_id, %{task: %Issue{} = task}), do: {:ok, task}
+  defp load_task_or_use(task_id, _args), do: load_task(task_id)
+
+  defp resolve_pass_provider(task, context) do
+    workspace = context.workspace || maybe_load_workspace(task.workspace_id)
+    {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, workspace)
+
+    if fallback_reason do
+      CoordinatorNotifier.provider_fallback(
+        %{workspace_id: task.workspace_id, task_id: task.id},
+        Run.latest_authoring_provider(task.id),
+        provider,
+        fallback_reason
+      )
+    end
+
+    {provider, fallback_reason}
+  end
 
   # ---- context resolution --------------------------------------------------
 
@@ -136,7 +167,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_context(%Issue{} = task, args) do
-    workspace = maybe_load_workspace(task.workspace_id)
+    workspace = Map.get(args, :workspace) || maybe_load_workspace(task.workspace_id)
 
     branch = Map.get(args, :branch) || derive_branch(task)
     target_branch = Map.get(args, :target_branch) || workspace_base_branch(workspace) || "main"
@@ -252,9 +283,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     end
   end
 
-  defp start_worker(%Issue{} = task, context, worktree_path) do
+  defp start_worker(%Issue{} = task, context, worktree_path, provider, fallback_reason) do
     meta = %{
       role: :fix_pass,
+      provider: Atom.to_string(provider),
+      provider_fallback: fallback_reason,
       worktree_path: worktree_path,
       branch: nil,
       target_branch: context.target_branch,
@@ -302,7 +335,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   # `:start_claude` defaults to `true` for production. Tests pass
   # `start_claude: false` (and a `:claude_command` argv) so they can verify the
   # dispatcher was invoked without spawning a real Claude subprocess.
-  defp maybe_start_claude(worker_pid, worktree_path, context, args) do
+  defp maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
     case Map.get(args, :start_claude, true) do
       false ->
         {:ok, nil}
@@ -310,7 +343,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       true ->
         session_opts =
           [owner: worker_pid, worktree_path: worktree_path]
-          |> add_command_or_prompt(context, args)
+          |> add_command_or_prompt(context, args, worktree_path, provider)
 
         case ClaudeSession.start(session_opts) do
           {:ok, port} ->
@@ -323,10 +356,50 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     end
   end
 
-  defp add_command_or_prompt(opts, context, args) do
+  defp add_command_or_prompt(opts, context, args, worktree_path, provider) do
     case Map.get(args, :claude_command) do
-      cmd when is_list(cmd) and cmd != [] -> Keyword.put(opts, :command, cmd)
-      _ -> Keyword.put(opts, :prompt, prompt_for(context))
+      cmd when is_list(cmd) and cmd != [] ->
+        opts
+        |> Keyword.put(:command, cmd)
+        |> Keyword.put(:provider, Atom.to_string(provider))
+        |> Keyword.put(:prompt, prompt_for(context))
+
+      _ ->
+        if context.workspace do
+          :ok = Agents.prepare(context.workspace, :agent)
+        end
+
+        adapter = Agents.for_type(provider)
+        prompt = prompt_for(context)
+
+        agent_opts = [
+          workspace: context.workspace,
+          worktree_path: worktree_path
+        ]
+
+        case adapter.default_argv(prompt, agent_opts) do
+          {:ok, argv} ->
+            env = safe_spawn_env(adapter, agent_opts)
+
+            opts
+            |> Keyword.put(:command, argv)
+            |> Keyword.put(:env, env)
+            |> Keyword.put(:provider, Atom.to_string(provider))
+            |> Keyword.put(:prompt, prompt)
+
+          {:error, _} ->
+            opts
+            |> Keyword.put(:prompt, prompt)
+            |> Keyword.put(:provider, Atom.to_string(provider))
+        end
+    end
+  end
+
+  defp safe_spawn_env(adapter, agent_opts) do
+    if function_exported?(adapter, :spawn_env, 1) do
+      adapter.spawn_env(agent_opts)
+    else
+      []
     end
   end
 
