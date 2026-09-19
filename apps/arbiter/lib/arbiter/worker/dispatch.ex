@@ -313,9 +313,12 @@ defmodule Arbiter.Worker.Dispatch do
       # the worktree (terminate/2 never cleans up), so the worktree is preserved.
       _ = stop_prior_worker(task_id)
 
+      {provider, fallback_reason} = resolve_resume_provider(task, opts)
+
       resume_opts =
         opts
-        |> Keyword.put_new(:agent_type, latest_provider(task_id))
+        |> Keyword.put(:agent_type, provider)
+        |> put_opt_if_present(:provider_fallback, fallback_reason)
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
@@ -386,9 +389,12 @@ defmodule Arbiter.Worker.Dispatch do
       # Stopping it never touches the worktree, so it stays preserved.
       _ = stop_prior_worker(task_id)
 
+      {provider, fallback_reason} = resolve_resume_provider(task, opts)
+
       resume_opts =
         opts
-        |> Keyword.put_new(:agent_type, latest_provider(task_id))
+        |> Keyword.put(:agent_type, provider)
+        |> put_opt_if_present(:provider_fallback, fallback_reason)
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
@@ -611,36 +617,36 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> {:error, :no_session}
   end
 
-  # bd-b7e33c AC5 post-merge finding: neither `resume/2` nor `resume_session/2`
-  # threaded a provider through to the new dispatch, so `build_agent_session_opts`
-  # re-ran `Routing.choose/2` from scratch and could silently hand an agy/gemini
-  # task's resume to Claude — spending the quota the whole agy-parity epic exists
-  # to conserve, with no signal in the result that a provider switch happened.
-  # Default `:agent_type` (unless the caller already forced one) to the provider
-  # the task's most recent usage-ledger row actually ran on, so a resume stays on
-  # the same provider by construction. `nil` (no prior usage row, or an
-  # unrecognized provider string) leaves the routing policy free to choose, same
-  # as before this fix.
-  defp latest_provider(task_id) when is_binary(task_id) do
-    Event
-    |> Ash.Query.filter(task_id == ^task_id and not is_nil(provider))
-    |> Ash.Query.sort(occurred_at: :desc)
-    |> Ash.Query.limit(1)
-    |> Ash.read!()
-    |> List.first()
-    |> case do
-      %Event{provider: p} when is_binary(p) and p != "" -> safe_provider_atom(p)
-      _ -> nil
+  # bd-2exkl0: resume passes inherit the provider of the authoring run being
+  # resumed via Agents.resolve_revision_provider/2, with escalation to the
+  # coordinator if an unexpected provider fallback occurs.
+  defp resolve_resume_provider(%Issue{} = task, opts) do
+    case Keyword.get(opts, :agent_type) do
+      p when is_atom(p) and not is_nil(p) ->
+        {p, nil}
+
+      _ ->
+        workspace = load_workspace(task)
+        {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, workspace)
+
+        if fallback_reason do
+          orig = Run.latest_authoring_provider(task.id)
+
+          CoordinatorNotifier.provider_fallback(
+            %{workspace_id: task.workspace_id, task_id: task.id},
+            orig,
+            provider,
+            fallback_reason
+          )
+        end
+
+        {provider, fallback_reason}
     end
-  rescue
-    _ -> nil
   end
 
-  defp safe_provider_atom(p) do
-    String.to_existing_atom(p)
-  rescue
-    ArgumentError -> nil
-  end
+  defp put_opt_if_present(opts, _key, nil), do: opts
+  defp put_opt_if_present(opts, _key, ""), do: opts
+  defp put_opt_if_present(opts, key, value), do: Keyword.put(opts, key, value)
 
   # `review: true` is the convenience hook used by `arb review`: it forces the
   # review-only defaults so the caller doesn't have to spell out four flags in
@@ -1082,6 +1088,14 @@ defmodule Arbiter.Worker.Dispatch do
     # (bd-7rspia was corrected D1 -> D2) and would then silently relabel this
     # run's provenance to the corrected estimate instead of the one it ran under.
     base = Map.put(base, :difficulty_at_dispatch, task.difficulty)
+
+    base =
+      base
+      |> put_if_present(
+        :provider,
+        Keyword.get(opts, :agent_type) && to_string(Keyword.get(opts, :agent_type))
+      )
+      |> put_if_present(:provider_fallback, Keyword.get(opts, :provider_fallback))
 
     base = maybe_put_resume_meta(base, opts)
 

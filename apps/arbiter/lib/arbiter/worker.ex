@@ -837,6 +837,7 @@ defmodule Arbiter.Worker do
   @spec stop(ref(), term(), timeout()) :: :ok | {:error, :not_found}
   def stop(ref, reason \\ :normal, timeout \\ :infinity)
   def stop(pid, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
+  def stop(%{worker_pid: pid}, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
 
   def stop(task_id, reason, timeout) when is_binary(task_id) do
     case whereis(task_id) do
@@ -1043,6 +1044,8 @@ defmodule Arbiter.Worker do
   # nil — subsequent terminal updates will no-op cleanly.
   defp record_run_started(%State{} = state) do
     worker_type = worker_type_from_meta(state.meta)
+    provider = provider_from_meta(state.meta)
+    provider_fallback = provider_fallback_from_meta(state.meta)
 
     attrs = %{
       task_id: state.task_id,
@@ -1067,7 +1070,9 @@ defmodule Arbiter.Worker do
       # task_id strings. The base_task_id is the root task (strips #review/#impl etc),
       # and role denotes the run's purpose (base/review/impl).
       base_task_id: Arbiter.Worker.ReviewGate.base_task_id(state.task_id),
-      role: worker_type_to_role(worker_type)
+      role: worker_type_to_role(worker_type),
+      provider: provider,
+      provider_fallback: provider_fallback
     }
 
     case Ash.create(Arbiter.Workers.Run, attrs) do
@@ -1083,6 +1088,33 @@ defmodule Arbiter.Worker do
       log_run_warning("create", state.task_id, e)
       state
   end
+
+  defp provider_from_meta(meta) when is_map(meta) do
+    prov =
+      Map.get(meta, :provider) ||
+        Map.get(meta, "provider") ||
+        get_in(meta, [:routing_config, :provider]) ||
+        get_in(meta, ["routing_config", "provider"]) ||
+        Map.get(meta, :agent_type) ||
+        Map.get(meta, "agent_type")
+
+    case prov do
+      p when is_atom(p) and not is_nil(p) -> Atom.to_string(p)
+      p when is_binary(p) and p != "" -> p
+      _ -> nil
+    end
+  end
+
+  defp provider_from_meta(_), do: nil
+
+  defp provider_fallback_from_meta(meta) when is_map(meta) do
+    case Map.get(meta, :provider_fallback) || Map.get(meta, "provider_fallback") do
+      fb when is_binary(fb) and fb != "" -> fb
+      _ -> nil
+    end
+  end
+
+  defp provider_fallback_from_meta(_), do: nil
 
   defp resumed_from_run_id(meta) when is_map(meta),
     do: Map.get(meta, :resumed_from_run_id) || Map.get(meta, "resumed_from_run_id")
@@ -1149,6 +1181,8 @@ defmodule Arbiter.Worker do
     # Extract the model from meta, checking both potential sources
     meta = state.meta || %{}
     model = Map.get(meta, :model)
+    provider = provider_from_meta(meta)
+    provider_fallback = provider_fallback_from_meta(meta)
 
     attrs = %{
       status: run_status(state),
@@ -1160,6 +1194,8 @@ defmodule Arbiter.Worker do
 
     # Only include model in the update if it's non-nil (to preserve NULL if not set)
     attrs = if model, do: Map.put(attrs, :model, model), else: attrs
+    attrs = if provider, do: Map.put(attrs, :provider, provider), else: attrs
+    attrs = if provider_fallback, do: Map.put(attrs, :provider_fallback, provider_fallback), else: attrs
 
     # bd-9rdwe4: the structured terminal record (#1017 gap G5) — nil on a run
     # whose session never reached a terminal `result` event (crashed,
@@ -1821,6 +1857,22 @@ defmodule Arbiter.Worker do
       backfill_run_model(state.run_id, value, state.task_id)
     end
 
+    if key == :routing_config and not is_nil(state.run_id) and is_map(value) do
+      prov = Map.get(value, :provider) || Map.get(value, "provider")
+
+      if prov do
+        backfill_run_fields(state.run_id, %{provider: to_string(prov)}, state.task_id)
+      end
+    end
+
+    if key == :provider and not is_nil(state.run_id) and not is_nil(value) do
+      backfill_run_fields(state.run_id, %{provider: to_string(value)}, state.task_id)
+    end
+
+    if key == :provider_fallback and not is_nil(state.run_id) and not is_nil(value) do
+      backfill_run_fields(state.run_id, %{provider_fallback: to_string(value)}, state.task_id)
+    end
+
     # bd-dzz6ly: routing/skills/standing_orders are resolved after this
     # worker's Run row already exists (dispatch/spawn happens post-init), so
     # they arrive as a single reported map and get patched onto the row the
@@ -1911,9 +1963,15 @@ defmodule Arbiter.Worker do
       |> Map.delete(:resume_session_id)
       |> Map.put(:config_dir, config_dir)
       |> Map.put(:cwd, Map.get(port_args, :cd))
+      |> maybe_put(:provider, provider && to_string(provider))
 
     new_state = %State{state | claude_sessions: sessions, meta: meta}
     new_state = sync_session_meta(new_state, port)
+
+    # Backfill provider onto run row if known
+    if new_state.run_id && provider do
+      backfill_run_fields(new_state.run_id, %{provider: to_string(provider)}, new_state.task_id)
+    end
 
     # Persist config_dir onto the run row now, at dispatch, so a node that dies
     # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
