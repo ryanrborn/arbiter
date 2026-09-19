@@ -838,9 +838,6 @@ defmodule Arbiter.Worker do
   def stop(ref, reason \\ :normal, timeout \\ :infinity)
   def stop(pid, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
 
-  def stop(%{worker_pid: pid}, reason, timeout) when is_pid(pid),
-    do: GenServer.stop(pid, reason, timeout)
-
   def stop(task_id, reason, timeout) when is_binary(task_id) do
     case whereis(task_id) do
       nil -> {:error, :not_found}

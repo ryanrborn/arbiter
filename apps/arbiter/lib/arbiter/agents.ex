@@ -156,11 +156,19 @@ defmodule Arbiter.Agents do
   `Arbiter.Workers.Run.latest_authoring_provider/1`. If that provider is
   available, returns `{provider, nil}`.
 
-  If the original provider cannot be used (e.g. credentials flagged expired),
-  it falls back to an available provider and returns
+  If the original provider cannot be used (e.g. credentials flagged expired,
+  or the recorded provider atom is no longer a recognized adapter), it falls
+  back to an available provider and returns
   `{fallback_provider, fallback_reason}` so the fallback is visible and recorded.
 
   If no prior run exists, falls back to the workspace default `{default_provider, nil}`.
+
+  If NO other provider is available either, this does NOT silently hand back
+  the known-unavailable original provider under a "fell back" reason that
+  would misreport what actually happened — it still returns the original
+  provider (there is nothing else to spawn with), but the `fallback_reason`
+  says plainly that no alternative was available, so the caller/coordinator
+  isn't told a fallback succeeded when it didn't.
   """
   @spec resolve_revision_provider(String.t(), Workspace.t() | nil) ::
           {provider :: atom(), fallback_reason :: String.t() | nil}
@@ -170,9 +178,14 @@ defmodule Arbiter.Agents do
         if provider_available?(orig) do
           {orig, nil}
         else
-          fallback = fallback_for_workspace(workspace, orig)
-          reason = "fell back from #{orig}: credentials flagged expired"
-          {fallback, reason}
+          case fallback_for_workspace(workspace, orig) do
+            {:ok, fallback} ->
+              {fallback, "fell back from #{orig}: credentials flagged expired"}
+
+            :error ->
+              {orig,
+               "no provider available: #{orig} credentials flagged expired and no alternative adapter is available; retrying #{orig}"}
+          end
         end
 
       nil ->
@@ -188,12 +201,18 @@ defmodule Arbiter.Agents do
     candidates = (pool ++ [:claude, :gemini, :codex]) |> Enum.uniq()
 
     case Enum.find(candidates, fn t -> t != orig and provider_available?(t) end) do
-      nil -> :claude
-      t -> t
+      nil -> :error
+      t -> {:ok, t}
     end
   end
 
-  defp fallback_for_workspace(nil, _orig), do: :claude
+  defp fallback_for_workspace(nil, orig) do
+    if orig != :claude and provider_available?(:claude) do
+      {:ok, :claude}
+    else
+      :error
+    end
+  end
 
   @doc "Returns the list of valid agent type strings (for workspace-config validation)."
   @spec valid_agent_types() :: [String.t()]

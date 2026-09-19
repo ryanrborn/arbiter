@@ -504,6 +504,17 @@ defmodule Arbiter.Workers.Run do
   `:fix_pass`, `:conflict`), explicitly excluding `:review` passes (which are
   governed by `review_agent.type`).
 
+  bd-2exkl0 (finding 4): prefers the most recent row whose `provider_fallback`
+  is nil — i.e. a run that actually got the originally-intended provider,
+  not one that itself had to fall back. Without this, a single round where
+  the intended provider was briefly unavailable (credentials flagged
+  expired) would get silently "adopted" as the new original on every
+  subsequent round: round 2 would read round 1's fallback provider as if it
+  were the real original, report no fallback (because round 2 *did* get the
+  provider it asked for — round 1's fallback provider), and never attempt to
+  return to the real original once it recovered. Only when every authoring
+  run on record is itself a fallback do we fall back to the latest of those.
+
   Falls back to `Arbiter.Usage.Event` when historical run rows predate the
   `provider` column. Returns `nil` when no prior authoring provider is found.
   """
@@ -527,14 +538,31 @@ defmodule Arbiter.Workers.Run do
   end
 
   defp query_latest_run_provider(base_id) do
+    case query_latest_run_provider(base_id, require_no_fallback: true) do
+      p when is_atom(p) and not is_nil(p) -> p
+      nil -> query_latest_run_provider(base_id, require_no_fallback: false)
+    end
+  end
+
+  defp query_latest_run_provider(base_id, require_no_fallback: require_no_fallback?) do
     require Ash.Query
 
-    __MODULE__
-    |> Ash.Query.filter(
-      (task_id == ^base_id or base_task_id == ^base_id) and
-        worker_type in [:main, :impl, :fix_pass, :conflict] and
-        not is_nil(provider)
-    )
+    base_filter =
+      Ash.Query.filter(
+        __MODULE__,
+        (task_id == ^base_id or base_task_id == ^base_id) and
+          worker_type in [:main, :impl, :fix_pass, :conflict] and
+          not is_nil(provider)
+      )
+
+    query =
+      if require_no_fallback? do
+        Ash.Query.filter(base_filter, is_nil(provider_fallback))
+      else
+        base_filter
+      end
+
+    query
     |> Ash.Query.sort(started_at: :desc, inserted_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()

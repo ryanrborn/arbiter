@@ -347,6 +347,123 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
     end
   end
 
+  describe "Unavailable provider fallback recorded and escalated (AC4)" do
+    test "a real implementer spawn with expired gemini credentials records provider_fallback on the run and escalates to the coordinator",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "claude", """
+      echo "claude $@" >> #{log}
+      echo "VERDICT: REQUEST_CHANGES"
+      echo "- [high] feature.txt:1 needs fix"
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-ac4-#{System.unique_integer([:positive])}",
+          prefix: "a4",
+          config: %{
+            "agent" => %{"type" => ["gemini", "claude"]},
+            "review_agent" => %{"type" => "claude"},
+            "review" => %{"required" => true, "rounds" => 2}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "ac4 fallback task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          worker_type: :main,
+          role: "base",
+          provider: "gemini",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      CredentialWatchdog.mark_expired(Agents.Gemini, %Arbiter.Worker.StopReason{
+        category: :auth_expired,
+        summary: "credentials expired"
+      })
+
+      _ = :sys.get_state(CredentialWatchdog)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 2,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 30_000
+      }
+
+      {:ok, worker_pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: meta
+        )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      impl_task_id = "#{task.id}#review#impl1"
+
+      wait_until(fn ->
+        case runs_for_task(impl_task_id) do
+          [%Run{provider: p}] when not is_nil(p) -> true
+          _ -> false
+        end
+      end)
+
+      [impl_run] = runs_for_task(impl_task_id)
+
+      assert impl_run.provider == "claude",
+             "expired gemini must fall back to an available provider"
+
+      assert impl_run.provider_fallback =~ "fell back from gemini",
+             "the fallback must be recorded on the run row, not silent"
+
+      wait_until(fn ->
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          kind == :escalation and to_ref == "coordinator" and task_ref == ^task.id
+        )
+        |> Ash.read!()
+        |> Enum.any?(&(&1.subject =~ "provider fallback"))
+      end)
+
+      [escalation] =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          kind == :escalation and to_ref == "coordinator" and task_ref == ^task.id
+        )
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "provider fallback"))
+
+      assert escalation.body =~ "gemini"
+      assert escalation.body =~ "claude"
+    end
+  end
+
   describe "Unavailable provider fallback (AC4)" do
     test "when original provider credentials are flagged expired, falls back to available provider with coordinator visibility",
          %{repo: _repo, stub_dir: stub_dir, log: log} do
@@ -407,6 +524,68 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       assert provider == :claude
       assert fallback_reason =~ "fell back from gemini"
       assert fallback_reason =~ "credentials flagged expired"
+    end
+  end
+
+  describe "Fallback is not sticky across rounds (finding 4)" do
+    test "a round whose provider fell back does not get adopted as the new 'original' once credentials recover",
+         %{repo: _repo} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-sticky-#{System.unique_integer([:positive])}",
+          prefix: "sf",
+          config: %{"agent" => %{"type" => ["gemini", "claude"]}}
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "sticky fallback task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      # Round 1: main author run recorded gemini as the true original.
+      {:ok, _main_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          worker_type: :main,
+          role: "base",
+          provider: "gemini",
+          status: :completed,
+          started_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+      # Round 1's impl pass had to fall back to claude (gemini was expired at
+      # the time) and recorded that fallback on its own run row.
+      {:ok, _impl_run_1} =
+        Ash.create(Run, %{
+          task_id: "#{task.id}#review#impl1",
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          worker_type: :impl,
+          role: "implementer",
+          provider: "claude",
+          provider_fallback: "fell back from gemini: credentials flagged expired",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      # Gemini has since recovered.
+      CredentialWatchdog.mark_recovered(Agents.Gemini)
+      _ = :sys.get_state(CredentialWatchdog)
+
+      # Round 2 must inherit the TRUE original (gemini), re-announcing that
+      # round 1 fell back rather than silently treating claude as if it were
+      # always the intended provider.
+      assert Run.latest_authoring_provider(task.id) == :gemini
+
+      {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, ws)
+      assert provider == :gemini
+      assert is_nil(fallback_reason)
     end
   end
 
