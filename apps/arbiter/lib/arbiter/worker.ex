@@ -2539,7 +2539,9 @@ defmodule Arbiter.Worker do
   defp fail_stopped(%State{} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
-    reason = Arbiter.Worker.StopReason.classify(exit_status, output_lines)
+
+    reason =
+      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
 
     # bd-8lq2g7: name the subordinate pass in the log line too — "worker for
     # task=X stopped" reads as the task's own worker dying when it was a
@@ -3452,7 +3454,7 @@ defmodule Arbiter.Worker do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
 
-    Arbiter.Worker.StopReason.classify(exit_status, output_lines).category ==
+    Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider)).category ==
       :exited_without_done
   end
 
@@ -3535,7 +3537,9 @@ defmodule Arbiter.Worker do
   defp maybe_resume_continuation(%State{meta: meta} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
-    reason = Arbiter.Worker.StopReason.classify(exit_status, output_lines)
+
+    reason =
+      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
 
     session_id =
       session |> Arbiter.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
@@ -3861,7 +3865,8 @@ defmodule Arbiter.Worker do
   defp session_stop_category(session) when is_map(session) do
     Arbiter.Worker.StopReason.classify(
       Map.get(session, :exit_status),
-      Enum.reverse(Map.get(session, :output_lines, []))
+      Enum.reverse(Map.get(session, :output_lines, [])),
+      Map.get(session, :provider)
     ).category
   end
 

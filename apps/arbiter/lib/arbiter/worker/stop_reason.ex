@@ -316,22 +316,16 @@ defmodule Arbiter.Worker.StopReason do
   # future CLI phrasing tweak doesn't silently fall through to :crashed.
   @context_thrash_signature ~r/autocompact[^\n]{0,20}thrash/i
 
-  # bd-606zlr: the harness's OWN markers for "an asynchronous wait is now
-  # armed". Every one of them is text this Arbiter build did not write and the
-  # agent did not choose the wording of — they are emitted by the CLI tool
-  # harness when a `Bash` call is backgrounded (either up front or after
-  # blowing its tool timeout), when a `Monitor` starts, or when a
-  # `ScheduleWakeup` is booked. Matching the harness's phrasing rather than the
-  # agent's prose ("I'll wait for the notification") is deliberate: the prose
-  # is unbounded paraphrase, the markers are fixed strings.
-  @async_arm_signature ~r/
-      you[ _]will[ _]be[ _]notified
-    | moved[ _]to[ _]the[ _]background[ _]\(id:
-    | running[ _]in[ _]the[ _]background[ _]with[ _]id:
-    | command[ _]running[ _]in[ _]background[ _]with[ _]id:
-    | monitor[ _]started[ _]\(task
-    | wakeup[ _]scheduled
-  /ix
+  # bd-1zz5mn: the "an asynchronous wait is now armed" signature is
+  # provider-shaped — each agent CLI wraps a backgrounded call / monitor /
+  # wakeup in its own fixed wording, so there is no single shared regex that
+  # covers every harness (the previous one only matched Claude's markers,
+  # which meant every agy early-quit was misclassified — see
+  # `abandoned_async_wait?/2`). Each adapter declares its own via the
+  # `Arbiter.Agents.Agent` behaviour's optional `async_arm_signature/0`
+  # callback; this is the fallback for a provider that hasn't (or can't be
+  # resolved), so existing callers of `classify/2` are unaffected.
+  @default_async_arm_signature Arbiter.Agents.Claude.async_arm_signature()
 
   # The counterpart: evidence the agent actually *drained* what it armed, in
   # the same session, before the run ended. A blocking `TaskOutput` /
@@ -357,14 +351,22 @@ defmodule Arbiter.Worker.StopReason do
   — order does not matter, we only scan the tail for signatures. Pass the
   worker's `meta[:output_lines]` (oldest-first) directly.
 
+  `provider` (bd-1zz5mn) is the session's provider string (e.g. `"gemini"`,
+  `"codex"`, `nil`/`"claude"`) — it selects which adapter's
+  `async_arm_signature/0` is used to recognize an abandoned async wait.
+  Defaults to `nil`, which resolves to the Claude signature, so every
+  existing caller that doesn't know its provider (or doesn't care — the
+  async-wait refinement is the only thing that's provider-shaped) is
+  unaffected.
+
   Returns a `%StopReason{}`.
   """
-  @spec classify(integer() | nil, [String.t()]) :: t()
+  @spec classify(integer() | nil, [String.t()], String.t() | nil) :: t()
   # Pre-existing complexity 18 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  def classify(exit_status, output_lines) when is_list(output_lines) do
+  def classify(exit_status, output_lines, provider \\ nil) when is_list(output_lines) do
     haystack = signature_haystack(output_lines)
     signal = signal_for(exit_status)
 
@@ -533,7 +535,7 @@ defmodule Arbiter.Worker.StopReason do
       # plain clean-exit clause it refines. Scoped to `exit_status == 0`
       # because a crash that happens to have backgrounded something earlier is
       # a crash — the exit status stays authoritative.
-      exit_status == 0 and abandoned_async_wait?(output_lines) ->
+      exit_status == 0 and abandoned_async_wait?(output_lines, provider) ->
         %__MODULE__{
           category: :async_wait_abandoned,
           summary:
@@ -768,10 +770,11 @@ defmodule Arbiter.Worker.StopReason do
   # it drains the thing it armed. The drain check is what keeps the correct
   # pattern — background a command, then block on `TaskOutput` in the same
   # turn — from being misread as this failure.
-  defp abandoned_async_wait?(output_lines) do
+  defp abandoned_async_wait?(output_lines, provider) do
     window = Enum.take(output_lines, -@async_arm_window)
+    signature = async_arm_signature_for(provider)
 
-    case last_index_matching(window, @async_arm_signature) do
+    case last_index_matching(window, signature) do
       nil ->
         false
 
@@ -780,6 +783,31 @@ defmodule Arbiter.Worker.StopReason do
         |> Enum.drop(idx + 1)
         |> Enum.any?(&Regex.match?(@async_drain_signature, &1))
         |> Kernel.not()
+    end
+  end
+
+  # bd-1zz5mn: resolve the provider string carried on the session (`"gemini"`,
+  # `"codex"`, `nil`/`"claude"`) to its adapter's own async-arm markers,
+  # falling back to Claude's when the provider is unknown or its adapter
+  # hasn't declared one yet — the same "optional, caller-side default"
+  # convention `async_tool_instruction/0` already uses.
+  defp async_arm_signature_for(provider) do
+    adapter =
+      case provider do
+        "gemini" -> Arbiter.Agents.Gemini
+        "codex" -> Arbiter.Agents.Codex
+        _ -> Arbiter.Agents.Claude
+      end
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :async_arm_signature, 0) do
+      # bd-1zz5mn: `apply/3` (not a direct remote call) deliberately, so the
+      # compiler's xref pass doesn't flag adapters (e.g. Codex today) that
+      # haven't implemented this optional callback yet — the `function_exported?`
+      # guard above is what actually protects the call at runtime.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(adapter, :async_arm_signature, [])
+    else
+      @default_async_arm_signature
     end
   end
 
