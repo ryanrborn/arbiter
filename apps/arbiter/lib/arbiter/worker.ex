@@ -1092,22 +1092,30 @@ defmodule Arbiter.Worker do
   end
 
   defp provider_from_meta(meta) when is_map(meta) do
-    prov =
-      Map.get(meta, :provider) ||
-        Map.get(meta, "provider") ||
-        get_in(meta, [:routing_config, :provider]) ||
-        get_in(meta, ["routing_config", "provider"]) ||
-        Map.get(meta, :agent_type) ||
-        Map.get(meta, "agent_type")
-
-    case prov do
-      p when is_atom(p) and not is_nil(p) -> Atom.to_string(p)
-      p when is_binary(p) and p != "" -> p
-      _ -> nil
-    end
+    meta
+    |> find_meta_provider()
+    |> normalize_provider_string()
   end
 
   defp provider_from_meta(_), do: nil
+
+  defp find_meta_provider(meta) do
+    Enum.find_value(
+      [
+        Map.get(meta, :provider),
+        Map.get(meta, "provider"),
+        get_in(meta, [:routing_config, :provider]),
+        get_in(meta, ["routing_config", "provider"]),
+        Map.get(meta, :agent_type),
+        Map.get(meta, "agent_type")
+      ],
+      & &1
+    )
+  end
+
+  defp normalize_provider_string(p) when is_atom(p) and not is_nil(p), do: Atom.to_string(p)
+  defp normalize_provider_string(p) when is_binary(p) and p != "", do: p
+  defp normalize_provider_string(_), do: nil
 
   defp provider_fallback_from_meta(meta) when is_map(meta) do
     case Map.get(meta, :provider_fallback) || Map.get(meta, "provider_fallback") do
@@ -1856,35 +1864,7 @@ defmodule Arbiter.Worker do
 
   def handle_call({:report, key, value}, _from, %State{} = state) do
     state = %State{state | meta: Map.put(state.meta, key, value)}
-
-    if key == :model and not is_nil(state.run_id) do
-      backfill_run_model(state.run_id, value, state.task_id)
-    end
-
-    if key == :routing_config and not is_nil(state.run_id) and is_map(value) do
-      prov = Map.get(value, :provider) || Map.get(value, "provider")
-
-      if prov do
-        backfill_run_fields(state.run_id, %{provider: to_string(prov)}, state.task_id)
-      end
-    end
-
-    if key == :provider and not is_nil(state.run_id) and not is_nil(value) do
-      backfill_run_fields(state.run_id, %{provider: to_string(value)}, state.task_id)
-    end
-
-    if key == :provider_fallback and not is_nil(state.run_id) and not is_nil(value) do
-      backfill_run_fields(state.run_id, %{provider_fallback: to_string(value)}, state.task_id)
-    end
-
-    # bd-dzz6ly: routing/skills/standing_orders are resolved after this
-    # worker's Run row already exists (dispatch/spawn happens post-init), so
-    # they arrive as a single reported map and get patched onto the row the
-    # same way :model's late arrival does above.
-    if key == :run_provenance and not is_nil(state.run_id) and is_map(value) do
-      backfill_run_fields(state.run_id, value, state.task_id)
-    end
-
+    backfill_report(state.run_id, state.task_id, key, value)
     {:reply, :ok, state}
   end
 
@@ -1918,12 +1898,7 @@ defmodule Arbiter.Worker do
     # on reading it back off a temp file that might already be gone.
     persist_composed_prompt(state, session_config)
 
-    if spawn_args != pristine_args do
-      case get_prompt_tmpfile(adapter, pristine_args.argv) do
-        path when is_binary(path) -> File.rm(path)
-        nil -> :ok
-      end
-    end
+    cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
 
     port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
     now = DateTime.utc_now()
@@ -1972,22 +1947,57 @@ defmodule Arbiter.Worker do
     new_state = %State{state | claude_sessions: sessions, meta: meta}
     new_state = sync_session_meta(new_state, port)
 
-    # Backfill provider onto run row if known
-    if new_state.run_id && provider do
-      backfill_run_fields(new_state.run_id, %{provider: to_string(provider)}, new_state.task_id)
-    end
-
-    # Persist config_dir onto the run row now, at dispatch, so a node that dies
-    # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
-    # a Gemini/Codex run has no Claude session file to reconcile against.
-    if config_dir && new_state.run_id &&
-         Map.get(session_config, :provider) in [nil, "claude"] do
-      backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
-    end
+    backfill_session_dispatch(new_state.run_id, new_state.task_id, provider, config_dir, session_config)
 
     {:reply, {:ok, port}, new_state}
   rescue
     e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+  end
+
+  defp backfill_report(nil, _task_id, _key, _value), do: :ok
+
+  defp backfill_report(run_id, task_id, :model, value) do
+    backfill_run_model(run_id, value, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :routing_config, %{} = value) do
+    case Map.get(value, :provider) || Map.get(value, "provider") do
+      nil -> :ok
+      prov -> backfill_run_fields(run_id, %{provider: to_string(prov)}, task_id)
+    end
+  end
+
+  defp backfill_report(run_id, task_id, :provider, value) when not is_nil(value) do
+    backfill_run_fields(run_id, %{provider: to_string(value)}, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :provider_fallback, value) when not is_nil(value) do
+    backfill_run_fields(run_id, %{provider_fallback: to_string(value)}, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :run_provenance, %{} = value) do
+    backfill_run_fields(run_id, value, task_id)
+  end
+
+  defp backfill_report(_run_id, _task_id, _key, _value), do: :ok
+
+  defp cleanup_orphaned_prompt(adapter, spawn_args, pristine_args) do
+    if spawn_args != pristine_args do
+      case get_prompt_tmpfile(adapter, pristine_args.argv) do
+        path when is_binary(path) -> File.rm(path)
+        nil -> :ok
+      end
+    end
+  end
+
+  defp backfill_session_dispatch(run_id, task_id, provider, config_dir, session_config) do
+    if run_id && provider do
+      backfill_run_fields(run_id, %{provider: to_string(provider)}, task_id)
+    end
+
+    if config_dir && run_id && Map.get(session_config, :provider) in [nil, "claude"] do
+      backfill_run_fields(run_id, %{config_dir: config_dir}, task_id)
+    end
   end
 
   # bd-1z7624: build the spawn argv for the first session, injecting

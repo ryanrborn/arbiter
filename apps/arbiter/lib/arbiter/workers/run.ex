@@ -223,7 +223,7 @@ defmodule Arbiter.Workers.Run do
       public? true
       constraints max_length: 64, trim?: true
 
-      description "Resolved agent provider for the run (\"claude\", \"gemini\", \"codex\"); " <>
+      description ~s|Resolved agent provider for the run ("claude", "gemini", "codex"); | <>
                     "nil for a no-agent run or before the stream reports one."
     end
 
