@@ -289,15 +289,54 @@ defmodule Arbiter.Agents.Claude do
 
   @impl true
   def async_tool_instruction do
-    # bd-606zlr: one shared source for all four ASYNC TOOLS blocks. A reviewer
-    # that armed a Monitor to await a long suite would die exactly like an
-    # author worker does, and lose its verdict.
-    Arbiter.Worker.PromptBuilder.async_tools_section(
+    async_tool_instruction(
       "your VERDICT",
       "a VERDICT issued while a background task is still running is invalid,\n" <>
         "you would be judging on incomplete evidence",
       commit_first: false
     )
+  end
+
+  @impl true
+  def async_tool_instruction(completion_signal, coda \\ nil, opts \\ []) do
+    tail =
+      case coda do
+        nil -> "before you print #{completion_signal}."
+        extra -> "before you print #{completion_signal} —\n#{extra}."
+      end
+
+    commit_bullet =
+      if Keyword.get(opts, :commit_first, true) do
+        """
+          * COMMIT correct work BEFORE running any long verification. Verification
+            confirms work; it must never be the thing that loses it.
+        """
+      else
+        ""
+      end
+
+    """
+    *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+    turn ends the session outright, and no notification can ever reach you
+    afterward — not from `Monitor`, not `ScheduleWakeup`, not a backgrounded
+    shell job. The process that would receive it no longer exists. If you
+    background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+    similar) and end your turn to "wait" for it, the run ends on the spot, the
+    command is killed with it, and any uncommitted work is lost. So:
+
+    #{commit_bullet}\
+      * Run `mix test`, `mix precommit`, `dialyzer`, and any other long
+        verification command in the FOREGROUND, in the same tool call, and
+        wait for it to finish before your turn ends. Raise the `Bash` tool's
+        own `timeout` parameter (up to 600000 ms / 10 minutes) if the default
+        is too short, or narrow the command — the specific failing test
+        files, not the whole suite.
+      * NEVER background a verification command and end your turn expecting to
+        be woken up later. NEVER call `Monitor` or `ScheduleWakeup` to wait for
+        one. There is no "later" in a headless session.
+
+    You MUST read every command's full output #{tail}\
+    """
   end
 
   # bd-1zz5mn / bd-606zlr: the Claude CLI's OWN markers for "an asynchronous

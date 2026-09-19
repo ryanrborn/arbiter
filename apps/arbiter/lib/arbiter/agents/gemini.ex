@@ -180,13 +180,68 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
+  # bd-apq1g6 (spike, answered 2026-09-19): agy print mode has NO flag-based
+  # way to force a long command to run synchronously. The documented
+  # synchronous form from agy's own stock system prompt — `"Blocking": true`
+  # with `"WaitMsBeforeAsync": 0` — was invoked verbatim against a `sleep 20`
+  # and agy backgrounded it anyway ("The command has been launched in the
+  # background"), then terminated the task ~5s later on exit. Both arguments
+  # are accepted; neither is honoured as a wait switch. So this text must NOT
+  # promise foreground/synchronous execution — the only remedy with a positive
+  # control behind it is behavioural: bd-40h2to measured 1-2 `manage_task
+  # status` polls in the runs that died against 73 in the run that survived.
+  # Keep the instruction anchored on "never end a turn while a task is
+  # RUNNING", not on the flags.
   @impl true
   def async_tool_instruction do
-    "*** TOOLS: Run all tools synchronously — wait inline for each result\n" <>
-      "    before proceeding to the next. Do not use background execution modes. When\n" <>
-      "    calling `run_command`, you MUST set `WaitMsBeforeAsync` to `10000` to prevent\n" <>
-      "    the command from being backgrounded, as background execution is not supported\n" <>
-      "    in this environment and will abort your session prematurely."
+    async_tool_instruction(
+      "your VERDICT",
+      "a VERDICT issued while a background task is still running is invalid,\n" <>
+        "you would be judging on incomplete evidence",
+      commit_first: false
+    )
+  end
+
+  @impl true
+  def async_tool_instruction(completion_signal, coda \\ nil, opts \\ []) do
+    tail =
+      case coda do
+        nil -> "before you print #{completion_signal}."
+        extra -> "before you print #{completion_signal} —\n#{extra}."
+      end
+
+    commit_bullet =
+      if Keyword.get(opts, :commit_first, true) do
+        """
+          * COMMIT correct work BEFORE running any long verification. Verification
+            confirms work; it must never be the thing that loses it.
+        """
+      else
+        ""
+      end
+
+    """
+    *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+    turn ends the session outright, and no notification can ever reach you
+    afterward. The process that would receive it no longer exists. If you
+    background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+    similar) and end your turn to "wait" for it, the run ends on the spot, the
+    command is killed with it, and any uncommitted work is lost. So:
+
+    #{commit_bullet}\
+      * When calling `run_command`, set `"Blocking": true` with
+        `"WaitMsBeforeAsync": 0`. Be aware that this does NOT keep a long
+        command in the foreground: agy accepts both arguments and backgrounds
+        the command anyway once it runs long. Treat every command you start as
+        one that may go to the background, and drain it yourself as below.
+      * NEVER end your turn expecting to be woken up later. There is no "later"
+        in a headless session. If a task goes to the background and is RUNNING,
+        you MUST keep calling `manage_task status` repeatedly within the SAME turn
+        until the task reports finished. Ending a turn while a task reports
+        RUNNING terminates the session and discards the work.
+
+    You MUST read every command's full output #{tail}\
+    """
   end
 
   # bd-1zz5mn: agy's OWN markers for "a tool call went async and the turn
