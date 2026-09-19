@@ -804,6 +804,7 @@ defmodule Arbiter.Worker.StopReason do
       # compiler's xref pass doesn't flag adapters (e.g. Codex today) that
       # haven't implemented this optional callback yet — the `function_exported?`
       # guard above is what actually protects the call at runtime.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
       apply(adapter, :async_arm_signature, [])
     else
       @default_async_arm_signature
