@@ -38,26 +38,29 @@ defmodule ArbiterWeb.LayoutsTest do
   end
 
   describe "app/1 — nav" do
-    test "renders the 10 nav entries in the new order, with renamed labels" do
+    test "renders the 13 nav entries in the new order, with renamed labels" do
       html = render_app()
 
       order = [
         "Board",
         "Issues",
         "Epics",
-        "Workers",
         "Merge queue",
-        "Workspaces",
-        "Skills",
-        "Loop",
+        "Workers",
+        "Run history",
+        "Sessions",
         "Usage",
         "Reviews",
-        "Audit"
+        "Audit",
+        "Workspaces",
+        "Skills",
+        "Loop"
       ]
 
       indices = Enum.map(order, fn label -> :binary.match(html, label) |> elem(0) end)
 
       assert indices == Enum.sort(indices)
+      assert html =~ ~s(href="/workers/history")
     end
 
     test "the Epics entry links to /epics and sits directly after Issues" do

@@ -89,18 +89,22 @@ defmodule ArbiterWeb.Layouts do
     # badge (bd-2wmxt5) is global chrome, so threading it through all eleven
     # LiveViews' `<Layouts.app ...>` call sites would buy nothing. Tests and
     # specimens that render the layout outside a DB sandbox pass the count in.
+    groups = ArbiterWeb.Nav.groups(assigns.open_epic_count || Arbiter.Tasks.open_epic_count())
+
     assigns =
-      assign(
-        assigns,
-        :nav_items,
-        nav_items(assigns.open_epic_count || Arbiter.Tasks.open_epic_count())
-      )
+      assigns
+      |> assign(:groups, groups)
+      |> assign(:nav_items, ArbiterWeb.Nav.flat_items(groups))
 
     assigns =
       assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
 
     ~H"""
-    <.top_nav items={@nav_items} current_path={@current_path}>
+    <.top_nav
+      items={@nav_items}
+      current_path={@current_path}
+      active_href={ArbiterWeb.Nav.active_href(@groups, @current_path)}
+    >
       <:right>
         <div :for={quota <- @quotas} class="max-lg:hidden flex flex-col gap-[3px]">
           <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
@@ -326,33 +330,6 @@ defmodule ArbiterWeb.Layouts do
       seconds < 86_400 -> "#{div(seconds, 3600)}h"
       true -> "#{div(seconds, 86_400)}d"
     end
-  end
-
-  # Board/Issues/Workers/Merge queue/Workspaces/Skills/Loop/Usage/Audit — the
-  # global-chrome nav order (bd-53pfbg). Dashboard renamed to Board, "Loop
-  # queue" to Loop, "Audit log" to Audit; About drops out of the nav (it's
-  # still reachable at ~p"/about" directly). Reviews (bd-amtjxk) sits between
-  # Usage and Audit — cross-cutting operator visibility, like both neighbors.
-  # Sessions (bd-c76fu9) sits after Loop: like Workers it is a list of live
-  # things Arbiter is running, but it is the operator's own, not the fleet's.
-  # Epics (bd-2wmxt5) sits directly after Issues — it is the same ledger at a
-  # coarser grain — and is the one entry that carries a count, because epics
-  # are the thing the board deliberately no longer shows.
-  defp nav_items(open_epic_count) do
-    [
-      %{label: "Board", href: ~p"/"},
-      %{label: cap_plural("issue"), href: ~p"/tasks"},
-      %{label: cap_plural("epic"), href: ~p"/epics", badge: open_epic_count},
-      %{label: cap_plural("worker"), href: ~p"/workers"},
-      %{label: cap_plural("merge queue"), href: ~p"/merge_queue"},
-      %{label: cap_plural("workspace"), href: ~p"/workspaces"},
-      %{label: cap_plural("skill"), href: ~p"/skills"},
-      %{label: "Loop", href: ~p"/loop"},
-      %{label: cap_plural("session"), href: ~p"/sessions"},
-      %{label: "Usage", href: ~p"/usage"},
-      %{label: "Reviews", href: ~p"/reviews"},
-      %{label: "Audit", href: ~p"/audit"}
-    ]
   end
 
   @doc """
