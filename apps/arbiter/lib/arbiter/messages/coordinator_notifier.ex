@@ -261,13 +261,19 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   switches are never silent. Best-effort, returns `:ok`.
   """
   @spec provider_fallback(map(), atom() | String.t(), atom() | String.t(), String.t()) :: :ok
-  def provider_fallback(%{workspace_id: ws_id} = snapshot, orig_provider, fallback_provider, reason)
+  def provider_fallback(
+        %{workspace_id: ws_id} = snapshot,
+        orig_provider,
+        fallback_provider,
+        reason
+      )
       when is_binary(ws_id) do
     task_id = Map.get(snapshot, :task_id, "system")
     orig_str = to_string(orig_provider)
     fb_str = to_string(fallback_provider)
 
     subject = "[provider fallback] #{task_id}: #{orig_str} -> #{fb_str}"
+
     body = """
     ## Provider Fallback on #{task_id}
 

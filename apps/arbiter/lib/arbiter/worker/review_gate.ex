@@ -3917,7 +3917,15 @@ defmodule Arbiter.Worker.ReviewGate do
             # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
             # resolution — it's carried purely so `Arbiter.Worker` can persist
             # what this reviewer/implementer was actually told.
-            {:ok, base ++ [command: argv, prompt: prompt, env: env, provider: adapter.provider(), model: session_model]}
+            {:ok,
+             base ++
+               [
+                 command: argv,
+                 prompt: prompt,
+                 env: env,
+                 provider: adapter.provider(),
+                 model: session_model
+               ]}
 
           {:error, reason} ->
             {:error, reason}

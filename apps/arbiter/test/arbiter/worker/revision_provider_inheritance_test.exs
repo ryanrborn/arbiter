@@ -219,8 +219,12 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
       # Verify that agy was invoked for the implementer pass
       call_lines = calls(log)
-      assert Enum.any?(call_lines, &String.starts_with?(&1, "claude")), "reviewer should have run on claude"
-      assert Enum.any?(call_lines, &String.starts_with?(&1, "agy")), "implementer should have run on agy"
+
+      assert Enum.any?(call_lines, &String.starts_with?(&1, "claude")),
+             "reviewer should have run on claude"
+
+      assert Enum.any?(call_lines, &String.starts_with?(&1, "agy")),
+             "implementer should have run on agy"
 
       # Verify run records
       wait_until(fn ->
@@ -322,8 +326,12 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
       # Reviewer ran on Claude
       call_lines = calls(log)
-      assert Enum.any?(call_lines, &String.starts_with?(&1, "claude")), "reviewer must run on claude"
-      refute Enum.any?(call_lines, &String.starts_with?(&1, "agy")), "agy should not have run for reviewer"
+
+      assert Enum.any?(call_lines, &String.starts_with?(&1, "claude")),
+             "reviewer must run on claude"
+
+      refute Enum.any?(call_lines, &String.starts_with?(&1, "agy")),
+             "agy should not have run for reviewer"
 
       # Reviewer run record shows claude
       wait_until(fn ->
@@ -389,6 +397,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
         category: :auth_expired,
         summary: "credentials expired"
       }
+
       CredentialWatchdog.mark_expired(Agents.Gemini, stop_reason)
       _ = :sys.get_state(CredentialWatchdog)
 

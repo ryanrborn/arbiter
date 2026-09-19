@@ -837,7 +837,9 @@ defmodule Arbiter.Worker do
   @spec stop(ref(), term(), timeout()) :: :ok | {:error, :not_found}
   def stop(ref, reason \\ :normal, timeout \\ :infinity)
   def stop(pid, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
-  def stop(%{worker_pid: pid}, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
+
+  def stop(%{worker_pid: pid}, reason, timeout) when is_pid(pid),
+    do: GenServer.stop(pid, reason, timeout)
 
   def stop(task_id, reason, timeout) when is_binary(task_id) do
     case whereis(task_id) do
@@ -1195,7 +1197,9 @@ defmodule Arbiter.Worker do
     # Only include model in the update if it's non-nil (to preserve NULL if not set)
     attrs = if model, do: Map.put(attrs, :model, model), else: attrs
     attrs = if provider, do: Map.put(attrs, :provider, provider), else: attrs
-    attrs = if provider_fallback, do: Map.put(attrs, :provider_fallback, provider_fallback), else: attrs
+
+    attrs =
+      if provider_fallback, do: Map.put(attrs, :provider_fallback, provider_fallback), else: attrs
 
     # bd-9rdwe4: the structured terminal record (#1017 gap G5) — nil on a run
     # whose session never reached a terminal `result` event (crashed,
