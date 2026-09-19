@@ -567,11 +567,9 @@ defmodule Arbiter.Workers.Run do
     _ -> nil
   end
 
-  defp safe_provider_atom(p) when is_binary(p) do
+  defp safe_provider_atom(p) do
     String.to_existing_atom(p)
   rescue
     ArgumentError -> nil
   end
-
-  defp safe_provider_atom(_), do: nil
 end
