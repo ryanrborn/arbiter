@@ -1942,10 +1942,12 @@ defmodule Arbiter.Worker.Dispatch do
         # can strip the routed, provider-specific model, then the bd-8cn795
         # thrash auto-escalation (a *default*, not an override), then let an
         # explicit `--model` override win on top of everything.
+        agent_type = resolve_session_agent_type(opts, task, workspace)
+
         choice =
           task
           |> Routing.choose(workspace, %{})
-          |> apply_agent_type_override(Keyword.get(opts, :agent_type))
+          |> apply_agent_type_override(agent_type)
           |> maybe_escalate_context_window(task.id)
           |> apply_model_override(Keyword.get(opts, :model))
 
@@ -2045,6 +2047,16 @@ defmodule Arbiter.Worker.Dispatch do
           {:error, reason} ->
             {:error, reason}
         end
+    end
+  end
+
+  defp resolve_session_agent_type(opts, %Issue{id: id}, workspace) do
+    Keyword.get(opts, :agent_type) || revision_or_resume_provider(opts, id, workspace)
+  end
+
+  defp revision_or_resume_provider(opts, id, workspace) do
+    if Keyword.get(opts, :resume) || Arbiter.Worker.ReviewGate.base_task_id(id) != id do
+      elem(Agents.resolve_revision_provider(id, workspace), 0)
     end
   end
 

@@ -1046,7 +1046,7 @@ defmodule Arbiter.Worker do
   # nil — subsequent terminal updates will no-op cleanly.
   defp record_run_started(%State{} = state) do
     worker_type = worker_type_from_meta(state.meta)
-    provider = provider_from_meta(state.meta)
+    provider = provider_from_meta(state.meta) || default_run_provider(state, worker_type)
     provider_fallback = provider_fallback_from_meta(state.meta)
 
     attrs = %{
@@ -1116,6 +1116,16 @@ defmodule Arbiter.Worker do
   defp normalize_provider_string(p) when is_atom(p) and not is_nil(p), do: Atom.to_string(p)
   defp normalize_provider_string(p) when is_binary(p) and p != "", do: p
   defp normalize_provider_string(_), do: nil
+
+  defp default_run_provider(%State{task_id: task_id}, worker_type)
+       when worker_type in [:impl, :fix_pass, :conflict] and is_binary(task_id) do
+    case Arbiter.Workers.Run.latest_authoring_provider(task_id) do
+      p when is_atom(p) and not is_nil(p) -> Atom.to_string(p)
+      _ -> nil
+    end
+  end
+
+  defp default_run_provider(_state, _worker_type), do: nil
 
   defp provider_fallback_from_meta(meta) when is_map(meta) do
     case Map.get(meta, :provider_fallback) || Map.get(meta, "provider_fallback") do
