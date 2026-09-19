@@ -593,6 +593,31 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
       assert review_prompt =~ "Codex `exec` executes commands synchronously"
       assert review_prompt =~ "do not print `arb done` until"
+      refute review_prompt =~ "Monitor"
+    end
+
+    # Routing the block through the adapter must not quietly drop the
+    # provider-agnostic guidance codex used to get from the hard-coded Claude
+    # text: "commit before you verify" is about not losing work to a killed
+    # session, which is true on every CLI.
+    test "codex work prompt keeps the commit-before-verify guidance and the coda" do
+      work_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-codex",
+          adapter: Arbiter.Agents.Codex
+        )
+
+      assert work_prompt =~ "COMMIT correct work BEFORE running any long verification"
+      assert work_prompt =~ "the work is incomplete until every tool you launched has"
+
+      # ...but a reviewer, which cannot push, must not be told to commit.
+      review_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          review: true,
+          adapter: Arbiter.Agents.Codex
+        )
+
+      refute review_prompt =~ "COMMIT correct work BEFORE"
     end
 
     test "claude prompt remains unchanged with explicit or default adapter" do
