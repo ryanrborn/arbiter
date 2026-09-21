@@ -60,6 +60,14 @@ defmodule Arbiter.Quota do
 
   @default_provider "claude"
 
+  @typedoc """
+  A `%{workspace_id => workspace_spend/1}` memo, built by `spend_cache/1` and
+  threaded through `account_fields/3` so one request's worth of quota views
+  scans the usage ledger once per workspace rather than once per
+  workspace-and-provider.
+  """
+  @type spend_cache :: %{optional(String.t()) => %{optional(String.t()) => float()}}
+
   # `capture_source` provenance markers (bd-b0zody). Both sources write the
   # same primary columns during the overlap window, so the row records which
   # one last wrote it — `arb quota` prints it, and `Arbiter.Quota.Gate` picks
@@ -381,6 +389,10 @@ defmodule Arbiter.Quota do
   caller that came in through `arb quota --workspace X` passes X here and
   gets the same answer it did before the re-key; with none given the
   account's alphabetically-first workspace stands in.
+
+  `:spend_cache` optionally supplies a `spend_cache/1` memo so a caller that
+  also lists the other providers pays for the ledger scan once — see
+  `account_fields/3`.
   """
   @spec serialize(String.t() | nil, String.t(), keyword()) :: map() | nil
   def serialize(account_id, provider \\ @default_provider, opts \\ []) do
@@ -392,7 +404,7 @@ defmodule Arbiter.Quota do
         q
         |> serialize_quota()
         |> Map.merge(gating_fields(q, gate_workspace(account_id, opts)))
-        |> Map.merge(account_fields(account_id, provider))
+        |> Map.merge(account_fields(account_id, provider, Keyword.get(opts, :spend_cache, %{})))
     end
   end
 
@@ -443,17 +455,26 @@ defmodule Arbiter.Quota do
   30-day spend for `provider`, so the CLI can render
   `default $A · emricare $B · vstim $C` under the account total. Empty when
   the account has no workspaces linked to it yet.
+
+  `cache` is an optional `spend_cache/1` memo. Each `workspace_spend/1` term
+  is a full 30-day ledger scan for that workspace and is *provider
+  independent*, so a caller that asks for several providers' fields (every
+  page mount goes through `list_latest/2`, which asks for four) must pass one
+  cache rather than rescan the ledger once per provider per workspace.
   """
-  @spec account_fields(String.t() | nil, String.t()) :: map()
-  def account_fields(account_id, provider \\ @default_provider) do
+  @spec account_fields(String.t() | nil, String.t(), spend_cache()) :: map()
+  def account_fields(account_id, provider \\ @default_provider, cache \\ %{}) do
     %{
       account: account_view(Resolver.get(account_id)),
       workspaces:
         Enum.map(Resolver.workspaces(account_id), fn ws ->
-          %{id: ws.id, name: ws.name, cost_usd: cost_for(provider, workspace_spend(ws.id))}
+          %{id: ws.id, name: ws.name, cost_usd: cost_for(provider, cached_spend(ws.id, cache))}
         end)
     }
   end
+
+  defp cached_spend(workspace_id, cache),
+    do: Map.get_lazy(cache, workspace_id, fn -> workspace_spend(workspace_id) end)
 
   defp account_view(%ProviderAccount{} = account) do
     %{
@@ -845,14 +866,21 @@ defmodule Arbiter.Quota do
   Each view also carries `cost_usd` — the provider's actual spend over the last
   #{@cost_window_days} days from the `Arbiter.Usage` ledger (`nil` when none) —
   so the dashboard can show dollars alongside utilization.
+
+  `:spend_cache` reuses a caller's `spend_cache/1` memo (e.g. `GET /api/quota`,
+  which also serializes Claude on its own); with none given this builds one
+  for the pass, so the ledger is scanned once per workspace no matter how many
+  providers come back.
   """
-  @spec list_latest(String.t() | [String.t()] | map()) :: [map()]
-  def list_latest(accounts) do
+  @spec list_latest(String.t() | [String.t()] | map(), keyword()) :: [map()]
+  def list_latest(accounts, opts \\ []) do
     account_ids = normalize_account_ids(accounts)
 
     if account_ids == [] do
       []
     else
+      cache = Keyword.get_lazy(opts, :spend_cache, fn -> spend_cache(account_ids) end)
+
       dedicated = codex_views(account_ids) ++ google_views(account_ids)
       dedicated_providers = MapSet.new(dedicated, & &1.provider)
 
@@ -864,7 +892,7 @@ defmodule Arbiter.Quota do
         |> Enum.reject(&MapSet.member?(dedicated_providers, &1.provider))
 
       (generic ++ dedicated)
-      |> Enum.map(&decorate_view/1)
+      |> Enum.map(&decorate_view(&1, cache))
       |> Enum.sort_by(&{&1.provider != @default_provider, &1.provider})
     end
   rescue
@@ -872,15 +900,15 @@ defmodule Arbiter.Quota do
   end
 
   @doc """
-  `list_latest/1` for a caller that holds a workspace: resolves every
+  `list_latest/2` for a caller that holds a workspace: resolves every
   provider account the workspace is linked to, then reads by account. The
   shape the dashboard and `GET /api/quota` still speak.
   """
-  @spec list_latest_for_workspace(String.t() | nil) :: [map()]
-  def list_latest_for_workspace(workspace_id) do
+  @spec list_latest_for_workspace(String.t() | nil, keyword()) :: [map()]
+  def list_latest_for_workspace(workspace_id, opts \\ []) do
     workspace_id
     |> account_ids()
-    |> list_latest()
+    |> list_latest(opts)
     |> Enum.map(&Map.put(&1, :workspace_id, workspace_id))
   end
 
@@ -900,8 +928,8 @@ defmodule Arbiter.Quota do
   # pass over the ledger, so `arb quota`'s account total always equals the
   # per-workspace line printed under it, and one view costs one ledger read
   # per workspace instead of two.
-  defp decorate_view(view) do
-    fields = account_fields(view.provider_account_id, view.provider)
+  defp decorate_view(view, cache) do
+    fields = account_fields(view.provider_account_id, view.provider, cache)
 
     view
     |> Map.merge(fields)
@@ -941,6 +969,27 @@ defmodule Arbiter.Quota do
     |> Enum.reduce(%{}, fn spend, acc ->
       Map.merge(acc, spend, fn _provider, a, b -> a + b end)
     end)
+  end
+
+  @doc """
+  Build the `t:spend_cache/0` memo for `accounts`: one `workspace_spend/1`
+  scan per distinct workspace metered under them.
+
+  `workspace_spend/1` reads every `usage_events` row in the window (blob
+  column included) and aggregates in Elixir, and its result is the same for
+  every provider, so the number of scans a request pays for must be the
+  number of *workspaces* it touches — not that times the number of providers
+  it renders. `list_latest/2` builds one of these per pass; a caller that
+  makes several calls for one request (`GET /api/quota`) builds it once and
+  passes it to each.
+  """
+  @spec spend_cache(String.t() | [String.t()] | map()) :: spend_cache()
+  def spend_cache(accounts) do
+    accounts
+    |> normalize_account_ids()
+    |> Enum.flat_map(&Resolver.workspace_ids/1)
+    |> Enum.uniq()
+    |> Map.new(&{&1, workspace_spend(&1)})
   end
 
   @doc """
@@ -999,19 +1048,19 @@ defmodule Arbiter.Quota do
     _ -> []
   end
 
-  @doc "`list_latest/1`, serialized into the public map shape (ISO timestamps)."
-  @spec list_serialized(String.t() | [String.t()] | map()) :: [map()]
-  def list_serialized(accounts) do
+  @doc "`list_latest/2`, serialized into the public map shape (ISO timestamps)."
+  @spec list_serialized(String.t() | [String.t()] | map(), keyword()) :: [map()]
+  def list_serialized(accounts, opts \\ []) do
     accounts
-    |> list_latest()
+    |> list_latest(opts)
     |> Enum.map(&serialize_view/1)
   end
 
-  @doc "`list_latest_for_workspace/1`, serialized into the public map shape."
-  @spec list_serialized_for_workspace(String.t() | nil) :: [map()]
-  def list_serialized_for_workspace(workspace_id) do
+  @doc "`list_latest_for_workspace/2`, serialized into the public map shape."
+  @spec list_serialized_for_workspace(String.t() | nil, keyword()) :: [map()]
+  def list_serialized_for_workspace(workspace_id, opts \\ []) do
     workspace_id
-    |> list_latest_for_workspace()
+    |> list_latest_for_workspace(opts)
     |> Enum.map(&serialize_view/1)
   end
 

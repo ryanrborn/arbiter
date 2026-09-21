@@ -323,6 +323,29 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "default $10.00 · emricare $12.50 · vstim $7.50"
     end
 
+    test "omits the breakdown when the account has a single workspace" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "cost_usd" => 10.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $10.00"
+      # The breakdown would restate the total for the only workspace on it.
+      refute out =~ "    default $10.00"
+    end
+
     test "--workspace stays a lookup shorthand and says which workspace it went through" do
       stub_get("/api/quota", %{
         "data" => %{

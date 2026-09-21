@@ -46,18 +46,28 @@ defmodule ArbiterWeb.Api.QuotaController do
         accounts = Quota.account_ids(ws_id)
         codex = Quota.Codex.serialize_latest(accounts["codex"])
 
+        # Every `account`/`workspaces` block below carries each workspace's
+        # 30-day spend, and each of those is a full ledger scan that does not
+        # vary by provider. One request = one scan per workspace, so the memo
+        # is built here and threaded through all three calls.
+        spend = Quota.spend_cache(accounts)
+
         # §6's `--json` gains `account` / `workspaces` at the top level. They
         # describe the **headline** (Claude) provider's account; a workspace
         # may sit on a different account per provider, so each `quotas` entry
         # carries its own pair too.
-        headline = Quota.account_fields(accounts["claude"], "claude")
+        headline = Quota.account_fields(accounts["claude"], "claude", spend)
 
         render(conn, :show,
           workspace_id: ws_id,
           workspace: workspace_view(ws_id),
           requested_workspace: Map.get(params, "workspace"),
-          claude: Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id),
-          quotas: Quota.list_serialized_for_workspace(ws_id),
+          claude:
+            Quota.serialize(accounts["claude"], "claude",
+              workspace_id: ws_id,
+              spend_cache: spend
+            ),
+          quotas: Quota.list_serialized_for_workspace(ws_id, spend_cache: spend),
           account: headline[:account],
           workspaces: headline[:workspaces],
           codex: codex,

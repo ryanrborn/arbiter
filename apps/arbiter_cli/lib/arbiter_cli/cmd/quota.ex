@@ -163,22 +163,22 @@ defmodule ArbiterCli.Cmd.Quota do
 
   # The account total above is the headline; this says where it went. Only
   # printed when the account has more than the one workspace the total
-  # already accounts for, and only for workspaces with recorded spend.
+  # already accounts for — a single-workspace account (the common install)
+  # would otherwise get a breakdown line restating the total verbatim — and
+  # only for workspaces with recorded spend.
   defp emit_workspace_breakdown(data, provider) do
-    data
-    |> provider_workspaces(provider)
-    |> Enum.filter(&is_number(&1["cost_usd"]))
-    |> case do
-      [] ->
-        :ok
+    workspaces = provider_workspaces(data, provider)
+    priced = Enum.filter(workspaces, &is_number(&1["cost_usd"]))
 
-      workspaces ->
-        IO.puts(
-          "    " <>
-            Enum.map_join(workspaces, " · ", fn ws ->
-              "#{ws["name"] || ws["id"]} $#{money(ws["cost_usd"])}"
-            end)
-        )
+    if length(workspaces) > 1 and priced != [] do
+      IO.puts(
+        "    " <>
+          Enum.map_join(priced, " · ", fn ws ->
+            "#{ws["name"] || ws["id"]} $#{money(ws["cost_usd"])}"
+          end)
+      )
+    else
+      :ok
     end
   end
 

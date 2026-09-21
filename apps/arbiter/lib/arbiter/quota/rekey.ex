@@ -70,9 +70,10 @@ defmodule Arbiter.Quota.Rekey do
     header = newest_by(rows, :captured_at)
     oauth = newest_by(rows, :oauth_captured_at)
 
-    header
-    |> Map.merge(Map.take(header, present(header, @header_columns)))
-    |> Map.merge(Map.take(oauth, present(oauth, @oauth_columns)))
+    # The header winner *is* the base row, so its own header columns need no
+    # merging back onto itself — only the oauth group is lifted off a
+    # (possibly different) row.
+    Map.merge(header, Map.take(oauth, present(oauth, @oauth_columns)))
   end
 
   @doc """
