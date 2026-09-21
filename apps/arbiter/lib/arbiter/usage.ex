@@ -50,9 +50,9 @@ defmodule Arbiter.Usage do
 
   use Ash.Domain
 
+  alias Arbiter.Accounts.Resolver
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Usage.Estimate
-  alias Arbiter.Accounts.Resolver
   alias Arbiter.Usage.Event
   require Ash.Query
 
@@ -118,8 +118,13 @@ defmodule Arbiter.Usage do
       deprecated alias for `:epic`). Required.
     * `:since` — `%DateTime{}` filter on `occurred_at`. Optional.
     * `:workspace_id` — restrict to one workspace. Optional.
-    * `:provider_account_id` — restrict to the workspaces metered under one
-      provider account (`docs/provider-account-design.md` §3.3). Optional.
+    * `:provider_account_id` — restrict to one provider account
+      (`docs/provider-account-design.md` §3.3). `usage_events` carries no
+      account column until P9, so this narrows the query to the account's
+      *workspaces* — which over-selects, because a workspace is metered under
+      a different account per provider. With `by: :provider_account` the
+      result is then exact (every other account's group is dropped); with any
+      other grouping it is the workspace-set approximation. Optional.
     * `:session_ids` — restrict to a list of `session_id` values, pushed into
       the query as `session_id in ^ids` rather than filtered after the read.
       `Event` indexes `:session_id`, so this keeps a `:by :session` rollup for
@@ -161,6 +166,7 @@ defmodule Arbiter.Usage do
       {:ok,
        events
        |> group_events(by)
+       |> exact_account_groups(by, opts)
        |> Enum.map(&aggregate_group(by, &1))
        |> sort_rollups(by)
        |> maybe_limit(opts)}
@@ -301,6 +307,23 @@ defmodule Arbiter.Usage do
         {:error, :missing_grouping}
     end
   end
+
+  # `:provider_account_id` narrows the *query* to the account's workspaces,
+  # which is as exact as SQL can be while `usage_events` carries no account
+  # column. It is not exact enough on its own: a workspace is metered under a
+  # different account per provider, so its Claude rows come back for a Codex
+  # account too — measured on the live install, where a Codex account's 5h
+  # overage figure was $125 of Claude spend. The `:provider_account`
+  # grouping *is* per-event exact, so when both are given, drop every group
+  # but the one asked for.
+  defp exact_account_groups(groups, :provider_account, opts) do
+    case Keyword.get(opts, :provider_account_id) do
+      id when is_binary(id) and id != "" -> Map.take(groups, [id])
+      _ -> groups
+    end
+  end
+
+  defp exact_account_groups(groups, _by, _opts), do: groups
 
   defp base_filter(query, opts) do
     query

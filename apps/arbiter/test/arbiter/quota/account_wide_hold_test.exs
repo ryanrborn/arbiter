@@ -65,14 +65,32 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
     })
   end
 
-  defp usage_event!(ws_id, cost) do
+  defp usage_event!(ws_id, cost, provider \\ "claude") do
     Ash.create!(Event, %{
       workspace_id: ws_id,
       task_id: "bd-p7-#{System.unique_integer([:positive])}",
       step: :work,
-      provider: "claude",
+      provider: provider,
       cost_usd: cost,
       occurred_at: DateTime.utc_now()
+    })
+  end
+
+  defp codex_account!() do
+    n = System.unique_integer([:positive])
+
+    Ash.create!(ProviderAccount, %{
+      provider: :codex,
+      slug: "p7-codex-#{n}",
+      label: "P7 codex account #{n}"
+    })
+  end
+
+  defp link_codex!(%Workspace{} = ws, %ProviderAccount{} = account) do
+    Ash.create!(WorkspaceProviderAccount, %{
+      workspace_id: ws.id,
+      provider: :codex,
+      provider_account_id: account.id
     })
   end
 
@@ -241,6 +259,25 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       assert_in_delta Overage.windowed_spend(account, nil), 1.0, 0.0001
     end
 
+    test "a workspace's spend on its *other* provider account is not counted" do
+      # Observed on the live install: one workspace is metered under a Claude
+      # account and a Codex account at once. Narrowing the ledger to "this
+      # account's workspaces" therefore still sweeps in the other account's
+      # spend — the Codex account reported $125 of Claude spend. The account
+      # a row belongs to is decided per event, by its provider.
+      claude = account!()
+      codex = codex_account!()
+      ws = workspace!()
+      link!(ws, claude)
+      link_codex!(ws, codex)
+
+      usage_event!(ws.id, 100.0, "claude")
+      usage_event!(ws.id, 7.0, "openai")
+
+      assert_in_delta Overage.windowed_spend(codex, nil), 7.0, 0.0001
+      assert_in_delta Overage.windowed_spend(claude, nil), 100.0, 0.0001
+    end
+
     test "an unknown account spends nothing rather than raising" do
       assert Overage.windowed_spend(nil, nil) == 0.0
       assert Overage.windowed_spend("not-an-account", nil) == 0.0
@@ -278,6 +315,23 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       assert {:ok, rows} = Usage.summarize(by: :provider_account, provider_account_id: account.id)
       assert [%{group: group, rows: 1}] = rows
       assert group == account.id
+    end
+
+    test "restricting to one account returns only that account's group" do
+      claude = account!()
+      codex = codex_account!()
+      ws = workspace!()
+      link!(ws, claude)
+      link_codex!(ws, codex)
+
+      usage_event!(ws.id, 100.0, "claude")
+      usage_event!(ws.id, 7.0, "openai")
+
+      assert {:ok, [%{group: group, rows: 1, total_cost_usd: cost}]} =
+               Usage.summarize(by: :provider_account, provider_account_id: codex.id)
+
+      assert group == codex.id
+      assert_in_delta cost, 7.0, 0.0001
     end
 
     test "a row whose workspace has no account lands in the (none) sentinel" do
