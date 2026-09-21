@@ -468,6 +468,65 @@ defmodule Arbiter.QuotaTest do
       assert_in_delta google.utilization_5h, 0.75, 0.0001
     end
 
+    # Each `workspace_spend/1` term is a full scan of the 30-day usage ledger
+    # and does not vary by provider, so one pass must scan once per workspace
+    # — not once per workspace per provider (four providers × three
+    # workspaces on the live install).
+    test "spend_cache/1 memoizes each workspace's ledger spend once per workspace" do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "shared"})
+
+      workspaces =
+        for {name, cost} <- [{"emricare", 1.25}, {"vstim", 3.75}] do
+          ws = workspace!(name)
+
+          Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+            workspace_id: ws.id,
+            provider: :claude,
+            provider_account_id: account.id
+          })
+
+          usage_event!(ws.id, "claude", cost)
+          ws
+        end
+
+      cache = Quota.spend_cache(account.id)
+
+      assert Enum.sort(Map.keys(cache)) == workspaces |> Enum.map(& &1.id) |> Enum.sort()
+
+      for {ws, cost} <- Enum.zip(workspaces, [1.25, 3.75]) do
+        assert_in_delta cache[ws.id]["claude"], cost, 0.0001
+      end
+    end
+
+    test "a supplied spend cache is what every provider's view reads" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      Ash.create!(CodexQuota, %{
+        provider_account_id: quota_account_id!(ws.id, "codex"),
+        provider: "codex",
+        session_used_percent: 10.0,
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      # Ledger rows that the cache deliberately disagrees with: any view that
+      # rescans instead of reading the cache reports these numbers.
+      usage_event!(ws.id, "claude", 1.0)
+      usage_event!(ws.id, "openai", 2.0)
+
+      views =
+        Quota.list_latest_for_workspace(ws.id,
+          spend_cache: %{ws.id => %{"claude" => 9.0, "openai" => 7.0}}
+        )
+
+      claude = Enum.find(views, &(&1.provider == "claude"))
+      codex = Enum.find(views, &(&1.provider == "codex"))
+
+      assert_in_delta claude.cost_usd, 9.0, 0.0001
+      assert_in_delta codex.cost_usd, 7.0, 0.0001
+    end
+
     test "the dedicated Codex table wins over a same-provider generic row" do
       ws = workspace!()
       # A generic 'codex' row in the anthropic/quota table (legacy capture path)…

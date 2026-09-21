@@ -879,8 +879,6 @@ defmodule Arbiter.Quota do
     if account_ids == [] do
       []
     else
-      cache = Keyword.get_lazy(opts, :spend_cache, fn -> spend_cache(account_ids) end)
-
       dedicated = codex_views(account_ids) ++ google_views(account_ids)
       dedicated_providers = MapSet.new(dedicated, & &1.provider)
 
@@ -891,9 +889,19 @@ defmodule Arbiter.Quota do
         |> Enum.map(&view/1)
         |> Enum.reject(&MapSet.member?(dedicated_providers, &1.provider))
 
-      (generic ++ dedicated)
-      |> Enum.map(&decorate_view(&1, cache))
-      |> Enum.sort_by(&{&1.provider != @default_provider, &1.provider})
+      case generic ++ dedicated do
+        # No captured quota anywhere on these accounts — nothing to decorate,
+        # so don't pay for the ledger scans a cache would run up front.
+        [] ->
+          []
+
+        views ->
+          cache = Keyword.get_lazy(opts, :spend_cache, fn -> spend_cache(account_ids) end)
+
+          views
+          |> Enum.map(&decorate_view(&1, cache))
+          |> Enum.sort_by(&{&1.provider != @default_provider, &1.provider})
+      end
     end
   rescue
     _ -> []
