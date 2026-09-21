@@ -40,7 +40,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
   # A fresh snapshot: 5h window resets in an hour, captured just now.
   defp quota(attrs) do
     %AnthropicQuota{
-      workspace_id: "ws-x",
+      provider_account_id: "acct-x",
       provider: "claude",
       captured_at: DateTime.utc_now(),
       reset_5h_at: DateTime.add(DateTime.utc_now(), 3600, :second),
@@ -77,7 +77,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
     test "CodexQuota carries its weekly window as the secondary one" do
       s =
         Snapshot.normalize(%CodexQuota{
-          workspace_id: "ws-x",
+          provider_account_id: "acct-x",
           provider: "codex",
           captured_at: DateTime.utc_now(),
           session_used_percent: 10.0,
@@ -253,7 +253,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
 
     defp record_quota!(ws_id, attrs) do
       base = %{
-        workspace_id: ws_id,
+        provider_account_id: quota_account_id!(ws_id, "claude"),
         provider: "claude",
         utilization_5h: 0.23,
         status_5h: "allowed",
@@ -316,7 +316,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
       })
 
       assert %{gating_window: "7d", gating_reason: "7d quota 0.91 ≥ 0.90"} =
-               Arbiter.Quota.serialize(workspace.id)
+               Arbiter.Quota.serialize(quota_account_id!(workspace.id))
     end
 
     test "gating_window is nil when nothing is gating" do
@@ -325,7 +325,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
 
       record_quota!(workspace.id, %{utilization_7d: 0.5, status_7d: "allowed"})
 
-      assert %{gating_window: nil, gating_reason: nil} = Arbiter.Quota.serialize(workspace.id)
+      assert %{gating_window: nil, gating_reason: nil} = Arbiter.Quota.serialize(quota_account_id!(workspace.id))
     end
   end
 

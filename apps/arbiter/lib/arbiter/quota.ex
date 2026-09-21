@@ -662,8 +662,16 @@ defmodule Arbiter.Quota do
     end
   end
 
-  defp fetch_account_id(account_id) when is_binary(account_id) and account_id != "",
-    do: {:ok, account_id}
+  # A write has to name a real account row: the quota tables carry no FK (the
+  # column is plain text on SQLite), so a caller that still passes a
+  # workspace id here would otherwise create a row keyed by something that is
+  # not an account and never be read back. Fail loudly instead.
+  defp fetch_account_id(account_id) when is_binary(account_id) and account_id != "" do
+    case Resolver.get(account_id) do
+      %ProviderAccount{id: id} -> {:ok, id}
+      _ -> {:error, {:no_provider_account, account_id}}
+    end
+  end
 
   defp fetch_account_id(other), do: {:error, {:no_provider_account, other}}
 

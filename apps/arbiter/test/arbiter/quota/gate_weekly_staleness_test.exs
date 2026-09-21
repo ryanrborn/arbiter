@@ -58,7 +58,7 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
   # 0.90 default, 5h idle, captured well past the staleness threshold.
   defp aged_incident_quota(attrs \\ %{}) do
     %AnthropicQuota{
-      workspace_id: "ws-x",
+      provider_account_id: "acct-x",
       provider: "claude",
       captured_at: ago(@staleness_seconds + 60),
       utilization_5h: 0.23,
@@ -196,7 +196,7 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
   describe "Codex's weekly window is sticky the same way" do
     test "an age-stale weekly utilization still binds while the session window fails open" do
       q = %CodexQuota{
-        workspace_id: "ws-x",
+        provider_account_id: "acct-x",
         provider: "codex",
         captured_at: ago(@staleness_seconds + 60),
         session_used_percent: 99.0,
@@ -241,7 +241,7 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
       {:ok, task} = Ash.create(Issue, %{title: "burns-the-week", workspace_id: workspace.id})
 
       Ash.create!(AnthropicQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "claude"),
         provider: "claude",
         captured_at: ago(@staleness_seconds + 60) |> DateTime.truncate(:second),
         utilization_5h: 0.23,
@@ -266,7 +266,7 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
       assert Worker.whereis(task.id) == nil
 
       assert %{gating_window: "7d", gating_reason: "7d quota 0.96 ≥ 0.90"} =
-               Arbiter.Quota.serialize(workspace.id)
+               Arbiter.Quota.serialize(quota_account_id!(workspace.id))
     end
   end
 end
