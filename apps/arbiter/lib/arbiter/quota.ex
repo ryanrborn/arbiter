@@ -1,6 +1,7 @@
 defmodule Arbiter.Quota do
   @moduledoc """
-  Ash domain + public API for per-workspace Anthropic quota state (bd-5boun6).
+  Ash domain + public API for per-**account** Anthropic quota state
+  (bd-5boun6; re-keyed off the workspace by P5, bd-3yokey).
 
   `get/2` / `serialize/2` read quota snapshots for the MCP `quota_get` tool,
   the `GET /api/quota` endpoint, and `arb quota`.
@@ -26,10 +27,26 @@ defmodule Arbiter.Quota do
   `Arbiter.Quota.Gate.staleness_threshold_seconds/1` keys the staleness margin
   off it, because the polled source has a far tighter request budget than
   header capture ever did.
+
+  ## Keyed by the provider account (P5, `docs/provider-account-design.md` §6)
+
+  Every provider's rate limit is enforced per *account*, so the read API here
+  takes a `provider_account_id`, not a workspace: `latest/2`,
+  `latest_for_provider/2`, `serialize/3`, `list_latest/1`,
+  `provider_spend/1` and `capture_oauth_usage/2` all key on the account.
+
+  A caller holding only a workspace resolves it first —
+  `account_id/2` (a pure read, `nil` when the workspace has no account) or
+  `ensure_account_id/2` (write paths, which provision rather than drop the
+  reading). Workspace-flavoured *writes* — `capture/3`,
+  `capture_oauth_usage_for_group/2` — keep their workspace argument and do
+  that hop themselves, so a spawn's call site is unchanged.
   """
 
   use Ash.Domain
 
+  alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Accounts.Resolver
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Tasks.Workspace
@@ -144,8 +161,8 @@ defmodule Arbiter.Quota do
   }
 
   @doc """
-  The latest persisted quota snapshot for `workspace_id` on `provider`, read
-  from that provider's own table (bd-2mpo3f):
+  The latest persisted quota snapshot for `provider_account_id` on
+  `provider`, read from that provider's own table (bd-2mpo3f):
 
     * `:claude` → `AnthropicQuota` (OAuth polling + header capture from responses)
     * `:codex` → `CodexQuota` (`Arbiter.Quota.CloudProbe` / `Quota.Codex.fetch/2`)
@@ -155,19 +172,54 @@ defmodule Arbiter.Quota do
   provider code string. Returns `nil` for an unknown provider or when nothing
   has been captured yet — the gate's fail-open input.
   """
-  @spec latest_for_provider(String.t(), atom() | String.t()) :: struct() | nil
-  def latest_for_provider(workspace_id, provider) when is_binary(workspace_id) do
+  @spec latest_for_provider(String.t() | nil, atom() | String.t()) :: struct() | nil
+  def latest_for_provider(account_id, provider) when is_binary(account_id) do
     case provider_code(provider) do
-      "claude" -> latest(workspace_id, "claude")
-      "codex" -> Arbiter.Quota.Codex.latest(workspace_id, "codex")
-      code when code in ["gemini_cli", "antigravity"] -> CloudCode.latest(workspace_id, code)
+      "claude" -> latest(account_id, "claude")
+      "codex" -> Arbiter.Quota.Codex.latest(account_id, "codex")
+      code when code in ["gemini_cli", "antigravity"] -> CloudCode.latest(account_id, code)
       _ -> nil
     end
   rescue
     _ -> nil
   end
 
-  def latest_for_provider(_workspace_id, _provider), do: nil
+  def latest_for_provider(_account_id, _provider), do: nil
+
+  @doc """
+  `latest_for_provider/2` for a caller that holds a workspace rather than an
+  account — the shape the dispatch gate, the board and `Dispatch` still speak
+  (their own re-key is P7/P8). `nil` when the workspace has no account for
+  that provider, which is the gate's existing fail-open input.
+  """
+  @spec latest_for_workspace(String.t() | nil, atom() | String.t()) :: struct() | nil
+  def latest_for_workspace(workspace_id, provider) do
+    case account_id(workspace_id, provider) do
+      nil -> nil
+      id -> latest_for_provider(id, provider)
+    end
+  end
+
+  @doc """
+  The provider account `workspace_id` is metered under for `provider`, or
+  `nil`. A pure read — see `Arbiter.Accounts.Resolver`.
+  """
+  @spec account_id(String.t() | nil, atom() | String.t() | nil) :: String.t() | nil
+  def account_id(workspace_id, provider), do: Resolver.account_id(workspace_id, provider_code(provider) || provider)
+
+  @doc """
+  `account_id/2`, provisioning an account when the install has none — the
+  form every quota *write* uses, because a reading has nowhere to go without
+  one.
+  """
+  @spec ensure_account_id(String.t() | nil, atom() | String.t() | nil) ::
+          {:ok, String.t()} | {:error, term()}
+  def ensure_account_id(workspace_id, provider),
+    do: Resolver.ensure_account_id(workspace_id, provider_code(provider) || provider)
+
+  @doc "Every provider account this workspace is linked to, `%{provider => account_id}`."
+  @spec account_ids(String.t() | nil) :: %{optional(String.t()) => String.t()}
+  def account_ids(workspace_id), do: Resolver.account_ids(workspace_id)
 
   @doc """
   Canonical quota provider code for an agent type / provider alias, or `nil`
@@ -241,7 +293,9 @@ defmodule Arbiter.Quota do
   `{:error, reason}` if the upsert fails.
 
   A `nil` / blank `workspace_id` is resolved to the installation default
-  workspace so a workspace-agnostic credential probe still records state.
+  workspace so a workspace-agnostic credential probe still records state, and
+  from there to the provider account that workspace meters under (P5) — the
+  row itself is keyed by the account.
   """
   @spec capture(String.t() | nil, [{String.t(), String.t()}], keyword()) ::
           {:ok, AnthropicQuota.t()} | :noop | {:error, term()}
@@ -251,12 +305,13 @@ defmodule Arbiter.Quota do
         :noop
 
       attrs ->
-        with {:ok, ws_id} <- resolve_workspace_id(workspace_id) do
-          provider = Keyword.get(opts, :provider, @default_provider)
+        provider = Keyword.get(opts, :provider, @default_provider)
 
+        with {:ok, ws_id} <- resolve_workspace_id(workspace_id),
+             {:ok, account_id} <- ensure_account_id(ws_id, provider) do
           full =
             attrs
-            |> Map.put(:workspace_id, ws_id)
+            |> Map.put(:provider_account_id, account_id)
             |> Map.put(:provider, provider)
             |> Map.put(:capture_source, @header_source)
             |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
@@ -264,7 +319,7 @@ defmodule Arbiter.Quota do
           require Logger
 
           Logger.debug(
-            "Quota.capture: workspace=#{ws_id}, provider=#{provider}, status_5h=#{Map.get(attrs, :status_5h)}, utilization_5h=#{Map.get(attrs, :utilization_5h)}, captured_at=#{Map.get(full, :captured_at)}"
+            "Quota.capture: account=#{account_id}, provider=#{provider}, status_5h=#{Map.get(attrs, :status_5h)}, utilization_5h=#{Map.get(attrs, :utilization_5h)}, captured_at=#{Map.get(full, :captured_at)}"
           )
 
           result =
@@ -273,7 +328,7 @@ defmodule Arbiter.Quota do
             |> Ash.create()
 
           with {:ok, quota} <- result do
-            broadcast_quota_update(ws_id, quota)
+            broadcast_quota_update(account_id, quota)
           end
 
           result
@@ -281,30 +336,27 @@ defmodule Arbiter.Quota do
     end
   end
 
-  # Broadcast a quota update to all subscribers for the workspace, carrying the
-  # uniform view map (not the raw resource struct) so every provider's live
-  # update lands on the LiveView in the same shape `list_latest/1` returns.
-  defp broadcast_quota_update(workspace_id, %AnthropicQuota{} = quota) do
-    Phoenix.PubSub.broadcast(
-      Arbiter.PubSub,
-      "quota:#{workspace_id}",
-      {:quota_updated, workspace_id, view(quota)}
-    )
-  rescue
-    e ->
-      require Logger
-      Logger.debug("quota pubsub broadcast failed: #{inspect(e)}")
-      :error
+  # Broadcast a quota update, carrying the uniform view map (not the raw
+  # resource struct) so every provider's live update lands on the LiveView in
+  # the same shape `list_latest/1` returns.
+  #
+  # The topic is still per workspace — that is what the dashboard subscribes
+  # to, and a workspace is what a page is looking at — so one account-keyed
+  # write fans out to every workspace metered under that account (P5).
+  defp broadcast_quota_update(account_id, %AnthropicQuota{} = quota) do
+    Arbiter.Quota.Broadcast.quota_updated(account_id, view(quota))
   end
 
   @doc """
-  Latest quota snapshot for `workspace_id` + `provider`, or `nil` if none has
-  been captured yet.
+  Latest quota snapshot for `provider_account_id` + `provider`, or `nil` if
+  none has been captured yet.
   """
-  @spec latest(String.t(), String.t()) :: AnthropicQuota.t() | nil
-  def latest(workspace_id, provider \\ @default_provider) when is_binary(workspace_id) do
+  @spec latest(String.t() | nil, String.t()) :: AnthropicQuota.t() | nil
+  def latest(account_id, provider \\ @default_provider)
+
+  def latest(account_id, provider) when is_binary(account_id) do
     AnthropicQuota
-    |> Ash.Query.filter(workspace_id == ^workspace_id and provider == ^provider)
+    |> Ash.Query.filter(provider_account_id == ^account_id and provider == ^provider)
     |> Ash.read_one()
     |> case do
       {:ok, %AnthropicQuota{} = q} -> q
@@ -314,20 +366,39 @@ defmodule Arbiter.Quota do
     _ -> nil
   end
 
+  # A caller whose workspace has no account for this provider yet (§6's
+  # backfill has not reached it) reads as "nothing captured", which is the
+  # same fail-open input a missing row already produced.
+  def latest(_account_id, _provider), do: nil
+
   @doc """
-  Serialize the latest snapshot for `workspace_id` into the public map shape
-  (string-friendly, ISO-8601 timestamps), or `nil` when none exists.
+  Serialize the latest snapshot for `provider_account_id` into the public map
+  shape (string-friendly, ISO-8601 timestamps), or `nil` when none exists.
+
+  `:workspace_id` names the workspace whose gate config annotates the
+  `gating_*` fields. Thresholds are still workspace-scoped until P7, so a
+  caller that came in through `arb quota --workspace X` passes X here and
+  gets the same answer it did before the re-key; with none given the
+  account's alphabetically-first workspace stands in.
   """
-  @spec serialize(String.t(), String.t()) :: map() | nil
-  def serialize(workspace_id, provider \\ @default_provider) do
-    case latest(workspace_id, provider) do
+  @spec serialize(String.t() | nil, String.t(), keyword()) :: map() | nil
+  def serialize(account_id, provider \\ @default_provider, opts \\ []) do
+    case latest(account_id, provider) do
       nil ->
         nil
 
       %AnthropicQuota{} = q ->
         q
         |> serialize_quota()
-        |> Map.merge(gating_fields(q, safe_workspace(workspace_id)))
+        |> Map.merge(gating_fields(q, gate_workspace(account_id, opts)))
+        |> Map.merge(account_fields(account_id, provider))
+    end
+  end
+
+  defp gate_workspace(account_id, opts) do
+    case Keyword.get(opts, :workspace_id) do
+      ws_id when is_binary(ws_id) -> safe_workspace(ws_id)
+      _ -> account_id |> Resolver.workspaces() |> List.first()
     end
   end
 
@@ -361,6 +432,42 @@ defmodule Arbiter.Quota do
     _ -> nil
   end
 
+  # ---- account identity + per-workspace breakdown (P5, §6) ---------------
+
+  @doc """
+  The account header §6's `arb quota` prints, plus the per-workspace spend
+  breakdown underneath it: `%{account: …, workspaces: […]}`.
+
+  `workspaces` carries each workspace metered under the account with its own
+  30-day spend for `provider`, so the CLI can render
+  `default $A · emricare $B · vstim $C` under the account total. Empty when
+  the account has no workspaces linked to it yet.
+  """
+  @spec account_fields(String.t() | nil, String.t()) :: map()
+  def account_fields(account_id, provider \\ @default_provider) do
+    workspaces = Resolver.workspaces(account_id)
+
+    %{
+      account: account_view(Resolver.get(account_id)),
+      workspaces:
+        Enum.map(workspaces, fn ws ->
+          %{id: ws.id, name: ws.name, cost_usd: cost_for(provider, workspace_spend(ws.id))}
+        end)
+    }
+  end
+
+  defp account_view(%ProviderAccount{} = account) do
+    %{
+      id: account.id,
+      slug: account.slug,
+      provider: Atom.to_string(account.provider),
+      label: account.label,
+      plan: account.plan
+    }
+  end
+
+  defp account_view(_), do: nil
+
   # ---- uniform multi-provider view (bd-ajh7bd) ---------------------------
 
   @doc """
@@ -376,7 +483,12 @@ defmodule Arbiter.Quota do
   @spec blank_view(String.t()) :: map()
   def blank_view(provider) when is_binary(provider) do
     %{
+      # Deprecated (P5): kept for one release as the alias for "the workspace
+      # this view was looked up through". The account is the real key.
       workspace_id: nil,
+      provider_account_id: nil,
+      account: nil,
+      workspaces: [],
       provider: provider,
       utilization_5h: nil,
       reset_5h_at: nil,
@@ -407,7 +519,7 @@ defmodule Arbiter.Quota do
   def view(%AnthropicQuota{} = q) do
     blank_view(q.provider)
     |> Map.merge(%{
-      workspace_id: q.workspace_id,
+      provider_account_id: q.provider_account_id,
       utilization_5h: q.utilization_5h,
       reset_5h_at: q.reset_5h_at,
       status_5h: q.status_5h,
@@ -445,6 +557,7 @@ defmodule Arbiter.Quota do
   def serialize_quota(%AnthropicQuota{} = q) do
     %{
       provider: q.provider,
+      provider_account_id: q.provider_account_id,
       utilization_5h: q.utilization_5h,
       reset_5h_at: iso(q.reset_5h_at),
       status_5h: q.status_5h,
@@ -529,8 +642,9 @@ defmodule Arbiter.Quota do
   @doc """
   On-demand fetch of Anthropic's `/api/oauth/usage` endpoint (bd-8tpha6) —
   per-model weekly utilization + `extra_usage` overage, layered onto the
-  workspace's `AnthropicQuota` snapshot alongside (never instead of) the
-  header-capture aggregate figures.
+  account's `AnthropicQuota` snapshot alongside (never instead of) the
+  header-capture aggregate figures. Takes a `provider_account_id` since P5
+  (§6) — `/api/oauth/usage` is an account endpoint and always was.
 
   Best-effort by design: a 429 cooldown (`Arbiter.Quota.OAuthUsage`), missing
   credentials, or any transport error is returned as `{:error, reason}` here
@@ -539,14 +653,19 @@ defmodule Arbiter.Quota do
   """
   @spec capture_oauth_usage(String.t() | nil, keyword()) ::
           {:ok, AnthropicQuota.t()} | {:error, term()}
-  def capture_oauth_usage(workspace_id, opts \\ []) do
+  def capture_oauth_usage(account_id, opts \\ []) do
     provider = Keyword.get(opts, :provider, @default_provider)
 
-    with {:ok, ws_id} <- resolve_workspace_id(workspace_id),
+    with {:ok, id} <- fetch_account_id(account_id),
          {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(opts) do
-      record_oauth_usage(ws_id, provider, usage)
+      record_oauth_usage(id, provider, usage)
     end
   end
+
+  defp fetch_account_id(account_id) when is_binary(account_id) and account_id != "",
+    do: {:ok, account_id}
+
+  defp fetch_account_id(other), do: {:error, {:no_provider_account, other}}
 
   @doc """
   `capture_oauth_usage/2`, but for a *group of workspaces* (bd-5xuneh).
@@ -571,14 +690,18 @@ defmodule Arbiter.Quota do
   results, in the same order as `workspace_ids`, if the single fetch
   succeeded.
 
-  This unconditionally writes the *same* account's figures to every
-  workspace passed in, which is only correct because this install has
-  exactly one provider account today. `docs/provider-account-design.md`
-  (bd-7df8nh) is the RFC that removes that precondition — once
-  `ProviderAccount` exists, this needs to iterate accounts and fetch/write
-  per account rather than once for the whole fleet (see that doc's §9 and
-  phase P6, which now has to build that iteration from scratch since this
-  ticket deleted bd-5xuneh's per-token grouping rather than re-keying it).
+  Since P5 (§6) the write is **per account**, not per workspace: each
+  workspace id is resolved to the account it meters under and the snapshot
+  is written once per distinct account, so three workspaces on one plan
+  produce one row rather than three. The return value still has one entry
+  per input workspace, in order, so a caller can report which workspace's
+  resolution failed — workspaces sharing an account share that account's
+  result.
+
+  The remaining per-account *fetch* is P6: this still fetches once for the
+  whole cycle and writes that one body to every account, which is only
+  correct while the install has a single account. `Arbiter.Quota.CloudProbe`
+  is where that loop gets built (§9).
   """
   @spec capture_oauth_usage_for_group([String.t()], keyword()) ::
           {:ok, [{:ok, AnthropicQuota.t()} | {:error, term()}]} | {:error, term()}
@@ -586,14 +709,31 @@ defmodule Arbiter.Quota do
     provider = Keyword.get(opts, :provider, @default_provider)
 
     with {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(opts) do
-      results =
-        Enum.map(workspace_ids, fn workspace_id ->
-          with {:ok, ws_id} <- resolve_workspace_id(workspace_id) do
-            record_oauth_usage(ws_id, provider, usage)
-          end
+      {results, _seen} =
+        Enum.map_reduce(workspace_ids, %{}, fn workspace_id, seen ->
+          write_once_per_account(workspace_id, provider, usage, seen)
         end)
 
       {:ok, results}
+    end
+  end
+
+  # One write per distinct account per cycle. `seen` memoizes the result so
+  # the second and third workspace on an account neither re-write the row nor
+  # report a different outcome from the first.
+  defp write_once_per_account(workspace_id, provider, usage, seen) do
+    with {:ok, ws_id} <- resolve_workspace_id(workspace_id),
+         {:ok, account_id} <- ensure_account_id(ws_id, provider) do
+      case Map.fetch(seen, account_id) do
+        {:ok, result} ->
+          {result, seen}
+
+        :error ->
+          result = record_oauth_usage(account_id, provider, usage)
+          {result, Map.put(seen, account_id, result)}
+      end
+    else
+      error -> {error, seen}
     end
   end
 
@@ -615,11 +755,11 @@ defmodule Arbiter.Quota do
   #
   # A fetch that failed outright (429 / cooldown / transport) never reaches
   # here at all, so the previous row survives untouched.
-  defp record_oauth_usage(ws_id, provider, usage) do
+  defp record_oauth_usage(account_id, provider, usage) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     secondary = %{
-      workspace_id: ws_id,
+      provider_account_id: account_id,
       provider: provider,
       per_model_utilization: usage.per_model_utilization,
       extra_usage: usage.extra_usage,
@@ -656,7 +796,7 @@ defmodule Arbiter.Quota do
       |> Ash.create()
 
     with {:ok, quota} <- result do
-      broadcast_quota_update(ws_id, quota)
+      broadcast_quota_update(account_id, quota)
     end
 
     result
@@ -668,14 +808,14 @@ defmodule Arbiter.Quota do
   the header-capture aggregate figures already in the snapshot are returned
   either way. This is what `arb quota` / the `quota_get` MCP tool call.
   """
-  @spec refresh_and_serialize(String.t() | nil, String.t()) :: map() | nil
-  def refresh_and_serialize(workspace_id, provider \\ @default_provider) do
-    _ = safe_capture_oauth_usage(workspace_id, provider: provider)
-    serialize(workspace_id, provider)
+  @spec refresh_and_serialize(String.t() | nil, String.t(), keyword()) :: map() | nil
+  def refresh_and_serialize(account_id, provider \\ @default_provider, opts \\ []) do
+    _ = safe_capture_oauth_usage(account_id, provider: provider)
+    serialize(account_id, provider, opts)
   end
 
-  defp safe_capture_oauth_usage(workspace_id, opts) do
-    capture_oauth_usage(workspace_id, opts)
+  defp safe_capture_oauth_usage(account_id, opts) do
+    capture_oauth_usage(account_id, opts)
   rescue
     _ -> :error
   catch
@@ -683,8 +823,8 @@ defmodule Arbiter.Quota do
   end
 
   @doc """
-  Every tracked provider's latest quota snapshot for `workspace_id`, as the
-  uniform view map (`view/1` / `Codex.view/1` / `CloudCode.view/1`) — one entry
+  Every tracked provider's latest quota snapshot for the given provider
+  account(s), as the uniform view map (`view/1` / `Codex.view/1` / `CloudCode.view/1`) — one entry
   per distinct `provider`, `"claude"` sorted first (so the single-provider case
   renders exactly as before), the rest alphabetically.
 
@@ -699,36 +839,92 @@ defmodule Arbiter.Quota do
   #{@cost_window_days} days from the `Arbiter.Usage` ledger (`nil` when none) —
   so the dashboard can show dollars alongside utilization.
   """
-  @spec list_latest(String.t()) :: [map()]
-  def list_latest(workspace_id) when is_binary(workspace_id) do
-    dedicated = codex_views(workspace_id) ++ google_views(workspace_id)
-    dedicated_providers = MapSet.new(dedicated, & &1.provider)
+  @spec list_latest(String.t() | [String.t()] | map()) :: [map()]
+  def list_latest(accounts) do
+    account_ids = normalize_account_ids(accounts)
 
-    generic =
-      AnthropicQuota
-      |> Ash.Query.filter(workspace_id == ^workspace_id)
-      |> Ash.read!()
-      |> Enum.map(&view/1)
-      |> Enum.reject(&MapSet.member?(dedicated_providers, &1.provider))
+    if account_ids == [] do
+      []
+    else
+      dedicated = codex_views(account_ids) ++ google_views(account_ids)
+      dedicated_providers = MapSet.new(dedicated, & &1.provider)
 
-    spend = provider_spend(workspace_id)
+      generic =
+        AnthropicQuota
+        |> Ash.Query.filter(provider_account_id in ^account_ids)
+        |> Ash.read!()
+        |> Enum.map(&view/1)
+        |> Enum.reject(&MapSet.member?(dedicated_providers, &1.provider))
 
-    (generic ++ dedicated)
-    |> Enum.map(&%{&1 | cost_usd: cost_for(&1.provider, spend)})
-    |> Enum.sort_by(&{&1.provider != @default_provider, &1.provider})
+      (generic ++ dedicated)
+      |> Enum.map(&decorate_view/1)
+      |> Enum.sort_by(&{&1.provider != @default_provider, &1.provider})
+    end
   rescue
     _ -> []
   end
 
   @doc """
-  Per-provider actual spend for `workspace_id` over the last
+  `list_latest/1` for a caller that holds a workspace: resolves every
+  provider account the workspace is linked to, then reads by account. The
+  shape the dashboard and `GET /api/quota` still speak.
+  """
+  @spec list_latest_for_workspace(String.t() | nil) :: [map()]
+  def list_latest_for_workspace(workspace_id) do
+    workspace_id
+    |> account_ids()
+    |> list_latest()
+    |> Enum.map(&Map.put(&1, :workspace_id, workspace_id))
+  end
+
+  defp normalize_account_ids(accounts) when is_map(accounts) and not is_struct(accounts),
+    do: accounts |> Map.values() |> normalize_account_ids()
+
+  defp normalize_account_ids(accounts) when is_list(accounts),
+    do: accounts |> Enum.filter(&is_binary/1) |> Enum.uniq()
+
+  defp normalize_account_ids(account_id) when is_binary(account_id), do: [account_id]
+  defp normalize_account_ids(_), do: []
+
+  # Each view carries its *own* account's spend and workspace breakdown — two
+  # accounts in one list are two separate budgets and must not be summed.
+  defp decorate_view(view) do
+    spend = provider_spend(view.provider_account_id)
+
+    view
+    |> Map.merge(account_fields(view.provider_account_id, view.provider))
+    |> Map.put(:cost_usd, cost_for(view.provider, spend))
+  end
+
+  @doc """
+  Per-provider actual spend for the **account** over the last
   #{@cost_window_days} days, as a `%{ledger_provider => total_cost_usd}` map
   drawn from the `Arbiter.Usage` ledger. Keyed by the *ledger* provider
   ("claude" / "gemini" / "openai"); `cost_for/2` maps quota codes onto it.
   Returns `%{}` on any error so cost is a best-effort add-on, never a failure.
+
+  "How much of this plan did I spend?" is an account question (§8), so this
+  is the sum over every workspace metered under the account. `usage_events`
+  does not carry `provider_account_id` until P9, so the account total is
+  reached through the workspace link rather than read off the ledger row —
+  `workspace_spend/1` is the per-workspace term §6's breakdown line prints.
   """
-  @spec provider_spend(String.t()) :: %{optional(String.t()) => float()}
-  def provider_spend(workspace_id) do
+  @spec provider_spend(String.t() | nil) :: %{optional(String.t()) => float()}
+  def provider_spend(account_id) do
+    account_id
+    |> Resolver.workspace_ids()
+    |> Enum.map(&workspace_spend/1)
+    |> Enum.reduce(%{}, fn spend, acc ->
+      Map.merge(acc, spend, fn _provider, a, b -> a + b end)
+    end)
+  end
+
+  @doc """
+  One workspace's own per-provider spend over the last #{@cost_window_days}
+  days — the breakdown term under §6's account total.
+  """
+  @spec workspace_spend(String.t() | nil) :: %{optional(String.t()) => float()}
+  def workspace_spend(workspace_id) when is_binary(workspace_id) do
     since = DateTime.utc_now() |> DateTime.add(-@cost_window_days * 86_400, :second)
 
     case Arbiter.Usage.summarize(by: :provider, since: since, workspace_id: workspace_id) do
@@ -738,6 +934,8 @@ defmodule Arbiter.Quota do
   rescue
     _ -> %{}
   end
+
+  def workspace_spend(_), do: %{}
 
   # Roll the ledger spend for a quota provider code up from its mapped ledger
   # key(s). `nil` (not `0.0`) when the provider has no spend / no clean mapping,
@@ -756,18 +954,20 @@ defmodule Arbiter.Quota do
     end
   end
 
-  defp codex_views(workspace_id) do
-    case Arbiter.Quota.Codex.latest(workspace_id) do
-      nil -> []
-      row -> [Arbiter.Quota.Codex.view(row)]
+  defp codex_views(account_ids) do
+    for account_id <- account_ids,
+        row = Arbiter.Quota.Codex.latest(account_id),
+        not is_nil(row) do
+      Arbiter.Quota.Codex.view(row)
     end
   rescue
     _ -> []
   end
 
-  defp google_views(workspace_id) do
-    for provider <- ["gemini_cli", "antigravity"],
-        row = CloudCode.latest(workspace_id, provider),
+  defp google_views(account_ids) do
+    for account_id <- account_ids,
+        provider <- ["gemini_cli", "antigravity"],
+        row = CloudCode.latest(account_id, provider),
         not is_nil(row) do
       CloudCode.view(row)
     end
@@ -776,10 +976,18 @@ defmodule Arbiter.Quota do
   end
 
   @doc "`list_latest/1`, serialized into the public map shape (ISO timestamps)."
-  @spec list_serialized(String.t()) :: [map()]
-  def list_serialized(workspace_id) do
-    workspace_id
+  @spec list_serialized(String.t() | [String.t()] | map()) :: [map()]
+  def list_serialized(accounts) do
+    accounts
     |> list_latest()
+    |> Enum.map(&serialize_view/1)
+  end
+
+  @doc "`list_latest_for_workspace/1`, serialized into the public map shape."
+  @spec list_serialized_for_workspace(String.t() | nil) :: [map()]
+  def list_serialized_for_workspace(workspace_id) do
+    workspace_id
+    |> list_latest_for_workspace()
     |> Enum.map(&serialize_view/1)
   end
 
@@ -792,6 +1000,10 @@ defmodule Arbiter.Quota do
     view
     |> Map.take([
       :provider,
+      :provider_account_id,
+      :account,
+      :workspaces,
+      :workspace_id,
       :status_5h,
       :status_7d,
       :overage_status,

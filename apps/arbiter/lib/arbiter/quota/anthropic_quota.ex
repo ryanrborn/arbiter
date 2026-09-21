@@ -1,18 +1,30 @@
 defmodule Arbiter.Quota.AnthropicQuota do
   @moduledoc """
-  Per-workspace snapshot of Anthropic's unified rate-limit / quota state.
+  Per-**account** snapshot of Anthropic's unified rate-limit / quota state.
 
   Anthropic returns `anthropic-ratelimit-unified-*` headers on *every*
   `/v1/messages` response (success or failure). `Arbiter.Quota.capture/3`
-  upserts one row per workspace+provider here, so the fleet can read current
+  upserts one row per account+provider here, so the fleet can read current
   utilization without making an extra API call.
 
-  One row per `{workspace_id, provider}` — the `:upsert` action overwrites the
-  prior snapshot in place, so this table stays tiny (it is a cache of the
-  latest reading, not a time series).
+  One row per `{provider_account_id, provider}` — the `:upsert` action
+  overwrites the prior snapshot in place, so this table stays tiny (it is a
+  cache of the latest reading, not a time series).
 
-  Every field except `workspace_id` is optional: a response that carries only
-  the 5h window still writes a row, with the 7d columns left `nil`.
+  Every field except `provider_account_id` is optional: a response that
+  carries only the 5h window still writes a row, with the 7d columns left
+  `nil`.
+
+  ## Keyed by the account, not the workspace (P5, bd-3yokey)
+
+  The rate limit Anthropic enforces is an *account* limit, so three
+  workspaces on one plan share one budget. Keying the snapshot by workspace
+  gave them three independent copies of the same figures and a gate that
+  could hold one workspace while another dispatched freely against the same
+  exhausted account. `docs/provider-account-design.md` §6 re-keys this table
+  to `(provider_account_id, provider)`;
+  `Arbiter.Accounts.Resolver.ensure_account_id/2` is the hop from a spawn's
+  workspace to the account it meters under.
 
   ## Two write paths (bd-b0zody)
 
@@ -40,10 +52,10 @@ defmodule Arbiter.Quota.AnthropicQuota do
     create :upsert do
       primary? true
       upsert? true
-      upsert_identity :workspace_provider
+      upsert_identity :account_provider
 
       accept [
-        :workspace_id,
+        :provider_account_id,
         :provider,
         :utilization_5h,
         :reset_5h_at,
@@ -65,7 +77,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
     # the proxy filled in never re-dates that row or claims its provenance.
     create :record_oauth_usage do
       upsert? true
-      upsert_identity :workspace_provider
+      upsert_identity :account_provider
 
       upsert_fields [
         :per_model_utilization,
@@ -76,7 +88,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
       ]
 
       accept [
-        :workspace_id,
+        :provider_account_id,
         :provider,
         :per_model_utilization,
         :extra_usage,
@@ -98,7 +110,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
     # column the header capture had filled in.
     create :record_oauth_snapshot do
       upsert? true
-      upsert_identity :workspace_provider
+      upsert_identity :account_provider
 
       upsert_fields [
         :per_model_utilization,
@@ -119,7 +131,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
       ]
 
       accept [
-        :workspace_id,
+        :provider_account_id,
         :provider,
         :per_model_utilization,
         :extra_usage,
@@ -143,11 +155,10 @@ defmodule Arbiter.Quota.AnthropicQuota do
   attributes do
     uuid_primary_key :id
 
-    attribute :workspace_id, :string do
+    attribute :provider_account_id, :uuid do
       allow_nil? false
       public? true
-      constraints max_length: 255, trim?: true
-      description "Workspace these quota figures were captured for."
+      description "Provider account these quota figures were captured for (§6)."
     end
 
     attribute :provider, :string do
@@ -227,7 +238,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
   end
 
   identities do
-    # One snapshot per workspace+provider; the proxy upserts onto this.
-    identity :workspace_provider, [:workspace_id, :provider]
+    # One snapshot per account+provider; every write path upserts onto this.
+    identity :account_provider, [:provider_account_id, :provider]
   end
 end

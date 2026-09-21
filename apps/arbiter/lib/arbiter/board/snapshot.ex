@@ -1191,7 +1191,7 @@ defmodule Arbiter.Board.Snapshot do
 
   defp latest_quota(ws_id, workspace) do
     provider = if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
-    Arbiter.Quota.latest_for_provider(ws_id, provider)
+    Arbiter.Quota.latest_for_workspace(ws_id, provider)
   rescue
     _ -> nil
   end

@@ -4,7 +4,13 @@ defmodule ArbiterWeb.Api.QuotaJSON do
   def show(%{workspace_id: ws_id, claude: claude, quotas: quotas} = assigns) do
     %{
       data: %{
+        # Deprecated since P5 (`docs/provider-account-design.md` §6): the
+        # quota rows are keyed by provider account now, and each `quotas`
+        # entry carries its own `account`. Kept for one release as the alias
+        # for "the workspace this lookup came in through".
         workspace_id: ws_id,
+        workspace: Map.get(assigns, :workspace),
+        requested_workspace: Map.get(assigns, :requested_workspace),
         claude: claude,
         quotas: quotas,
         codex: Map.get(assigns, :codex),

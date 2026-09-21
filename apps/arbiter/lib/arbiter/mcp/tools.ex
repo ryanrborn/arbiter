@@ -94,15 +94,19 @@ defmodule Arbiter.MCP.Tools do
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      codex = Arbiter.Quota.Codex.serialize_latest(ws_id)
+      # P5: quota rows are keyed by provider account; the workspace is the
+      # lookup shorthand that resolves to one account per provider (§6).
+      accounts = Arbiter.Quota.account_ids(ws_id)
+      codex = Arbiter.Quota.Codex.serialize_latest(accounts["codex"])
 
       {:ok,
        %{
-         claude: Arbiter.Quota.serialize(ws_id),
+         claude: Arbiter.Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id),
          codex: codex,
          codex_message: Arbiter.Quota.codex_absence_message(codex),
-         gemini: Arbiter.Quota.CloudCode.serialize_latest(ws_id, "gemini_cli"),
-         antigravity: Arbiter.Quota.CloudCode.serialize_latest(ws_id, "antigravity")
+         gemini: Arbiter.Quota.CloudCode.serialize_latest(accounts["gemini_cli"], "gemini_cli"),
+         antigravity:
+           Arbiter.Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity")
        }}
     end
   end

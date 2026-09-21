@@ -1003,7 +1003,7 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp safe_quota_latest(ws_id, provider) do
-    Arbiter.Quota.latest_for_provider(ws_id, provider)
+    Arbiter.Quota.latest_for_workspace(ws_id, provider)
   rescue
     _ -> nil
   catch
