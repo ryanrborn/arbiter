@@ -334,6 +334,33 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       assert_in_delta cost, 7.0, 0.0001
     end
 
+    test "a row with no recorded provider falls back to the workspace's default provider" do
+      # `usage_events.provider` is nullable, and pre-P7 `windowed_spend/2`
+      # counted every row the workspace had regardless of provider. Dropping
+      # such a row from the account rollup would silently under-report
+      # overage and suppress the alert, so it is attributed to the account
+      # the workspace actually dispatches on — the same provider the gate
+      # reads the snapshot for.
+      account = account!()
+      ws = workspace!()
+      link!(ws, account)
+
+      Ash.create!(Event, %{
+        workspace_id: ws.id,
+        task_id: "bd-p7-noprov",
+        step: :work,
+        provider: nil,
+        cost_usd: 3.0,
+        occurred_at: DateTime.utc_now()
+      })
+
+      assert {:ok, [%{group: group, rows: 1}]} =
+               Usage.summarize(by: :provider_account, provider_account_id: account.id)
+
+      assert group == account.id
+      assert_in_delta Overage.windowed_spend(account, nil), 3.0, 0.0001
+    end
+
     test "a row whose workspace has no account lands in the (none) sentinel" do
       usage_event!(workspace!().id, 1.0)
 

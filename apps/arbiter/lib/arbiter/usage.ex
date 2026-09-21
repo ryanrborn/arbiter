@@ -400,11 +400,14 @@ defmodule Arbiter.Usage do
   defp group_events(events, :provider_account) do
     index = account_index(events)
     codes = provider_codes(events)
+    fallbacks = default_provider_codes(events, codes)
 
     Enum.group_by(events, fn ev ->
+      code = Map.get(codes, ev.provider) || Map.get(fallbacks, ev.workspace_id)
+
       index
       |> Map.get(ev.workspace_id, %{})
-      |> Map.get(Map.get(codes, ev.provider))
+      |> Map.get(code)
       |> Kernel.||("(none)")
     end)
   end
@@ -445,6 +448,22 @@ defmodule Arbiter.Usage do
     |> Enum.map(& &1.provider)
     |> Enum.uniq()
     |> Map.new(&{&1, Arbiter.Quota.provider_code(&1)})
+  end
+
+  # `usage_events.provider` is nullable, and a row that records no provider
+  # (or one with no tracked quota) would otherwise fall out of every account —
+  # silently under-reporting the overage figure `Arbiter.Quota.Overage` alerts
+  # on, which pre-P7 counted every row the workspace had. Attribute it to the
+  # account the workspace actually dispatches on, the same provider the gate
+  # reads its snapshot for. Only workspaces that have such a row pay for the
+  # lookup.
+  defp default_provider_codes(events, codes) do
+    events
+    |> Enum.filter(&is_nil(Map.get(codes, &1.provider)))
+    |> Enum.map(& &1.workspace_id)
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.uniq()
+    |> Map.new(&{&1, Arbiter.Quota.provider_code(Arbiter.Quota.default_provider(&1))})
   end
 
   defp task_attributed?(ev), do: is_binary(ev.task_id) and ev.task_id != ""
