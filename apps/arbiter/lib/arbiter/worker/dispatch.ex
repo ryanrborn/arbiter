@@ -366,6 +366,12 @@ defmodule Arbiter.Worker.Dispatch do
   7. Delegate to `dispatch/2` with `:resume_session_id` set — the worker injects
      `--resume <session_id>` into its first spawn and stashes the *pristine*
      argv, so the bd-t9uq25 auto-resume keeps working correctly on top.
+     If the resolved provider doesn't match the provider that captured the
+     session id (bd-b7e33c AC5 — e.g. an explicit `--agent` override that
+     lands on a different CLI than the one owning the conversation), the
+     foreign session id is dropped and `dispatch/2` gets a git-derived
+     `ResumeContext.build/3` briefing instead, the same one `resume/2` uses —
+     never a silent fresh start with no continuity at all.
 
   Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
   `dispatch/2`. Session-resume-specific errors: `{:error, :no_outpost}`,
@@ -379,7 +385,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
-         {:ok, _worktree_path} <- resume_worktree(task, repo),
+         {:ok, worktree_path} <- resume_worktree(task, repo),
          {:ok, session_id, session_provider} <- latest_session_id(task_id) do
       prior_run_id = latest_run_id(task_id)
 
@@ -391,14 +397,43 @@ defmodule Arbiter.Worker.Dispatch do
 
       {provider, fallback_reason} = resolve_session_resume_provider(task, opts, session_provider)
 
-      resume_opts =
+      base_opts =
         opts
         |> Keyword.put(:agent_type, provider)
         |> put_opt_if_present(:provider_fallback, fallback_reason)
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
-        |> maybe_put_resume_session_id(provider == session_provider, session_id)
+
+      # bd-b7e33c finding 2 (round 1 re-review) / finding 1 (round 2): only
+      # carry resume_session_id when the resolved provider still matches the
+      # one that captured it — otherwise it's a bogus invocation, e.g.
+      # `claude --resume <agy-conversation-uuid>`. Degrade to resume/2's real
+      # git-derived briefing instead of silently dropping both (round-2 fix:
+      # the old fallback dropped resume_session_id but never built the
+      # briefing it claimed to fall back to).
+      resume_opts =
+        if provider == session_provider do
+          Keyword.put(base_opts, :resume_session_id, session_id)
+        else
+          require Logger
+
+          Logger.info(
+            "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
+              "provider #{inspect(session_provider)} does not match resolved provider " <>
+              "#{inspect(provider)}; degrading to a git-derived resume briefing instead"
+          )
+
+          target_branch = resolve_target_branch(task, Keyword.put(opts, :repo, repo))
+
+          case ResumeContext.build(task, worktree_path, target_branch) do
+            {:ok, context} -> Keyword.put(base_opts, :resume_context, context)
+            {:error, _reason} -> base_opts
+          end
+        end
+
+      resume_opts =
+        resume_opts
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
@@ -692,21 +727,6 @@ defmodule Arbiter.Worker.Dispatch do
   defp put_opt_if_present(opts, _key, nil), do: opts
   defp put_opt_if_present(opts, _key, ""), do: opts
   defp put_opt_if_present(opts, key, value), do: Keyword.put(opts, key, value)
-
-  # bd-b7e33c finding 2 (round 1 re-review): resolve_session_resume_provider/3
-  # can fall through to resolve_resume_provider/2 and land on a DIFFERENT
-  # provider than the one that captured session_id (unknown/unavailable
-  # session provider, or an explicit agent_type override). Threading the old
-  # session_id through to a mismatched provider produces a bogus invocation —
-  # e.g. `claude --resume <agy-conversation-uuid>`, which the Claude CLI
-  # rejects. Only carry resume_session_id when the resolved provider still
-  # matches the provider that owns it; otherwise degrade to resume/2's
-  # context-based briefing instead of handing a foreign conversation id to
-  # another CLI.
-  defp maybe_put_resume_session_id(opts, true, session_id),
-    do: Keyword.put(opts, :resume_session_id, session_id)
-
-  defp maybe_put_resume_session_id(opts, false, _session_id), do: opts
 
   # `review: true` is the convenience hook used by `arb review`: it forces the
   # review-only defaults so the caller doesn't have to spell out four flags in

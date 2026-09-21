@@ -3331,14 +3331,16 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     # bd-b7e33c finding 2 (round 1 re-review): the mismatch guard in
-    # `maybe_put_resume_session_id/3` also has to fire when the CALLER forces
+    # `maybe_put_resume_session_id/9` also has to fire when the CALLER forces
     # a different provider via an explicit `agent_type:` opt — not just when
     # the resolver falls through on its own. Reproduce that path directly: the
     # prior session captured a resumable id under gemini, but the caller
     # overrides to claude. The override must win (routing.provider == claude)
     # and the foreign gemini conversation id must NOT be threaded into the
-    # claude spawn — it degrades to a normal `resume: true` context briefing
-    # instead, exactly like resume/2 does when it has no session id at all.
+    # claude spawn — it degrades to a real `ResumeContext.build/3` git-derived
+    # briefing instead (bd-b7e33c round-2 finding 1: the fallback used to drop
+    # the session id but never build a briefing either, so it silently
+    # produced a fresh, un-briefed dispatch).
     test "resume_session/2 with an explicit agent_type override does not thread the other provider's session_id",
          %{ws: ws, tmp: tmp} do
       gemini_file = Path.join(tmp, "gemini-resume-override-argv.txt")
@@ -3382,6 +3384,11 @@ defmodule Arbiter.Worker.DispatchTest do
       resumed_args = wait_for_argv!(claude_file)
       refute "--resume" in resumed_args
       refute "agy-conv-override" in resumed_args
+
+      # The dropped session id must be replaced with a real git-derived
+      # briefing (ResumeContext.build/3), not a silently un-briefed fresh
+      # dispatch — the prompt argument carries the distinctive framing text.
+      assert Enum.any?(resumed_args, &String.contains?(&1, "RESUMING work on task"))
 
       routing = Worker.state(result.worker_pid).meta[:routing_config]
       assert routing.provider == "claude"
