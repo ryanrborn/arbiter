@@ -27,6 +27,10 @@ defmodule Arbiter.TestSandbox do
        processes that own the sandbox and waits for them to be gone before it
        deletes anything — and if an owner will not stop, it leaves the
        sandbox on disk rather than destroying a live run's only checkout.
+       "Stops" means through `terminate/2` (`Arbiter.ProcessTeardown.stop/2`),
+       because that callback is where a worker reaps its agent's OS process:
+       an owner that died without running it leaves the agent alive in a
+       directory about to be deleted, which is the same race by another route.
 
   A fourth hazard was what turned a fixture bug into a live incident: the
   original fixture stubbed `agy` but not `claude`, so a dispatch that resolved
@@ -213,10 +217,17 @@ defmodule Arbiter.TestSandbox do
     |> Enum.filter(&Process.alive?/1)
     |> Enum.map(fn pid ->
       ref = Process.monitor(pid)
-      # Quiesce first so a worker parked in a DB callback is not killed
-      # mid-query (see `Arbiter.ProcessTeardown`).
-      Arbiter.ProcessTeardown.quiesce(pid, timeout)
-      Process.exit(pid, :shutdown)
+      # `ProcessTeardown.stop/2`, never a bare `Process.exit(pid, :shutdown)`:
+      # it quiesces first, so a worker parked in a DB callback is not killed
+      # mid-query, and it stops through the `sys` terminate path, so the
+      # owner's `terminate/2` actually runs. That matters here more than
+      # anywhere: `Arbiter.Worker` does not trap exits, and its `terminate/2`
+      # is the only thing that SIGKILLs the agent's OS process and its
+      # descendants (bd-bmmj4w). An exit signal skips the callback, so the
+      # owner would go down while its agent kept running — cwd inside the root
+      # this function is about to delete. That is hazard 3 again, and the
+      # shape of #1930 itself.
+      Arbiter.ProcessTeardown.stop(pid, timeout)
       {pid, ref}
     end)
     |> Enum.reduce([], fn {pid, ref}, alive ->
