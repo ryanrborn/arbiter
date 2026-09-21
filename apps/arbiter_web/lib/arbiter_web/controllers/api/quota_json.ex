@@ -11,6 +11,8 @@ defmodule ArbiterWeb.Api.QuotaJSON do
         workspace_id: ws_id,
         workspace: Map.get(assigns, :workspace),
         requested_workspace: Map.get(assigns, :requested_workspace),
+        account: Map.get(assigns, :account),
+        workspaces: Map.get(assigns, :workspaces) || [],
         claude: claude,
         quotas: quotas,
         codex: Map.get(assigns, :codex),

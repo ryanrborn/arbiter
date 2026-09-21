@@ -21,7 +21,8 @@ defmodule ArbiterWeb.Api.QuotaController do
   entry therefore carries `account` and `workspaces` — the account it belongs
   to and every workspace metered under it, with that workspace's own spend —
   and `workspace` names the workspace the lookup came in through.
-  `workspace_id` is retained for one release as its deprecated alias.
+  `workspace_id` is retained for one release as its deprecated alias. The
+  top-level `account` / `workspaces` describe the headline (Claude) provider.
 
     * `claude` — the latest polled snapshot, including per-model weekly breakdowns
       and overage spend; `null` before the first poll.
@@ -45,12 +46,20 @@ defmodule ArbiterWeb.Api.QuotaController do
         accounts = Quota.account_ids(ws_id)
         codex = Quota.Codex.serialize_latest(accounts["codex"])
 
+        # §6's `--json` gains `account` / `workspaces` at the top level. They
+        # describe the **headline** (Claude) provider's account; a workspace
+        # may sit on a different account per provider, so each `quotas` entry
+        # carries its own pair too.
+        headline = Quota.account_fields(accounts["claude"], "claude")
+
         render(conn, :show,
           workspace_id: ws_id,
           workspace: workspace_view(ws_id),
           requested_workspace: Map.get(params, "workspace"),
           claude: Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id),
           quotas: Quota.list_serialized_for_workspace(ws_id),
+          account: headline[:account],
+          workspaces: headline[:workspaces],
           codex: codex,
           codex_message: Quota.codex_absence_message(codex),
           gemini: Quota.CloudCode.serialize_latest(accounts["gemini_cli"], "gemini_cli"),
