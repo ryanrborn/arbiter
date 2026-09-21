@@ -3240,22 +3240,33 @@ defmodule Arbiter.Worker.DispatchTest do
       assert routing.provider == "gemini"
     end
 
-    # bd-b7e33c post-merge finding (2026-09-19): the provider and the
-    # session_id used to come from two INDEPENDENT "newest row" queries
-    # (`latest_provider/1` and `latest_session_id/1`), so a task whose most
-    # recent usage-ledger row records a different provider than the row that
-    # actually captured the resumable session_id could pin `:agent_type` to
-    # the wrong provider while still threading the OTHER session's
-    # conversation id — exactly the "spawn handed a conversation UUID that
-    # belongs to a different provider" shape the AC5 fix was meant to close.
-    # Reproduce it directly: a NEWER usage row with no session_id records
-    # `provider: "claude"` (e.g. a claude fallback attempt that errored before
-    # the CLI ever reported a session), while an OLDER row on the same task
-    # carries the real, resumable `session_id` under `provider: "gemini"`.
+    # bd-b7e33c post-merge finding (2026-09-19), corrected 2026-09-21 per
+    # round-1 review finding 1: the provider and the session_id used to come
+    # from two INDEPENDENT "newest row" queries, so a task whose most recent
+    # signal recorded a different provider than the row that actually
+    # captured the resumable session_id could pin `:agent_type` to the wrong
+    # provider while still threading the OTHER session's conversation id —
+    # exactly the "spawn handed a conversation UUID that belongs to a
+    # different provider" shape the AC5 fix was meant to close.
+    #
+    # The provider half of that pin is NOT resolved off the usage ledger —
+    # `resolve_session_resume_provider/3` only falls through to
+    # `resolve_resume_provider/2` -> `Agents.resolve_revision_provider/2` ->
+    # `Run.latest_authoring_provider/1`, which reads `worker_run` rows FIRST
+    # and only consults the usage ledger when no run carries a provider. So
+    # the mismatch has to be a newer **Run** row, not a newer usage-event row
+    # (a usage-event-only fixture resolves to the same provider before and
+    # after the fix, and would pass even with the fix reverted). Reproduce it
+    # directly: an OLDER usage row carries the real, resumable `session_id`
+    # under `provider: "gemini"`, while a NEWER **Run** row (a claude fallback
+    # attempt that failed before capturing a session) records `provider:
+    # "claude"`.
     test "resume_session/2 pins the provider to the SAME row the session_id came from",
          %{ws: ws, tmp: tmp} do
       gemini_file = Path.join(tmp, "gemini-resume-mismatch-argv.txt")
+      claude_file = Path.join(tmp, "claude-resume-mismatch-argv.txt")
       :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+      :ok = stub_sleeping_on_path(tmp, "claude", claude_file)
 
       {:ok, task} = Ash.create(Issue, %{title: "agy resume mismatch", workspace_id: ws.id})
 
@@ -3282,19 +3293,24 @@ defmodule Arbiter.Worker.DispatchTest do
           occurred_at: DateTime.add(DateTime.utc_now(), -600, :second)
         })
 
-      {:ok, _newer} =
-        Ash.create(UsageEvent, %{
+      # A newer FAILED claude attempt that never captured a session_id — this
+      # is what Run.latest_authoring_provider/1 actually reads, so it is what
+      # would steal the resume without resolve_session_resume_provider/3.
+      {:ok, _claude_run} =
+        Ash.create(Run, %{
           task_id: task.id,
-          workspace_id: ws.id,
           repo: "rs/repo",
-          step: :work,
+          workspace_id: ws.id,
+          worker_type: :main,
+          status: :failed,
           provider: "claude",
-          occurred_at: DateTime.utc_now()
+          started_at: DateTime.utc_now()
         })
 
       # sanity: the two independent lookups really do disagree, so this test
       # actually exercises the mismatch rather than a scenario that can't occur.
       refute older.session_id == nil
+      assert Run.latest_authoring_provider(task.id) == :claude
 
       File.rm!(gemini_file)
 

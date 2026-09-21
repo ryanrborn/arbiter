@@ -398,7 +398,7 @@ defmodule Arbiter.Worker.Dispatch do
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
-        |> Keyword.put(:resume_session_id, session_id)
+        |> maybe_put_resume_session_id(provider == session_provider, session_id)
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
@@ -692,6 +692,21 @@ defmodule Arbiter.Worker.Dispatch do
   defp put_opt_if_present(opts, _key, nil), do: opts
   defp put_opt_if_present(opts, _key, ""), do: opts
   defp put_opt_if_present(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # bd-b7e33c finding 2 (round 1 re-review): resolve_session_resume_provider/3
+  # can fall through to resolve_resume_provider/2 and land on a DIFFERENT
+  # provider than the one that captured session_id (unknown/unavailable
+  # session provider, or an explicit agent_type override). Threading the old
+  # session_id through to a mismatched provider produces a bogus invocation —
+  # e.g. `claude --resume <agy-conversation-uuid>`, which the Claude CLI
+  # rejects. Only carry resume_session_id when the resolved provider still
+  # matches the provider that owns it; otherwise degrade to resume/2's
+  # context-based briefing instead of handing a foreign conversation id to
+  # another CLI.
+  defp maybe_put_resume_session_id(opts, true, session_id),
+    do: Keyword.put(opts, :resume_session_id, session_id)
+
+  defp maybe_put_resume_session_id(opts, false, _session_id), do: opts
 
   # `review: true` is the convenience hook used by `arb review`: it forces the
   # review-only defaults so the caller doesn't have to spell out four flags in
