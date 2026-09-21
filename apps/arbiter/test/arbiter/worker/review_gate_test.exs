@@ -51,6 +51,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise_commit_once Path.expand("../../fixtures/revise_commit_once.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @revise_dirty Path.expand("../../fixtures/revise_dirty.sh", __DIR__)
+  @revise_non_file_fix Path.expand("../../fixtures/revise_non_file_fix.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
@@ -3869,6 +3870,139 @@ defmodule Arbiter.Worker.ReviewGateTest do
         |> Ash.read!()
 
       assert impl_round.commit_gate == nil
+    end
+
+    # bd-cb7wpq: the repro. A finding is fixed through something other than a
+    # file change (a PR title edit, here), so HEAD does not move and the
+    # worktree stays clean — but the implementer explicitly said so with the
+    # `NO-FILE-CHANGE:` marker. That must dispatch round 2 for a real
+    # re-review, not park the task as if the worker had done nothing.
+    test "non-file resolution (NO-FILE-CHANGE marker), no commit: round 2 is dispatched",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "APPROVE"],
+            revise_command: [@revise_non_file_fix],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+
+      # The branch merged — the fix was real, just not a file change — and the
+      # task never got parked as an idle-worker liveness failure.
+      assert merge_commit_count(repo) == 1
+      refute Ash.get!(Issue, task.id).review_park_reason
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
+             "expected the round-1 implementer run"
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#r2")),
+             "a non-file resolution must still dispatch round 2 for a real re-review"
+
+      require Ash.Query
+
+      [impl_round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.read!()
+
+      assert impl_round.commit_gate == :advanced_non_file_fix
+    end
+
+    # bd-cb7wpq: the safety valve. Two non-file resolutions in a row leave the
+    # reviewer with nothing new to check twice running — that is no longer
+    # distinguishable from an idle worker, so the SECOND one parks. The reason
+    # is distinct from the plain `:commit_gate_no_changes` so a human reading
+    # the escalation can tell "resolved out of band, stalled" apart from
+    # "worker did nothing".
+    test "two non-file resolutions in a row: parks with a distinct reason",
+         %{repo: repo, ws: ws} do
+      require Ash.Query
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 3,
+            worktree_path: repo,
+            review_command: [@rounds, "REQUEST_CHANGES"],
+            revise_command: [@revise_non_file_fix],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 0
+
+      parked = Ash.get!(Issue, task.id)
+      assert parked.review_park_reason == "commit_gate_no_changes_after_non_file_fix"
+
+      run =
+        Arbiter.Workers.Run
+        |> Ash.Query.new()
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+        |> List.first()
+
+      assert run.status == :review_parked
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.body =~ "SECOND round in a row"
+      assert escalation.body =~ "was NOT failed"
+
+      # The verdict label surfaces the real REQUEST_CHANGES round instead of a
+      # bare "INCONCLUSIVE (no verdict)" — a round verdict genuinely exists.
+      assert Ash.get!(Issue, task.id).notes =~ "ReviewGate verdict: REQUEST_CHANGES"
+
+      impl_rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.Query.sort(inserted_at: :asc)
+        |> Ash.read!()
+
+      assert [
+               %{commit_gate: :advanced_non_file_fix},
+               %{commit_gate: :escalated_no_changes_after_non_file_fix}
+             ] = impl_rounds
     end
   end
 
