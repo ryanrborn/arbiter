@@ -53,9 +53,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise_dirty Path.expand("../../fixtures/revise_dirty.sh", __DIR__)
   @revise_non_file_fix Path.expand("../../fixtures/revise_non_file_fix.sh", __DIR__)
   @revise_commit_once_non_file_fix Path.expand(
-                                      "../../fixtures/revise_commit_once_non_file_fix.sh",
-                                      __DIR__
-                                    )
+                                     "../../fixtures/revise_commit_once_non_file_fix.sh",
+                                     __DIR__
+                                   )
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
