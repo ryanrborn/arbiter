@@ -50,6 +50,7 @@ defmodule Arbiter.Usage do
 
   use Ash.Domain
 
+  alias Arbiter.Accounts.Resolver
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
@@ -64,6 +65,7 @@ defmodule Arbiter.Usage do
           | :task
           | :epic
           | :workspace
+          | :provider_account
           | :repo
           | :model
           | :step
@@ -100,7 +102,7 @@ defmodule Arbiter.Usage do
           required(:estimated) => boolean()
         }
 
-  @valid_by ~w(day task epic workspace repo model step provider source session)a
+  @valid_by ~w(day task epic workspace provider_account repo model step provider source session)a
 
   # `campaign` was the old name for the `epic` grouping. Accepted as a
   # deprecated alias for one release; normalized to `:epic` before validation
@@ -116,6 +118,13 @@ defmodule Arbiter.Usage do
       deprecated alias for `:epic`). Required.
     * `:since` — `%DateTime{}` filter on `occurred_at`. Optional.
     * `:workspace_id` — restrict to one workspace. Optional.
+    * `:provider_account_id` — restrict to one provider account
+      (`docs/provider-account-design.md` §3.3). `usage_events` carries no
+      account column until P9, so this narrows the query to the account's
+      *workspaces* — which over-selects, because a workspace is metered under
+      a different account per provider. With `by: :provider_account` the
+      result is then exact (every other account's group is dropped); with any
+      other grouping it is the workspace-set approximation. Optional.
     * `:session_ids` — restrict to a list of `session_id` values, pushed into
       the query as `session_id in ^ids` rather than filtered after the read.
       `Event` indexes `:session_id`, so this keeps a `:by :session` rollup for
@@ -157,6 +166,7 @@ defmodule Arbiter.Usage do
       {:ok,
        events
        |> group_events(by)
+       |> exact_account_groups(by, opts)
        |> Enum.map(&aggregate_group(by, &1))
        |> sort_rollups(by)
        |> maybe_limit(opts)}
@@ -298,11 +308,29 @@ defmodule Arbiter.Usage do
     end
   end
 
+  # `:provider_account_id` narrows the *query* to the account's workspaces,
+  # which is as exact as SQL can be while `usage_events` carries no account
+  # column. It is not exact enough on its own: a workspace is metered under a
+  # different account per provider, so its Claude rows come back for a Codex
+  # account too — measured on the live install, where a Codex account's 5h
+  # overage figure was $125 of Claude spend. The `:provider_account`
+  # grouping *is* per-event exact, so when both are given, drop every group
+  # but the one asked for.
+  defp exact_account_groups(groups, :provider_account, opts) do
+    case Keyword.get(opts, :provider_account_id) do
+      id when is_binary(id) and id != "" -> Map.take(groups, [id])
+      _ -> groups
+    end
+  end
+
+  defp exact_account_groups(groups, _by, _opts), do: groups
+
   defp base_filter(query, opts) do
     query
     |> filter_since(Keyword.get(opts, :since))
     |> filter_until(Keyword.get(opts, :until))
     |> filter_workspace_id(Keyword.get(opts, :workspace_id))
+    |> filter_provider_account_id(Keyword.get(opts, :provider_account_id))
     |> filter_session_ids(Keyword.get(opts, :session_ids))
   end
 
@@ -315,6 +343,16 @@ defmodule Arbiter.Usage do
   defp filter_workspace_id(query, nil), do: query
   defp filter_workspace_id(query, ""), do: query
   defp filter_workspace_id(query, ws), do: Ash.Query.filter(query, workspace_id == ^ws)
+
+  # `usage_events` carries no `provider_account_id` column until P9, so an
+  # account filter is the set of workspaces metered under it. An account with
+  # no workspaces matches nothing, which is the honest answer — not
+  # "everything".
+  defp filter_provider_account_id(query, nil), do: query
+  defp filter_provider_account_id(query, ""), do: query
+
+  defp filter_provider_account_id(query, account_id),
+    do: Ash.Query.filter(query, workspace_id in ^Resolver.workspace_ids(account_id))
 
   defp filter_session_ids(query, nil), do: query
   defp filter_session_ids(query, []), do: query
@@ -353,6 +391,27 @@ defmodule Arbiter.Usage do
   defp group_events(events, :workspace),
     do: Enum.group_by(events, &(&1.workspace_id || "(none)"))
 
+  # §5 row 14: the account rollup. Resolved through the workspace → account
+  # join rather than read off the row, because `usage_events` does not carry
+  # `provider_account_id` until P9. An event is attributed to the account its
+  # workspace is metered under **for that event's provider** — a workspace can
+  # hold a different account per provider — and rows with no resolvable
+  # account fall into the `(none)` sentinel rather than vanishing.
+  defp group_events(events, :provider_account) do
+    index = account_index(events)
+    codes = provider_codes(events)
+    fallbacks = default_provider_codes(events, codes)
+
+    Enum.group_by(events, fn ev ->
+      code = Map.get(codes, ev.provider) || Map.get(fallbacks, ev.workspace_id)
+
+      index
+      |> Map.get(ev.workspace_id, %{})
+      |> Map.get(code)
+      |> Kernel.||("(none)")
+    end)
+  end
+
   defp group_events(events, :repo), do: Enum.group_by(events, &(&1.repo || "(none)"))
   defp group_events(events, :model), do: Enum.group_by(events, &(&1.model || "(unknown)"))
   defp group_events(events, :provider), do: Enum.group_by(events, &(&1.provider || "(unknown)"))
@@ -369,6 +428,42 @@ defmodule Arbiter.Usage do
         ids -> Enum.reduce(ids, acc, fn pid, a -> Map.update(a, pid, [ev], &[ev | &1]) end)
       end
     end)
+  end
+
+  # `%{workspace_id => %{provider_code => account_id}}` for every workspace the
+  # window touches — one read, rather than one per event.
+  defp account_index(events) do
+    events
+    |> Enum.map(& &1.workspace_id)
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.uniq()
+    |> Map.new(&{&1, Resolver.account_ids(&1)})
+  end
+
+  # Ledger providers ("claude" / "openai" / "gemini") are not the quota
+  # provider codes the join rows use, and resolving "gemini" probes the PATH
+  # (`Arbiter.Quota.provider_code/1`), so map each distinct value once.
+  defp provider_codes(events) do
+    events
+    |> Enum.map(& &1.provider)
+    |> Enum.uniq()
+    |> Map.new(&{&1, Arbiter.Quota.provider_code(&1)})
+  end
+
+  # `usage_events.provider` is nullable, and a row that records no provider
+  # (or one with no tracked quota) would otherwise fall out of every account —
+  # silently under-reporting the overage figure `Arbiter.Quota.Overage` alerts
+  # on, which pre-P7 counted every row the workspace had. Attribute it to the
+  # account the workspace actually dispatches on, the same provider the gate
+  # reads its snapshot for. Only workspaces that have such a row pay for the
+  # lookup.
+  defp default_provider_codes(events, codes) do
+    events
+    |> Enum.filter(&is_nil(Map.get(codes, &1.provider)))
+    |> Enum.map(& &1.workspace_id)
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.uniq()
+    |> Map.new(&{&1, Arbiter.Quota.provider_code(Arbiter.Quota.default_provider(&1))})
   end
 
   defp task_attributed?(ev), do: is_binary(ev.task_id) and ev.task_id != ""

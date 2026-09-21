@@ -96,7 +96,9 @@ defmodule ArbiterWeb.UsageLive do
   # the default workspace is dispatching past the plan cap (`:continue`
   # mode), surface the windowed overage spend in the Rate limits panel.
   # Sourced from the same windowed `Usage.summarize/1` sum the gate uses for
-  # the alert threshold.
+  # the alert threshold — which sums by *provider account* since P7, so this
+  # resolves the workspace's Claude account first and shows the whole plan's
+  # overage rather than one workspace's slice of it.
   defp assign_overage(socket) do
     quota = Enum.find(socket.assigns[:quotas] || [], &(&1.provider == "claude"))
     ws_id = socket.assigns[:_quota_workspace_id]
@@ -104,7 +106,7 @@ defmodule ArbiterWeb.UsageLive do
     {spend, in_overage?} =
       case {quota, ws_id} do
         {%{overage_status: "in_overage"} = q, ws} when is_binary(ws) ->
-          {Arbiter.Quota.Overage.windowed_spend(%{id: ws}, q), true}
+          {Arbiter.Quota.Overage.windowed_spend(Arbiter.Quota.account_id(ws, "claude"), q), true}
 
         _ ->
           {0.0, false}
