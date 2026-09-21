@@ -276,23 +276,35 @@ defmodule Arbiter.Accounts.MigrateTest do
     end
   end
 
-  describe "Release N is additive (acceptance 4)" do
-    test ":provider_accounts_enabled exists and defaults to false" do
+  describe "the flag still ships off (acceptance 4)" do
+    test ":provider_accounts_enabled ships false and defaults false when unset" do
+      # The shipped default is what an install gets before an operator opts in;
+      # `config/test.exs` overrides it per matrix leg (P3 / bd-aiodva), so the
+      # runtime value is not the thing to assert here.
+      config = File.read!(Path.join(File.cwd!(), "../../config/config.exs"))
+      assert config =~ "config :arbiter, :provider_accounts_enabled, false"
+
+      prev = Application.get_env(:arbiter, :provider_accounts_enabled)
+      Application.delete_env(:arbiter, :provider_accounts_enabled)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
+          value -> Application.put_env(:arbiter, :provider_accounts_enabled, value)
+        end
+      end)
+
       assert Arbiter.Accounts.enabled?() == false
-      assert Application.get_env(:arbiter, :provider_accounts_enabled) == false
     end
 
-    test "no read path consults the new tables yet" do
-      for path <- [
-            "lib/arbiter/agents/claude/config_dir.ex",
-            "lib/arbiter/agents/gemini/config_dir.ex",
-            "lib/arbiter/worker/worker_env.ex"
-          ] do
-        source = File.read!(Path.join(File.cwd!(), path))
+    test "the read flip (P3) is confined to the surfaces §5 names" do
+      # Claude's config dir and WorkerEnv are §5 rows 15–17 and do read the
+      # tables now. Gemini's config dir is not in that table and must not have
+      # grown a read of its own.
+      source = File.read!(Path.join(File.cwd!(), "lib/arbiter/agents/gemini/config_dir.ex"))
 
-        refute source =~ "Arbiter.Accounts",
-               "#{path} reads the provider-account tables; that is P3, not this release (§7.5)"
-      end
+      refute source =~ "Arbiter.Accounts",
+             "gemini/config_dir.ex reads the provider-account tables; §5 does not list it"
     end
   end
 end
