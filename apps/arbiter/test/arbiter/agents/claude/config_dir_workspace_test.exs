@@ -35,15 +35,24 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
     prev_dir = Application.get_env(:arbiter, :worker_config_dir)
     prev_src = System.get_env("CLAUDE_CONFIG_DIR")
     prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+    prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
 
     Application.put_env(:arbiter, :worker_isolate_config, true)
     Application.put_env(:arbiter, :worker_config_dir, target)
     System.put_env("CLAUDE_CONFIG_DIR", source)
     System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
+    # `worker_env` as the credential source is the pre-P3 behaviour these
+    # tests pin (acceptance 2 of bd-aiodva); the provider-account read that
+    # replaces it behind `:provider_accounts_enabled` is covered by
+    # `arbiter/accounts/read_flip_test.exs`. Pin the flag off so the
+    # `ARBITER_PROVIDER_ACCOUNTS=1` matrix leg does not reinterpret them.
+    Application.put_env(:arbiter, :provider_accounts_enabled, false)
+
     on_exit(fn ->
       restore_app(:worker_isolate_config, prev_isolate)
       restore_app(:worker_config_dir, prev_dir)
+      restore_app(:provider_accounts_enabled, prev_flag)
       restore_sys("CLAUDE_CONFIG_DIR", prev_src)
       restore_sys("CLAUDE_CODE_OAUTH_TOKEN", prev_token)
       File.rm_rf!(base)

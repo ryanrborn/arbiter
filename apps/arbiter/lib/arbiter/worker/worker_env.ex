@@ -32,6 +32,10 @@ defmodule Arbiter.Worker.WorkerEnv do
 
   require Logger
 
+  alias Arbiter.Accounts
+  alias Arbiter.Accounts.Census
+  alias Arbiter.Accounts.Credentials
+  alias Arbiter.Accounts.MissingCredentialError
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.ReviewGate
@@ -58,12 +62,30 @@ defmodule Arbiter.Worker.WorkerEnv do
   workspace (empty `worker_env_meta`) never warns. If decryption itself raises
   (corrupt/undecryptable ciphertext), that is caught and logged too — this
   function never raises into a spawn.
+
+  ## Provider credentials with `:provider_accounts_enabled` on (P3, bd-aiodva)
+
+  §5 row 17 splits this function: the workspace keeps answering for every
+  **non-credential** var it defines, while the allowlisted provider-credential
+  vars (`Arbiter.Accounts.Census.credential_keys/0` — `CLAUDE_CODE_OAUTH_TOKEN`,
+  `OPENAI_API_KEY`, …) come from the workspace's provider accounts instead,
+  across every provider it is linked to. The pair shape is unchanged, so the
+  spawn env is unchanged (§5 row 20); only the source moves. Account secrets
+  join the redaction list exactly as `secret`-flagged workspace vars do.
+
+  The one case that *does* raise — the single exception to the paragraph above
+  — is a credential the flip would silently drop: a var the blob still carries
+  that no account supplies. That is
+  `Arbiter.Accounts.MissingCredentialError`, and it is deliberate (acceptance
+  3): a worker spawned with its credential quietly missing 401s minutes later
+  and burns a run. A workspace with no provider credential configured at all
+  is untouched and never raises.
   """
   @spec resolve(String.t() | nil) :: {[{String.t(), String.t()}], [String.t()]}
   def resolve(task_id) do
     case workspace_for(task_id) do
       %Workspace{} = ws ->
-        pairs =
+        workspace_pairs =
           try do
             ws |> Workspace.worker_env_map() |> Map.to_list()
           rescue
@@ -76,18 +98,65 @@ defmodule Arbiter.Worker.WorkerEnv do
               []
           end
 
-        secret_values =
-          if pairs == [] do
+        workspace_secrets =
+          if workspace_pairs == [] do
             []
           else
             Workspace.worker_env_secret_values(ws)
           end
+
+        {pairs, secret_values} =
+          apply_provider_accounts(ws, workspace_pairs, workspace_secrets)
 
         warn_if_degraded(task_id, ws, pairs)
         {pairs, secret_values}
 
       nil ->
         {[], []}
+    end
+  end
+
+  # With the flag off this is the identity function — the pre-P3 answer,
+  # byte for byte. With it on, credential vars are swapped for the account's.
+  defp apply_provider_accounts(%Workspace{} = ws, pairs, secrets) do
+    if Accounts.enabled?() do
+      account_pairs = Credentials.workspace_pairs(ws.id)
+      {credential_pairs, plain_pairs} = split_credential_pairs(pairs)
+
+      ensure_no_credential_dropped!(ws, credential_pairs, account_pairs)
+
+      {plain_pairs ++ account_pairs,
+       drop_credential_secrets(secrets, credential_pairs) ++
+         Enum.map(account_pairs, fn {_var, secret} -> secret end)}
+    else
+      {pairs, secrets}
+    end
+  end
+
+  defp split_credential_pairs(pairs) do
+    credential_keys = Census.credential_keys()
+    Enum.split_with(pairs, fn {name, _value} -> Map.has_key?(credential_keys, name) end)
+  end
+
+  # A value that only the blob's credential keys carried must not linger in
+  # the redaction list: it is no longer in the child's environment.
+  defp drop_credential_secrets(secrets, credential_pairs) do
+    moved = MapSet.new(credential_pairs, fn {_name, value} -> value end)
+    Enum.reject(secrets, &MapSet.member?(moved, &1))
+  end
+
+  # The flip is only safe while every credential the workspace already supplies
+  # has an account to supply it. Anything the blob carries that no account
+  # covers would vanish from the spawn env — loudly, not silently (§7.5).
+  defp ensure_no_credential_dropped!(%Workspace{} = ws, credential_pairs, account_pairs) do
+    supplied = MapSet.new(account_pairs, fn {name, _value} -> name end)
+
+    case Enum.reject(Enum.map(credential_pairs, &elem(&1, 0)), &MapSet.member?(supplied, &1)) do
+      [] ->
+        :ok
+
+      dropped ->
+        raise MissingCredentialError, workspace_id: ws.id, env_vars: Enum.sort(dropped)
     end
   end
 
