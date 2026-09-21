@@ -91,9 +91,28 @@
   #     atom clause beside the `{:no_verdict, reason}` tuple one, and a
   #     `load_member_issues([])` clause. Both are cheap total-function
   #     hygiene on a private helper.
+  #   * worker/dispatch.ex (bd-b7e33c) — a different shape: the private,
+  #     single-call-site `maybe_put_resume_session_id(opts, provider ==
+  #     session_provider, session_id)` has a `true` clause and a `false`
+  #     clause; dialyzer's success typing narrows the boolean argument to the
+  #     literal `true` and reports the `false` clause dead. It is not:
+  #     `resume_session/2`'s explicit `agent_type:` override (and the
+  #     provider-unavailable fallback in `resolve_session_resume_provider/3`)
+  #     both produce a `provider` that legitimately differs from
+  #     `session_provider` at runtime, and skipping the `:resume_session_id`
+  #     put in that case is the entire point of the guard — see the
+  #     "resume_session/2 with an explicit agent_type override does not
+  #     thread the other provider's session_id" test in dispatch_test.exs,
+  #     which fails if that clause is ever actually unreachable. Dialyzer
+  #     can't see the correlation because the two values come from
+  #     independent branches of a call it doesn't inline visibly in this
+  #     diagnostic — a known success-typing precision limit on boolean flags
+  #     computed from two independently-sourced variables, not a real dead
+  #     branch.
   {"lib/arbiter/agents/preflight.ex", :pattern_match},
   {"lib/arbiter/mcp/tools.ex", :pattern_match},
   {"lib/arbiter/mcp/tools/loop_pending.ex", :pattern_match},
+  {"lib/arbiter/worker/dispatch.ex", :pattern_match},
   {"lib/arbiter/worker/driver.ex", :pattern_match},
   {"lib/arbiter/worker/review_gate.ex", :pattern_match},
   {"lib/arbiter/workflows/conductor.ex", :pattern_match},

@@ -3329,6 +3329,63 @@ defmodule Arbiter.Worker.DispatchTest do
       routing = Worker.state(result.worker_pid).meta[:routing_config]
       assert routing.provider == "gemini"
     end
+
+    # bd-b7e33c finding 2 (round 1 re-review): the mismatch guard in
+    # `maybe_put_resume_session_id/3` also has to fire when the CALLER forces
+    # a different provider via an explicit `agent_type:` opt — not just when
+    # the resolver falls through on its own. Reproduce that path directly: the
+    # prior session captured a resumable id under gemini, but the caller
+    # overrides to claude. The override must win (routing.provider == claude)
+    # and the foreign gemini conversation id must NOT be threaded into the
+    # claude spawn — it degrades to a normal `resume: true` context briefing
+    # instead, exactly like resume/2 does when it has no session id at all.
+    test "resume_session/2 with an explicit agent_type override does not thread the other provider's session_id",
+         %{ws: ws, tmp: tmp} do
+      gemini_file = Path.join(tmp, "gemini-resume-override-argv.txt")
+      claude_file = Path.join(tmp, "claude-resume-override-argv.txt")
+      :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+      :ok = stub_sleeping_on_path(tmp, "claude", claude_file)
+
+      {:ok, task} = Ash.create(Issue, %{title: "agy resume override", workspace_id: ws.id})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+      {:ok, _event} =
+        Ash.create(UsageEvent, %{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "rs/repo",
+          step: :work,
+          provider: "gemini",
+          session_id: "agy-conv-override",
+          occurred_at: DateTime.utc_now()
+        })
+
+      {:ok, result} =
+        Dispatch.resume_session(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          preflight: false,
+          agent_type: :claude
+        )
+
+      resumed_args = wait_for_argv!(claude_file)
+      refute "--resume" in resumed_args
+      refute "agy-conv-override" in resumed_args
+
+      routing = Worker.state(result.worker_pid).meta[:routing_config]
+      assert routing.provider == "claude"
+    end
   end
 
   describe "review dispatch (review: true)" do
