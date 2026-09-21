@@ -403,7 +403,7 @@ defmodule Arbiter.Quota do
       %AnthropicQuota{} = q ->
         q
         |> serialize_quota()
-        |> Map.merge(gating_fields(q, gate_workspace(account_id, opts)))
+        |> Map.merge(gating_fields(q, Resolver.get(account_id), gate_workspace(account_id, opts)))
         |> Map.merge(account_fields(account_id, provider, Keyword.get(opts, :spend_cache, %{})))
     end
   end
@@ -420,18 +420,24 @@ defmodule Arbiter.Quota do
   # both surfaces showed the 5h and 7d numbers side by side with no indication
   # that only the 5h one was ever consulted — the coordinator read the 7d row as
   # the thing holding Autopilot back when the gate never looked at it.
-  defp gating_fields(%AnthropicQuota{} = q, workspace) do
+  defp gating_fields(%AnthropicQuota{} = q, account, workspace) do
     if Arbiter.Quota.continue_mode?(workspace) do
       # `:continue` workspaces dispatch past the cap by design, so no window
       # gates them — mirroring `Board.Snapshot.quota_hold/1`'s short-circuit.
       %{gating_window: nil, gating_reason: nil}
     else
-      case Arbiter.Quota.Gate.gating_window(q, workspace) do
+      # P7 (§4.2): thresholds resolve `min(account, workspace)`, so the
+      # rendered reason has to be computed against the same pair the gate
+      # itself uses — otherwise `arb quota` reports headroom that dispatch
+      # has already closed.
+      policy = {account, workspace}
+
+      case Arbiter.Quota.Gate.gating_window(q, policy) do
         nil ->
           %{gating_window: nil, gating_reason: nil}
 
         %{window: w} ->
-          %{gating_window: w, gating_reason: Arbiter.Quota.Gate.hold_phrase(q, workspace)}
+          %{gating_window: w, gating_reason: Arbiter.Quota.Gate.hold_phrase(q, policy)}
       end
     end
   end

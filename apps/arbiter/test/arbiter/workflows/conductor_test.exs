@@ -447,7 +447,7 @@ defmodule Arbiter.Workflows.ConductorTest do
     defmodule HoldGate do
       @behaviour Arbiter.Workflows.QuotaGate
       @impl true
-      def quota_headroom(_workspace_id), do: 0
+      def quota_headroom(_provider_account_id, _opts), do: 0
     end
 
     # A gate that returns a fixed partial headroom — used to assert the min
@@ -455,14 +455,14 @@ defmodule Arbiter.Workflows.ConductorTest do
     defmodule PartialGate do
       @behaviour Arbiter.Workflows.QuotaGate
       @impl true
-      def quota_headroom(_workspace_id), do: 1
+      def quota_headroom(_provider_account_id, _opts), do: 1
     end
 
     # A gate that always allows — baseline for "quota imposes no restriction".
     defmodule UnlimitedGate do
       @behaviour Arbiter.Workflows.QuotaGate
       @impl true
-      def quota_headroom(_workspace_id), do: :unlimited
+      def quota_headroom(_provider_account_id, _opts), do: :unlimited
     end
 
     test "quota hold (headroom = 0) prevents all dispatch", %{ws: ws} do
@@ -560,6 +560,79 @@ defmodule Arbiter.Workflows.ConductorTest do
       kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
 
       refute_receive {:dispatched, _, _}, 100
+    end
+
+    # P7 (`docs/provider-account-design.md` §4.2 / §4.4): the hold is keyed by
+    # the provider account, so one exhausted budget stops **every** workspace
+    # metered under it. Before P7 the callback took a `workspace_id`, and two
+    # Conductors on one account could disagree about whether the budget was
+    # gone — `default` held while `vstim` dispatched straight into it. Driven
+    # through `Conductor` itself, not the gate function, because the account
+    # resolution the Conductor does is half of what this phase changed.
+    test "Default gate holds every workspace metered under one exhausted account" do
+      account = shared_account!()
+      [first, second] = [workspace_on!(account), workspace_on!(account)]
+
+      # Positive control: with a healthy account both Conductors dispatch, so
+      # the `refute_receive` below cannot pass because the harness is inert.
+      healthy =
+        Ash.create!(Arbiter.Quota.AnthropicQuota, %{
+          provider_account_id: account.id,
+          utilization_5h: 0.10,
+          status_5h: "allowed",
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      ids = Enum.map([first, second], &kickoff_one_member/1)
+
+      for id <- ids, do: assert_receive({:dispatched, ^id, _}, 500)
+
+      # Now blow the *account's* single snapshot. Neither workspace touched it.
+      :ok = Ash.destroy!(healthy)
+
+      Ash.create!(Arbiter.Quota.AnthropicQuota, %{
+        provider_account_id: account.id,
+        utilization_5h: 0.99,
+        status_5h: "rejected",
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      for ws <- [first, second], do: kickoff_one_member(ws)
+
+      refute_receive {:dispatched, _, _}, 300
+    end
+
+    defp shared_account! do
+      Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+        provider: :claude,
+        slug: "cnd-acct-#{System.unique_integer([:positive])}",
+        label: "shared account"
+      })
+    end
+
+    defp workspace_on!(account) do
+      {:ok, w} =
+        Ash.create(Workspace, %{
+          name: "cnd-shared-#{System.unique_integer([:positive])}",
+          prefix: "cs#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, _} =
+        Ash.create(Arbiter.Accounts.WorkspaceProviderAccount, %{
+          workspace_id: w.id,
+          provider: :claude,
+          provider_account_id: account.id
+        })
+
+      w
+    end
+
+    defp kickoff_one_member(ws) do
+      i = issue(ws)
+      g = graph(ws)
+      add_member(g, i)
+      kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
+      i.id
     end
 
     # Regression (bd-5j6nmn): before this fix, Default read its own

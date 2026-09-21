@@ -404,8 +404,9 @@ defmodule Arbiter.Board.Snapshot do
   because the operator's next move differs: wait for the reset, or raise the
   ceiling.
 
-  Reads the workspace's default agent provider's snapshot
-  (`Arbiter.Quota.default_provider/1`) and defers the over-cap decision to
+  Reads the snapshot for the **provider account** the workspace is metered
+  under, on that workspace's default agent provider
+  (`Arbiter.Quota.default_provider/1`), and defers the over-cap decision to
   `Arbiter.Quota.Gate.hold_phrase/2` (`gating_window/2`) — the same shared implementation the
   Conductor's `Arbiter.Workflows.QuotaGate.Default` and the `dispatch/2`
   quota seam both use (bd-5j6nmn), so Autopilot's one-per-tick promotion gate
@@ -424,8 +425,10 @@ defmodule Arbiter.Board.Snapshot do
     with ws_id when is_binary(ws_id) <- workspace_id,
          workspace <- safe_workspace(ws_id),
          false <- Arbiter.Quota.continue_mode?(workspace),
-         snapshot when not is_nil(snapshot) <- latest_quota(ws_id, workspace) do
-      describe_quota(snapshot, workspace)
+         provider <- quota_provider(workspace),
+         account <- quota_account(ws_id, provider),
+         snapshot when not is_nil(snapshot) <- latest_quota(account, provider) do
+      describe_quota(snapshot, {account, workspace})
     else
       _ -> :ok
     end
@@ -1189,9 +1192,23 @@ defmodule Arbiter.Board.Snapshot do
     _ -> nil
   end
 
-  defp latest_quota(ws_id, workspace) do
-    provider = if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
-    Arbiter.Quota.latest_for_workspace(ws_id, provider)
+  defp quota_provider(workspace) do
+    if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
+  end
+
+  defp latest_quota(nil, _provider), do: nil
+
+  defp latest_quota(%{id: account_id}, provider) do
+    Arbiter.Quota.latest_for_provider(account_id, provider)
+  rescue
+    _ -> nil
+  end
+
+  # P7 (§4.2): the snapshot is the account's, so its thresholds are too —
+  # the board would otherwise report headroom the dispatch gate has already
+  # closed whenever the account's threshold is stricter than the workspace's.
+  defp quota_account(ws_id, provider) do
+    Arbiter.Accounts.Resolver.get(Arbiter.Quota.account_id(ws_id, provider))
   rescue
     _ -> nil
   end
@@ -1201,8 +1218,8 @@ defmodule Arbiter.Board.Snapshot do
   # ceiling. A 7d hold is a third: it clears at the weekly reset, days away, so
   # `Arbiter.Quota.Gate.hold_phrase/2` labels it with the window explicitly
   # (`7d quota 0.91 ≥ 0.90`) rather than reusing the 5h wording (bd-1tuxv8).
-  defp describe_quota(snapshot, workspace) do
-    case Arbiter.Quota.Gate.hold_phrase(snapshot, workspace) do
+  defp describe_quota(snapshot, policy) do
+    case Arbiter.Quota.Gate.hold_phrase(snapshot, policy) do
       nil -> :ok
       phrase -> {:hold, phrase}
     end
