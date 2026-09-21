@@ -145,7 +145,18 @@ defmodule Arbiter.Accounts.Credentials do
       []
   end
 
-  defp account_ids(ws_id) do
+  # A workspace id that is not a UUID cannot match a join row — every
+  # `Arbiter.Tasks.Workspace` has a `uuid_v7_primary_key`. Answer "no
+  # accounts" without asking the data layer, which would reject the value and
+  # bury a one-line miss in a page of Ash filter error.
+  defp account_ids(ws_id) when is_binary(ws_id) do
+    case Ash.Type.UUID.cast_input(ws_id, []) do
+      {:ok, _uuid} -> read_account_ids(ws_id)
+      _ -> []
+    end
+  end
+
+  defp read_account_ids(ws_id) do
     WorkspaceProviderAccount
     |> Ash.Query.filter(workspace_id == ^ws_id)
     |> Ash.Query.load(:provider_account)
