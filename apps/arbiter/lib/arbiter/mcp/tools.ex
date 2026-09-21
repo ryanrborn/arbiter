@@ -550,10 +550,30 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp zero_token_warning(%{provider: provider, rows: rows}) do
-    "⚠ #{provider}: all #{rows} usage_events row(s) in this window carry zero tokens — " <>
-      "likely a stream parser silently dropping usage rather than a genuinely free provider."
+  # bd-96mn8i round 2, finding 3: a literal-zero row (the parser matched a
+  # terminal event and read no tokens out of it) is worded as the parser-bug
+  # signature it is. A provider with no literal zeros — every row is
+  # `tokens_in`/`tokens_out: nil` — never reached a terminal event at all
+  # (e.g. every probe in the window failed auth); wording that as "a stream
+  # parser silently dropping usage" would be its own false alarm once
+  # bd-96mn8i's fix is in place and correct.
+  defp zero_token_warning(%{provider: provider, rows: rows, zero_rows: zero_rows} = report)
+       when zero_rows > 0 do
+    "⚠ #{provider}: #{zero_rows} of #{rows} usage_events row(s) in this window carry literal zero " <>
+      "tokens — likely a stream parser silently dropping usage rather than a genuinely free provider." <>
+      unknown_suffix(report)
   end
+
+  defp zero_token_warning(%{provider: provider, rows: rows}) do
+    "⚠ #{provider}: all #{rows} usage_events row(s) in this window recorded no usage at all " <>
+      "(NULL tokens, not zero) — check for failed probes or an unrecognized result shape; " <>
+      "these rows are excluded from cost/token aggregates, not counted as free."
+  end
+
+  defp unknown_suffix(%{unknown_rows: n}) when n > 0,
+    do: " (a further #{n} row(s) recorded no usage at all — NULL, not zero.)"
+
+  defp unknown_suffix(_report), do: ""
 
   # ---- tracker_claim ------------------------------------------------------
 

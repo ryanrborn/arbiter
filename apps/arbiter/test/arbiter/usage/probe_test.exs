@@ -7,6 +7,8 @@ defmodule Arbiter.Usage.ProbeTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Agents.Claude
+  alias Arbiter.Agents.Codex
+  alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.Preflight
   alias Arbiter.Usage.Event
   alias Arbiter.Usage.Probe
@@ -119,6 +121,116 @@ defmodule Arbiter.Usage.ProbeTest do
     end
   end
 
+  describe "parse/2 with provider: \"codex\"" do
+    # bd-96mn8i: Probe never learned Codex's `exec --json` schema at all — no
+    # clause here recognized `{"type":"turn.completed","usage":{...}}` — so
+    # every codex preflight probe landed a usage-less row regardless of
+    # whether the CLI actually reported tokens. Confirmed live against
+    # installed codex-cli 0.153.4 (`codex exec --json -- "reply with pong"`):
+    # the exact shape below is what the CLI emits on success.
+    test "extracts token counts from codex's turn.completed event" do
+      json =
+        ~s({"type":"turn.completed","usage":{"input_tokens":11734,) <>
+          ~s("cached_input_tokens":8960,"cache_write_input_tokens":0,) <>
+          ~s("output_tokens":5,"reasoning_output_tokens":0}})
+
+      {usage, rest} = Probe.parse([json], "codex")
+
+      assert usage.tokens_in == 11_734
+      assert usage.tokens_out == 5
+      assert usage.cache_read_tokens == 8960
+      assert rest == []
+    end
+
+    test "a 401-shaped token count does not classify as auth_expired" do
+      json =
+        ~s({"type":"turn.completed","usage":{"input_tokens":401,) <>
+          ~s("cached_input_tokens":0,"output_tokens":402,"reasoning_output_tokens":0}})
+
+      {usage, rest} = Probe.parse([json], "codex")
+      assert usage.tokens_in == 401
+      assert rest == []
+      assert Arbiter.Worker.StopReason.classify(0, rest).category == :exited_without_done
+    end
+
+    test "keeps a turn.failed event visible to the classifier" do
+      json = ~s({"type":"turn.failed","error":{"message":"401 invalid authentication"}})
+
+      {usage, rest} = Probe.parse([json], "codex")
+      assert usage == nil
+      assert rest == [json]
+    end
+
+    test "non-turn events (e.g. thread.started) pass through untouched" do
+      json = ~s({"type":"thread.started","thread_id":"01a0"})
+
+      {usage, rest} = Probe.parse([json], "codex")
+      assert usage == nil
+      assert rest == [json]
+    end
+  end
+
+  describe "parse/2 with provider: \"gemini\"" do
+    # bd-96mn8i: Probe's fallback clause read `event["usage"]`, but upstream
+    # (non-agy) gemini's `{"type":"result",...}` payload carries tokens under
+    # `stats`, not `usage` (see `Arbiter.Agents.Gemini.Stream`'s documented,
+    # live-confirmed schema) — so every non-agy gemini probe's tokens read as
+    # nil even on a genuine success.
+    test "extracts token counts from upstream gemini's stats object" do
+      json =
+        ~s({"type":"result","status":"success",) <>
+          ~s("stats":{"input_tokens":500,"output_tokens":80,"cached":100,) <>
+          ~s("duration_ms":2000,"total_tokens":580}})
+
+      {usage, rest} = Probe.parse([json], "gemini")
+
+      assert usage.tokens_in == 500
+      assert usage.tokens_out == 80
+      assert usage.cache_read_tokens == 100
+      assert rest == []
+    end
+
+    test "keeps an error-status upstream gemini result visible to the classifier" do
+      json =
+        ~s({"type":"result","status":"error","stats":{"input_tokens":0,"output_tokens":0}})
+
+      {usage, rest} = Probe.parse([json], "gemini")
+      assert usage == nil
+      assert rest == [json]
+    end
+
+    test "still extracts token counts from agy's result event under provider gemini" do
+      json =
+        ~s({"event":"result","result":{"conversation_id":"conv-g1","status":"SUCCESS",) <>
+          ~s("response":"pong","duration_seconds":0.5,"num_turns":1,) <>
+          ~s("usage":{"input_tokens":900,"output_tokens":30,"thinking_tokens":5,) <>
+          ~s("cache_read_tokens":10,"total_tokens":935}}})
+
+      {usage, rest} = Probe.parse([json], "gemini")
+
+      assert usage.tokens_in == 900
+      assert usage.tokens_out == 30
+      assert rest == []
+    end
+
+    # bd-96mn8i round 2, finding 2: a quota-exhausted agy result still
+    # reports real tokens spent before it failed — that is known spend, not
+    # unknown, so it must be captured even though the line stays visible to
+    # the classifier (it's a real error).
+    test "captures reported tokens from a quota-exhausted agy result while still flagging it as an error" do
+      json =
+        ~s({"event":"result","result":{"conversation_id":"conv-g2","status":"ERROR",) <>
+          ~s("error":"Individual quota reached.","duration_seconds":170.6,) <>
+          ~s("usage":{"input_tokens":70318,"output_tokens":3132,"thinking_tokens":2057,) <>
+          ~s("cache_read_tokens":219472,"total_tokens":73450}}})
+
+      {usage, rest} = Probe.parse([json], "gemini")
+      assert usage.tokens_in == 70_318
+      assert usage.tokens_out == 3132
+      assert rest == [json]
+    end
+  end
+
   describe "record/3" do
     test "writes a probe row attributed to its workspace with real tokens" do
       {usage, _rest} = Probe.parse([@result_json])
@@ -208,6 +320,64 @@ defmodule Arbiter.Usage.ProbeTest do
       assert ev.thinking_tokens == 40
       assert ev.cost_usd == nil
       assert ev.cost_note =~ "no cost"
+    end
+
+    # bd-96mn8i, end to end: `Preflight.check/2` routes through the adapter's
+    # own `provider/0`, so a codex probe now uses the codex-aware decoder
+    # instead of the Claude/agy-only default it fell through to before. The
+    # captured line is verbatim `codex exec --json -- "reply with pong"`
+    # output from installed codex-cli 0.153.4 — not a hand-built fixture.
+    @tag :capture_log
+    test "a codex-shaped preflight probe records non-zero tokens" do
+      codex_turn_completed =
+        ~s({"type":"turn.completed","usage":{"input_tokens":11734,) <>
+          ~s("cached_input_tokens":8960,"cache_write_input_tokens":0,) <>
+          ~s("output_tokens":5,"reasoning_output_tokens":0}})
+
+      assert :ok =
+               Preflight.check(Codex,
+                 probe_command: ["sh", "-c", "echo '#{codex_turn_completed}'; exit 0"],
+                 probe_env: [],
+                 usage_workspace_id: "ws-codex-preflight"
+               )
+
+      [ev] =
+        Event
+        |> Ash.Query.filter(workspace_id == "ws-codex-preflight")
+        |> Ash.read!()
+
+      assert ev.source == :preflight
+      assert ev.provider == "codex"
+      assert ev.tokens_in == 11_734
+      assert ev.tokens_out == 5
+    end
+
+    # bd-96mn8i, end to end: an upstream (non-agy) gemini probe now records
+    # its `stats`-shaped tokens instead of the all-nil row the `usage` key
+    # mismatch produced.
+    @tag :capture_log
+    test "an upstream-gemini-shaped preflight probe records non-zero tokens" do
+      gemini_result =
+        ~s({"type":"result","status":"success",) <>
+          ~s("stats":{"input_tokens":500,"output_tokens":80,"cached":100,) <>
+          ~s("duration_ms":2000,"total_tokens":580}})
+
+      assert :ok =
+               Preflight.check(Gemini,
+                 probe_command: ["sh", "-c", "echo '#{gemini_result}'; exit 0"],
+                 probe_env: [],
+                 usage_workspace_id: "ws-gemini-preflight"
+               )
+
+      [ev] =
+        Event
+        |> Ash.Query.filter(workspace_id == "ws-gemini-preflight")
+        |> Ash.read!()
+
+      assert ev.source == :preflight
+      assert ev.provider == "gemini"
+      assert ev.tokens_in == 500
+      assert ev.tokens_out == 80
     end
   end
 end
