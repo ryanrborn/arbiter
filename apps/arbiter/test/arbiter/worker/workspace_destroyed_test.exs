@@ -191,6 +191,50 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
     end
   end
 
+  describe "a destroyed origin repo, worktree intact" do
+    test "is reported as the repo checkout, not the worktree",
+         %{ws: ws, task: task, branch: branch, worktree: worktree} do
+      repo =
+        Path.join(
+          Arbiter.Config.Paths.scratch_root(),
+          "wd-repo-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(repo)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          meta: %{
+            issue_type: :feature,
+            branch: branch,
+            target_branch: "main",
+            worktree_path: worktree,
+            repo_path: repo
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+
+      # Only the repo/origin side goes — cr-ag13cz's shape, where the bare
+      # origin was co-located with the worktree and both were lost. The
+      # worktree is still there, so the failure must name the repo.
+      File.rm_rf!(repo)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.stop_reason.category == :workspace_destroyed
+      assert snap.meta.failure_reason =~ "repo checkout"
+      assert snap.meta.failure_reason =~ repo
+      assert File.dir?(worktree)
+    end
+  end
+
   describe "subprocess stop with a destroyed workspace" do
     test "is classified :workspace_destroyed rather than resumed or :crashed",
          %{ws: ws, task: task, branch: branch, worktree: worktree} do
