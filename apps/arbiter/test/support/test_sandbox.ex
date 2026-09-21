@@ -131,6 +131,19 @@ defmodule Arbiter.TestSandbox do
   end
 
   @doc """
+  Adopt every worker the registry currently reports as an owner of `sandbox`.
+
+  The escape hatch for tests that dispatch workers without ever holding their
+  pids. Register it with `on_exit/1` **after** `provision!/2` so it runs
+  *before* the teardown that call registered (`on_exit` is LIFO): the live
+  workers are adopted, then stopped, then the sandbox is deleted.
+  """
+  @spec own_live_workers!(t()) :: :ok
+  def own_live_workers!(sandbox) do
+    Enum.each(Arbiter.Worker.Registry.all(), fn {_key, pid} -> own!(sandbox, pid) end)
+  end
+
+  @doc """
   Create `branch` in the sandbox repo with one commit and push it to the
   origin, the way a worker's first commit would.
   """
