@@ -168,6 +168,14 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
       assert escalation
       assert escalation.body =~ "workspace"
       assert escalation.body =~ worktree
+      assert escalation.subject =~ "workspace destroyed mid-run"
+
+      # The generic stopped-worker page offers "resume … from the preserved
+      # worktree". There is no preserved worktree here — that hint would send
+      # the operator (or an auto-resume) into a directory that is gone.
+      refute escalation.body =~ "preserved worktree"
+      refute escalation.body =~ "arb worker resume"
+      assert escalation.body =~ "unrecoverable"
     end
 
     test "an intact workspace is not reported as destroyed",
