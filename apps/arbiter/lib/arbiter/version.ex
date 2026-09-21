@@ -14,12 +14,12 @@ defmodule Arbiter.Version do
 
   # Compile-time version as fallback for release builds without git at runtime
   @app_version_compiled (case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
-                              cd: @git_dir_root,
-                              stderr_to_stdout: true
-                            ) do
-                         {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
-                         _ -> Mix.Project.config()[:version]
-                       end)
+                                cd: @git_dir_root,
+                                stderr_to_stdout: true
+                              ) do
+                           {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+                           _ -> Mix.Project.config()[:version]
+                         end)
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
   # Without these @external_resource declarations Mix considers this file
