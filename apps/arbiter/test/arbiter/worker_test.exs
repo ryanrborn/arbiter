@@ -377,6 +377,25 @@ defmodule Arbiter.WorkerTest do
       end
     end
 
+    # bd-45tkhq: raising the probe budget only narrows the window a live
+    # worker can miss it in — it does not remove the window. A worker that is
+    # still alive but does not answer :snapshot even within the new (5s)
+    # budget must degrade rather than vanish, the same way `active_sibling/2`
+    # treats an unresponsive-but-alive sibling as busy, not gone.
+    test "a live worker that never answers :snapshot is degraded, not dropped" do
+      {pid, task_id} = start_worker()
+      :sys.suspend(pid)
+
+      try do
+        [entry] = Worker.list_children() |> Enum.filter(&(&1.task_id == task_id))
+        assert entry.status == :unknown
+        assert entry.meta.stale_probe == true
+        assert entry.pid == pid
+      after
+        :sys.resume(pid)
+      end
+    end
+
     # Mirrors the second observation in bd-45tkhq: the worker had already
     # been through `worker_stop` + `worker_resume` (which, at the `Worker`
     # level, is `stop/2` followed by a fresh `start/1` under the same

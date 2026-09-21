@@ -4442,6 +4442,42 @@ defmodule Arbiter.MCP.ToolsTest do
       assert entry.repo == "test/repo"
     end
 
+    # bd-45tkhq: closes the loop the CLI-level `Worker.list_children/0` tests
+    # (worker_test.exs) don't — those pin the underlying supervisor sweep, but
+    # nothing asserted that a *resumed* worker actually survives up through
+    # `Tools.worker_list/2`, the layer the acceptance criterion names. This
+    # dispatches, stops, and restarts under the same task_id (the `Worker`-
+    # level shape of `worker_resume`), then suspends the resumed process past
+    # the original 500ms probe budget before calling worker_list — the exact
+    # scenario the incident's second observation hit.
+    test "a resumed worker suspended past the old snapshot budget still appears", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "resumed worker target", workspace_id: ctx.ws.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      ref = Process.monitor(pid)
+      :ok = Worker.stop(task.id, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, resumed_pid} =
+        Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      on_exit(fn -> Process.alive?(resumed_pid) && Worker.stop(task.id, :normal) end)
+
+      :sys.suspend(resumed_pid)
+
+      spawn(fn ->
+        Process.sleep(700)
+        :sys.resume(resumed_pid)
+      end)
+
+      try do
+        assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+        assert Enum.any?(workers, &(&1.task_id == task.id))
+      after
+        Process.alive?(resumed_pid) && :sys.resume(resumed_pid)
+      end
+    end
+
     test "does not include workers from another workspace", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "pl-other", prefix: "plo"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign pc", workspace_id: other_ws.id})

@@ -111,6 +111,7 @@ defmodule Arbiter.Worker do
 
   use GenServer
 
+  require Ash.Query
   require Logger
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
@@ -604,7 +605,11 @@ defmodule Arbiter.Worker do
 
   @doc """
   Return a list of active worker snapshots — one entry per child under
-  `Arbiter.Worker.Supervisor`. Crashed / stopped workers are omitted.
+  `Arbiter.Worker.Supervisor`. Only actually-crashed/stopped workers are
+  omitted; a live worker that is too busy or wedged to answer `:snapshot`
+  within the probe timeout is still included, degraded to `status: :unknown`
+  and `meta.stale_probe: true`, sourced from its registry key and latest
+  `Arbiter.Workers.Run` row instead of its in-memory state (bd-45tkhq).
 
   Each entry is the same snapshot map `state/1` returns (task_id,
   workspace_id, repo, current_step, status, started_at, step_started_at,
@@ -612,22 +617,93 @@ defmodule Arbiter.Worker do
   """
   @spec list_children() :: [map()]
   def list_children do
+    registry_key_by_pid = Map.new(PRegistry.all(), fn {key, pid} -> {pid, key} end)
+
     Arbiter.Worker.Supervisor
     |> DynamicSupervisor.which_children()
-    |> Enum.flat_map(fn
-      # Only actual workers answer :snapshot. Other children of this supervisor
-      # — notably an Arbiter.Worker.ReviewGate review gate — must NOT be probed:
-      # calling :snapshot on them crashes them and strands the author. Match
-      # strictly on the Worker module. See bd-2y0gd5.
-      {_id, pid, :worker, [__MODULE__]} when is_pid(pid) ->
-        case Process.alive?(pid) && safe_snapshot(pid) do
-          %{} = snap -> [Map.put(snap, :pid, pid)]
-          _ -> []
-        end
+    |> Task.async_stream(
+      fn
+        # Only actual workers answer :snapshot. Other children of this supervisor
+        # — notably an Arbiter.Worker.ReviewGate review gate — must NOT be probed:
+        # calling :snapshot on them crashes them and strands the author. Match
+        # strictly on the Worker module. See bd-2y0gd5.
+        {_id, pid, :worker, [__MODULE__]} when is_pid(pid) ->
+          if Process.alive?(pid) do
+            case safe_snapshot(pid) do
+              %{} = snap -> [Map.put(snap, :pid, pid)]
+              _ -> degraded_snapshot(pid, Map.get(registry_key_by_pid, pid))
+            end
+          else
+            []
+          end
 
-      _ ->
-        []
-    end)
+        _ ->
+          []
+      end,
+      timeout: :infinity,
+      max_concurrency: max(System.schedulers_online() * 4, 8),
+      ordered: false
+    )
+    |> Enum.flat_map(fn {:ok, entries} -> entries end)
+  end
+
+  # bd-45tkhq: a worker that misses the `:snapshot` probe is still `alive?` —
+  # it is busy or wedged, not gone, exactly the distinction
+  # `active_sibling/2` above already draws for the concurrent-start guard.
+  # Rather than dropping it (which is what caused the incident: a genuinely
+  # running worker read as "does not exist" by `worker_list`), fall back to
+  # its durable `Arbiter.Workers.Run` row — the same source `worker_show`
+  # falls back to for a worker that has *actually* exited
+  # (`worker_show_historical/2`) — and surface it as `status: :unknown` so
+  # callers can tell a confirmed-live worker from a probe timeout without
+  # losing the worker from the list entirely.
+  defp degraded_snapshot(_pid, nil), do: []
+
+  defp degraded_snapshot(pid, registry_key) do
+    case latest_run(registry_key) do
+      %Arbiter.Workers.Run{} = run ->
+        [
+          %{
+            pid: pid,
+            registry_key: registry_key,
+            task_id: run.task_id,
+            workspace_id: run.workspace_id,
+            repo: run.repo,
+            current_step: nil,
+            status: :unknown,
+            started_at: run.started_at,
+            step_started_at: nil,
+            meta: %{stale_probe: true}
+          }
+        ]
+
+      nil ->
+        [
+          %{
+            pid: pid,
+            registry_key: registry_key,
+            task_id: registry_key,
+            workspace_id: nil,
+            repo: nil,
+            current_step: nil,
+            status: :unknown,
+            started_at: nil,
+            step_started_at: nil,
+            meta: %{stale_probe: true}
+          }
+        ]
+    end
+  end
+
+  defp latest_run(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
   end
 
   # bd-45tkhq: this used to give a live worker only 500ms to answer
@@ -640,6 +716,9 @@ defmodule Arbiter.Worker do
   # those correctly reported the worker as running at the same instant this
   # reported none. Match `state/1`'s effective (default) `GenServer.call/2`
   # timeout so a busy-but-alive worker gets the same benefit of the doubt.
+  # Any worker that still hasn't answered by then is no longer just "busy" —
+  # `degraded_snapshot/2` above is what keeps it visible past this point
+  # rather than silently vanishing.
   defp safe_snapshot(pid) do
     GenServer.call(pid, :snapshot, 5_000)
   rescue
