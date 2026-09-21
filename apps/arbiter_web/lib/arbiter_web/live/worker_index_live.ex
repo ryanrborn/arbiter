@@ -69,7 +69,15 @@ defmodule ArbiterWeb.WorkerIndexLive do
         Map.put(p, :workspace_name, workspace_name(workspaces_by_id, p.workspace_id))
       end)
       |> Enum.filter(&matches_status?(&1, socket.assigns.status))
-      |> Enum.sort_by(& &1.started_at, {:asc, DateTime})
+      # bd-45tkhq: a degraded (stale-probe) entry can carry a nil
+      # `started_at` when it has no matching Run row; DateTime.compare/2
+      # has no nil clause, so sort nils last instead of crashing.
+      |> Enum.sort_by(& &1.started_at, fn
+        nil, nil -> true
+        nil, _ -> false
+        _, nil -> true
+        a, b -> DateTime.compare(a, b) != :gt
+      end)
 
     result = Paging.paginate_list(all, socket.assigns.page)
 

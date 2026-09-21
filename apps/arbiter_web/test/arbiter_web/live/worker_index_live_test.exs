@@ -127,4 +127,34 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     # When CI is running, should show "Open · CI running"
     assert html =~ "Open · CI running"
   end
+
+  # bd-45tkhq round 2: a wedged worker whose registry key has no matching
+  # `Arbiter.Workers.Run` row degrades to `started_at: nil` (Worker.worker_test.exs
+  # covers the degrade path itself). `refresh/1`'s `Enum.sort_by(&1.started_at,
+  # {:asc, DateTime})` had no nil clause and crashed the whole page on every
+  # `:worker_lifecycle` refresh once such an entry existed, alongside a normal
+  # worker with a real `started_at`.
+  test "a degraded entry with nil started_at does not crash the page", %{conn: conn, ws: ws} do
+    {:ok, task} = Ash.create(Issue, %{title: "normal-worker", workspace_id: ws.id})
+    {:ok, _normal_pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+
+    orphan_task_id = "gte-orphan-#{System.unique_integer([:positive])}"
+
+    {:ok, wedged_pid} =
+      Worker.start(
+        task_id: orphan_task_id,
+        repo: "test/repo",
+        workspace_id: ws.id,
+        registry_key: "unmatched-registry-key-#{System.unique_integer([:positive])}"
+      )
+
+    :sys.suspend(wedged_pid)
+
+    try do
+      {:ok, _view, html} = live(conn, ~p"/workers")
+      assert html =~ task.id
+    after
+      :sys.resume(wedged_pid)
+    end
+  end
 end

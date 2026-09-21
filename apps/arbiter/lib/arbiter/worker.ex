@@ -644,7 +644,10 @@ defmodule Arbiter.Worker do
       max_concurrency: max(System.schedulers_online() * 4, 8),
       ordered: false
     )
-    |> Enum.flat_map(fn {:ok, entries} -> entries end)
+    |> Enum.flat_map(fn
+      {:ok, entries} -> entries
+      {:exit, _reason} -> []
+    end)
   end
 
   # bd-45tkhq: a worker that misses the `:snapshot` probe is still `alive?` —
@@ -660,7 +663,15 @@ defmodule Arbiter.Worker do
   defp degraded_snapshot(_pid, nil), do: []
 
   defp degraded_snapshot(pid, registry_key) do
-    case latest_run(registry_key) do
+    # bd-45tkhq: a merge-queue subordinate pass (FixPassDispatcher,
+    # ConflictResolver) registers under `<task_id>:fixpass` / `<task_id>:conflict`
+    # while its `Arbiter.Workers.Run` row is keyed on the plain `task_id`
+    # (see record_run_started/1 below). Strip only a `:`-suffix so the run
+    # lookup still finds it — a review-gate `#`-id genuinely *is* the
+    # worker's own `task_id` and must not be touched.
+    task_id = registry_key |> String.split(":", parts: 2) |> List.first()
+
+    case latest_run(task_id) do
       %Arbiter.Workers.Run{} = run ->
         [
           %{
@@ -682,7 +693,7 @@ defmodule Arbiter.Worker do
           %{
             pid: pid,
             registry_key: registry_key,
-            task_id: registry_key,
+            task_id: task_id,
             workspace_id: nil,
             repo: nil,
             current_step: nil,
@@ -704,6 +715,8 @@ defmodule Arbiter.Worker do
     |> List.first()
   rescue
     _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   # bd-45tkhq: this used to give a live worker only 500ms to answer

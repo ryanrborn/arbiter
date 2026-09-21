@@ -423,6 +423,45 @@ defmodule Arbiter.WorkerTest do
         :sys.resume(resumed_pid)
       end
     end
+
+    # bd-45tkhq round 2: a merge-queue subordinate pass (FixPassDispatcher,
+    # ConflictResolver) registers under `<task_id>:fixpass` / `<task_id>:conflict`
+    # while its durable Arbiter.Workers.Run row is keyed on the plain
+    # `task_id`. degraded_snapshot/2 must strip the suffix before looking up
+    # the run, or it falls into the no-run branch: workspace_id: nil, which
+    # Tools.worker_list/2's workspace filter then silently drops — the exact
+    # "live worker invisible" bug this ticket exists to fix, relocated to
+    # subordinate workers.
+    test "a wedged subordinate (suffixed registry key) still resolves the primary task's run" do
+      # This module otherwise avoids the DB (see the plain `ExUnit.Case`
+      # above), but this case needs `record_run_started/1`'s write to
+      # actually land so `degraded_snapshot/2` has a Run row to resolve.
+      # Shared mode so the separately-spawned Worker GenServer can use the
+      # connection too.
+      owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: true)
+      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(owner) end)
+
+      task_id = new_task_id()
+
+      {pid, ^task_id} =
+        start_worker(
+          task_id: task_id,
+          workspace_id: "ws-probe",
+          registry_key: task_id <> ":fixpass"
+        )
+
+      :sys.suspend(pid)
+
+      try do
+        [entry] = Worker.list_children() |> Enum.filter(&(&1.pid == pid))
+        assert entry.registry_key == task_id <> ":fixpass"
+        assert entry.task_id == task_id
+        assert entry.workspace_id == "ws-probe"
+        assert entry.status == :unknown
+      after
+        :sys.resume(pid)
+      end
+    end
   end
 
   describe "provider/1" do
