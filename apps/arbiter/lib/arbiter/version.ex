@@ -5,17 +5,26 @@ defmodule Arbiter.Version do
   All fields are captured at compile time, so any deployed Arbiter instance
   carries an exact record of what it was built from.
 
-  `.git/HEAD` and the branch ref it points to are declared as
+  `.git/HEAD`, the branch ref it points to, and git tags are declared as
   `@external_resource` so Mix recompiles this module — and re-captures the
-  SHA — whenever `git pull` moves the branch tip to a new commit.
+  version and SHA — whenever `git pull` moves the branch tip or updates tags.
   """
 
-  @app_version Mix.Project.config()[:version]
+  @git_dir_root Path.expand("../../../../", __DIR__)
+
+  # Compute version from git tags, falling back to mix.exs value if git is unavailable
+  @app_version (case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
+                         cd: @git_dir_root,
+                         stderr_to_stdout: true
+                       ) do
+                  {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+                  _ -> Mix.Project.config()[:version]
+                end)
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
   # Without these @external_resource declarations Mix considers this file
-  # unchanged after a pull and skips recompilation, leaving @git_sha frozen
-  # at the pre-pull commit.
+  # unchanged after a pull and skips recompilation, leaving @git_sha and
+  # @app_version frozen at pre-pull values.
   #
   # `Path.join(project_root, ".git")` only resolves the real git-dir for a
   # plain clone. In a `git worktree` checkout (how every Arbiter worker
@@ -27,7 +36,6 @@ defmodule Arbiter.Version do
   # stamped with whatever commit was checked out when this module last
   # compiled. Asking git itself for `--git-dir` / `--git-common-dir` resolves
   # correctly in both a plain clone and a worktree.
-  @git_dir_root Path.expand("../../../../", __DIR__)
 
   @git_dir (case System.cmd("git", ["rev-parse", "--path-format=absolute", "--git-dir"],
                    cd: @git_dir_root,
@@ -97,12 +105,16 @@ defmodule Arbiter.Version do
   In release builds without git at runtime, returns the compile-time SHA.
   """
   def git_sha do
-    case System.cmd("git", ["rev-parse", "--short", "HEAD"],
-           cd: @git_dir_root,
-           stderr_to_stdout: true
-         ) do
-      {sha, 0} -> String.trim(sha)
-      _ -> @git_sha
+    try do
+      case System.cmd("git", ["rev-parse", "--short", "HEAD"],
+             cd: @git_dir_root,
+             stderr_to_stdout: true
+           ) do
+        {sha, 0} -> String.trim(sha)
+        _ -> @git_sha
+      end
+    rescue
+      _error -> @git_sha
     end
   end
 

@@ -10,18 +10,25 @@ defmodule ArbiterCli.Version do
   SHA — whenever `git pull` moves the branch tip to a new commit.
   """
 
-  @app_version (case System.get_env("RELEASE_VERSION") do
+  @release_version System.get_env("RELEASE_VERSION")
+
+  @git_version_result System.cmd("git", ["describe", "--tags", "--abbrev=0"], stderr_to_stdout: true)
+
+  @app_version (case @release_version do
                   v when is_binary(v) and byte_size(v) > 0 ->
                     v |> String.trim() |> String.trim_leading("v")
 
                   _ ->
-                    case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
-                           stderr_to_stdout: true
-                         ) do
+                    case @git_version_result do
                       {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
                       _ -> "0.0.0"
                     end
                 end)
+
+  # True if the CLI was built from source (git was available at build time),
+  # false if it's a release build or git was unavailable at build time.
+  @git_available (@release_version == nil and
+                    match?({_tag, 0}, @git_version_result))
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
   @git_dir Path.expand("../../../../", __DIR__) |> Path.join(".git")
@@ -72,4 +79,12 @@ defmodule ArbiterCli.Version do
 
   @doc "True when the working tree was dirty at build time."
   def dirty?, do: @git_dirty
+
+  @doc """
+  True when the CLI binary was built from a source checkout (dev install),
+  not from a release build or fallback. Used to determine whether version
+  mismatches should suggest restarting the server or reinstalling from a
+  release asset.
+  """
+  def dev_build?, do: @git_available
 end

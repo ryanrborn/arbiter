@@ -198,14 +198,11 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
-  # True if the CLI is running from a source checkout (has access to git).
+  # True if the CLI was built from a source checkout (has git available at build time).
   # A dev/source install's version mismatch hint should point to the stale
   # compile-time value, not to reinstalling from a release asset.
   defp dev_install? do
-    case System.cmd("git", ["describe"], stderr_to_stdout: true) do
-      {_output, 0} -> true
-      _ -> false
-    end
+    ArbiterCli.Version.dev_build?()
   end
 
   # `fatal: true` — this is still an operator-actionable misconfiguration
