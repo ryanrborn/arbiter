@@ -476,7 +476,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       episode: {:task, :review_id, :round},
       terminal: :parked,
       sites: [
-        {ReviewGate, :commit_gate_outcome, 2},
+        {ReviewGate, :commit_gate_outcome, 3},
         {ReviewGate, :finish_revise, 1},
         {ReviewGate, :nudge_uncommitted_implementer, 1}
       ],
@@ -496,7 +496,9 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {ReviewGate, :escalate_no_changes, 1}
       ],
       anchors: ["@commit_gate_no_changes_marker", "@commit_gate_uncommitted_marker"],
-      summary: "the three commit-gate escalation shapes"
+      summary:
+        "the commit-gate escalation shapes (uncommitted, no changes, " <>
+          "approval-gap no-op, and a non-file fix stalled twice in a row)"
     },
     %{
       id: :reviewed_sha_stamp,

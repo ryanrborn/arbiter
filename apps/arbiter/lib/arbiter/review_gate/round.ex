@@ -108,6 +108,18 @@ defmodule Arbiter.ReviewGate.Round do
                           `:escalated_no_changes` — HEAD unchanged and the
                           worktree was clean (no code change at all);
                           escalated instead of re-reviewing an identical diff.
+                          `:advanced_non_file_fix` — bd-cb7wpq: HEAD unchanged,
+                          worktree clean, but the implementer explicitly
+                          declared every finding resolved through something
+                          other than a file change (see
+                          `non_file_fix_declared?/1`) — dispatched to the next
+                          reviewer, which re-checks the live PR for real,
+                          instead of escalating a worker that did nothing.
+                          `:escalated_no_changes_after_non_file_fix` — the
+                          SAME thing happened twice in a row with nothing to
+                          show for either: escalated, with a park reason that
+                          reads as "resolved out of band, still stalled" rather
+                          than a generic idle-worker no-changes failure.
                           Nil for a round whose HEAD advanced normally, for a
                           round with no worktree to check, and for every
                           `:review` row.
@@ -131,7 +143,8 @@ defmodule Arbiter.ReviewGate.Round do
 
   @roles ~w(review impl)a
   @verdicts ~w(approve request_changes timed_out)a
-  @commit_gates ~w(reprompted escalated_uncommitted escalated_no_changes)a
+  @commit_gates ~w(reprompted escalated_uncommitted escalated_no_changes
+                   advanced_non_file_fix escalated_no_changes_after_non_file_fix)a
 
   sqlite do
     table "review_gate_rounds"
