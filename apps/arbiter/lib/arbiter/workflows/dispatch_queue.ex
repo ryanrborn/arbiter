@@ -384,6 +384,10 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # it would drain on Anthropic's headroom (or never drain at all, since a
     # Codex-only install has no Anthropic snapshot).
     snapshots = provider_snapshots(state)
+    # P7 (§4.2): the gate's thresholds resolve `min(account, workspace)`, so
+    # the drain re-check has to hand it the same account `Dispatch` does or a
+    # held intent could drain on a ceiling the dispatcher would re-hold at.
+    accounts = provider_accounts(state)
     gate = Arbiter.Quota.gate_for_workspace(state.workspace)
 
     # Partition (fast: a pure gate check per item) into those the gate still
@@ -395,9 +399,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
       eligible
       |> Enum.sort_by(&queue_order_key/1)
       |> Enum.split_with(fn item ->
-        quota = Map.get(snapshots, item_provider(item))
+        provider = item_provider(item)
+        quota = Map.get(snapshots, provider)
+        gate_opts = [account: Map.get(accounts, provider)]
 
-        case gate.check(nil, quota, state.workspace, []) do
+        case gate.check(nil, quota, state.workspace, gate_opts) do
           {:hold, _} -> false
           _allow_or_overage -> true
         end
@@ -578,6 +584,21 @@ defmodule Arbiter.Workflows.DispatchQueue do
     |> Enum.map(&item_provider/1)
     |> Enum.uniq()
     |> Map.new(&{&1, safe_latest(state, &1)})
+  end
+
+  defp provider_accounts(%State{items: items} = state) do
+    items
+    |> Enum.map(&item_provider/1)
+    |> Enum.uniq()
+    |> Map.new(&{&1, safe_account(state, &1)})
+  end
+
+  defp safe_account(%State{workspace_id: ws_id}, provider) do
+    Arbiter.Accounts.Resolver.get(Arbiter.Quota.account_id(ws_id, provider))
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp safe_latest(%State{quota_reader: reader, workspace_id: ws_id}, provider) do

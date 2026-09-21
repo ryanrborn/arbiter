@@ -45,10 +45,12 @@ defmodule Arbiter.Quota.Gate do
   deadlocks on missing quota data.
   """
 
+  alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
+  @default_throttle_threshold 0.85
   @default_weekly_threshold 0.90
 
   # Staleness thresholds, per `capture_source` — see
@@ -90,6 +92,25 @@ defmodule Arbiter.Quota.Gate do
   """
   @type quota_source :: struct() | nil
 
+  @typedoc """
+  Whose gate settings a threshold resolves against (P7, `§4.2`).
+
+  Since the quota snapshot is the *account's*, so is the default threshold:
+  `{account, workspace}` resolves each setting `min(account, workspace)` —
+  the account's number is a floor nobody can raise, and a workspace may only
+  tighten it. This is how an operator expresses priority between workspaces
+  sharing one budget ("`vstim` stops at 70% so `default` can run to 90%").
+
+  A bare `Workspace` (or `nil`) is still accepted and resolves workspace-only,
+  which is exactly pre-P7 behaviour for the surfaces whose own re-key is a
+  later phase.
+  """
+  @type policy ::
+          Workspace.t()
+          | ProviderAccount.t()
+          | {ProviderAccount.t() | nil, Workspace.t() | nil}
+          | nil
+
   @callback check(
               task :: Issue.t() | nil,
               quota :: quota_source(),
@@ -100,22 +121,33 @@ defmodule Arbiter.Quota.Gate do
   @doc """
   The configured `utilization_5h` at/above which the throttle gate holds.
 
-  Reads the global `:arbiter, :quota` `:throttle_threshold` app-env, defaulting
-  to `0.85` (Ryan's hand-enforced ceiling, between the dashboard's 0.7/0.9
-  bands). A per-workspace `config["quota"]["throttle_threshold"]` overrides it.
+  Resolved `min(account, workspace)` (P7, §4.2) — see `t:policy/0`. The
+  account's `quota_config["throttle_threshold"]` is the default and a hard
+  floor; a workspace's `config["quota"]["throttle_threshold"]` may only
+  tighten it. With no account setting, the historical chain applies:
+  workspace override, then the global `:arbiter, :quota`
+  `:throttle_threshold` app-env, then `0.85` (Ryan's hand-enforced ceiling,
+  between the dashboard's 0.7/0.9 bands).
   """
-  @spec threshold(Workspace.t() | nil) :: float()
-  def threshold(workspace \\ nil) do
-    ws_fraction(workspace, "throttle_threshold") || global_fraction(:throttle_threshold) || 0.85
+  @spec threshold(policy()) :: float()
+  def threshold(policy \\ nil) do
+    {account, workspace} = split_policy(policy)
+
+    strictest(
+      account_fraction(account, "throttle_threshold"),
+      ws_fraction(workspace, "throttle_threshold")
+    ) || global_fraction(:throttle_threshold) || @default_throttle_threshold
   end
 
   @doc """
   The configured long-window (`utilization_7d` / Codex weekly) utilization at or
   above which the throttle gate holds (bd-1tuxv8).
 
-  Reads the global `:arbiter, :quota` `:weekly_threshold` app-env, overridable
-  per-workspace via `config["quota"]["weekly_threshold"]`, defaulting to
-  `#{@default_weekly_threshold}`.
+  Resolved `min(account, workspace)` exactly as `threshold/1` (P7, §4.2):
+  the account's `quota_config["weekly_threshold"]` is the floor, the
+  workspace's `config["quota"]["weekly_threshold"]` may only tighten it, and
+  with neither set the global `:arbiter, :quota` `:weekly_threshold` app-env
+  applies, defaulting to `#{@default_weekly_threshold}`.
 
   The default sits **above** the 5h ceiling (`0.85`) on purpose: the weekly
   window resets at most once a week, so holding early parks the whole fleet for
@@ -123,10 +155,14 @@ defmodule Arbiter.Quota.Gate do
   10% reserve for whatever the operator most wants to spend it on while still
   stopping Autopilot from burning the tail of the week in an afternoon.
   """
-  @spec weekly_threshold(Workspace.t() | nil) :: float()
-  def weekly_threshold(workspace \\ nil) do
-    ws_fraction(workspace, "weekly_threshold") || global_fraction(:weekly_threshold) ||
-      @default_weekly_threshold
+  @spec weekly_threshold(policy()) :: float()
+  def weekly_threshold(policy \\ nil) do
+    {account, workspace} = split_policy(policy)
+
+    strictest(
+      account_fraction(account, "weekly_threshold"),
+      ws_fraction(workspace, "weekly_threshold")
+    ) || global_fraction(:weekly_threshold) || @default_weekly_threshold
   end
 
   @doc """
@@ -143,17 +179,62 @@ defmodule Arbiter.Quota.Gate do
   the exact "fleet stops for days" failure the ticket warns against. Installs
   that would rather stop early can opt in.
 
-  Reads `config["quota"]["weekly_warning_policy"]`, then the global
-  `:arbiter, :quota` `:weekly_warning_policy` app-env.
+  Reads the account's `quota_config["weekly_warning_policy"]` and the
+  workspace's `config["quota"]["weekly_warning_policy"]`, then the global
+  `:arbiter, :quota` `:weekly_warning_policy` app-env. Same "never looser"
+  rule as the thresholds (P7, §4.2): `:hold` is the stricter value, so if
+  *either* side asks for it, it wins — a workspace can tighten the account's
+  `:ignore` to `:hold`, but cannot relax the account's `:hold`.
   """
-  @spec weekly_warning_policy(Workspace.t() | nil) :: :ignore | :hold
-  def weekly_warning_policy(workspace \\ nil) do
-    ws_policy(workspace) || global_policy() || :ignore
+  @spec weekly_warning_policy(policy()) :: :ignore | :hold
+  def weekly_warning_policy(policy \\ nil) do
+    {account, workspace} = split_policy(policy)
+    account_p = account_policy(account)
+    ws_p = ws_policy(workspace)
+
+    if :hold in [account_p, ws_p] do
+      :hold
+    else
+      account_p || ws_p || global_policy() || :ignore
+    end
   end
 
   @doc "Valid `quota.weekly_warning_policy` value strings."
   @spec weekly_warning_policies() :: [String.t()]
   def weekly_warning_policies, do: @weekly_warning_policies
+
+  # ---- policy resolution: min(account, workspace) (P7, §4.2) -------------
+
+  # The account is the floor and the workspace may only tighten it, so the
+  # effective value is whichever of the two is present and smaller. `nil` when
+  # neither side configured anything — the caller then falls through to the
+  # global app-env and the built-in default, which is what a pre-P7 install
+  # (no accounts, no `quota_config`) keeps getting.
+  defp strictest(nil, nil), do: nil
+  defp strictest(nil, ws), do: ws
+  defp strictest(account, nil), do: account
+  defp strictest(account, ws), do: min(account, ws)
+
+  # `{account, workspace}` is the P7 shape. A bare workspace (or anything
+  # else that is not a `ProviderAccount`) still resolves workspace-only, so
+  # every pre-P7 call site — the board, `arb quota`, the `Gate` callbacks —
+  # keeps working unchanged while their own re-key lands.
+  defp split_policy({account, workspace}), do: {account, workspace}
+  defp split_policy(%ProviderAccount{} = account), do: {account, nil}
+  defp split_policy(workspace), do: {nil, workspace}
+
+  # The account's gate settings live flat in `quota_config` (§3.1), not
+  # nested under a "quota" key the way the workspace's do.
+  defp account_fraction(account, key) do
+    account |> account_config() |> Map.get(key) |> parse_fraction()
+  end
+
+  defp account_policy(account) do
+    account |> account_config() |> Map.get("weekly_warning_policy") |> parse_policy()
+  end
+
+  defp account_config(%{quota_config: config}) when is_map(config), do: config
+  defp account_config(_), do: %{}
 
   # Both thresholds are 0..1 fractions and may arrive as a number or its JSON
   # string form (the workspace config UI posts strings).
@@ -378,8 +459,8 @@ defmodule Arbiter.Quota.Gate do
   open, a stale **long** window stays held. Shared by both gate
   implementations.
   """
-  @spec over_cap?(quota_source(), Workspace.t() | nil) :: boolean()
-  def over_cap?(quota, workspace), do: gating_window(quota, workspace) != nil
+  @spec over_cap?(quota_source(), policy()) :: boolean()
+  def over_cap?(quota, policy), do: gating_window(quota, policy) != nil
 
   @doc """
   Which window, if any, is currently gating dispatch — and why (bd-1tuxv8).
@@ -411,26 +492,34 @@ defmodule Arbiter.Quota.Gate do
   it far from exhaustion, and treating it like a reject would hold the fleet for
   the remainder of the week. A genuine long-window reject always holds (rule 2).
   """
-  @spec gating_window(quota_source(), Workspace.t() | nil) :: binding_window() | nil
-  def gating_window(quota, workspace), do: gating_window(quota, workspace, [])
+  @spec gating_window(quota_source(), policy()) :: binding_window() | nil
+  def gating_window(quota, policy), do: gating_window(quota, policy, [])
 
   @doc """
   Same as `gating_window/2`, but forwards `opts` to `Snapshot.normalize/2` —
   in particular `opts[:model]`, which picks the correct Antigravity sub-bucket
   (bd-7qj58o AC4) when `quota` is an `"antigravity"` `GoogleQuota` row.
   """
-  @spec gating_window(quota_source(), Workspace.t() | nil, keyword()) :: binding_window() | nil
-  def gating_window(quota, workspace, opts) do
+  @spec gating_window(quota_source(), policy(), keyword()) :: binding_window() | nil
+  def gating_window(quota, policy, opts) do
     case Snapshot.normalize(quota, opts) do
       nil ->
         nil
 
       %Snapshot{} = snapshot ->
-        binding(snapshot, workspace)
+        binding(snapshot, merge_account(policy, Keyword.get(opts, :account)))
     end
   end
 
-  defp binding(%Snapshot{} = s, workspace) do
+  # `opts[:account]` is how a caller that still passes a bare workspace — the
+  # `Arbiter.Quota.Gate` `check/4` implementations, whose own signature is
+  # untouched — supplies the account half of the policy.
+  defp merge_account(policy, nil), do: policy
+  defp merge_account({_account, workspace}, account), do: {account, workspace}
+  defp merge_account(%ProviderAccount{}, account), do: {account, nil}
+  defp merge_account(workspace, account), do: {account, workspace}
+
+  defp binding(%Snapshot{} = s, policy) do
     primary? = not snapshot_stale?(s)
     long? = not snapshot_long_stale?(s)
 
@@ -442,10 +531,10 @@ defmodule Arbiter.Quota.Gate do
       {long?, &secondary_warning_binding/3}
     ]
     |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
-    |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, workspace, nil) end)
+    |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, policy, nil) end)
   end
 
-  defp primary_status_binding(%Snapshot{} = s, _ws, _acc) do
+  defp primary_status_binding(%Snapshot{} = s, _policy, _acc) do
     if status_not_allowed?(s.status) do
       %{
         provider: s.provider,
@@ -458,7 +547,7 @@ defmodule Arbiter.Quota.Gate do
     end
   end
 
-  defp secondary_status_binding(%Snapshot{} = s, _ws, _acc) do
+  defp secondary_status_binding(%Snapshot{} = s, _policy, _acc) do
     if secondary_rejected?(s.secondary_status) do
       %{
         provider: s.provider,
@@ -471,8 +560,8 @@ defmodule Arbiter.Quota.Gate do
     end
   end
 
-  defp primary_utilization_binding(%Snapshot{} = s, ws, _acc) do
-    t = threshold(ws)
+  defp primary_utilization_binding(%Snapshot{} = s, policy, _acc) do
+    t = threshold(policy)
 
     if utilization_over?(s.utilization, t) do
       %{
@@ -486,8 +575,8 @@ defmodule Arbiter.Quota.Gate do
     end
   end
 
-  defp secondary_utilization_binding(%Snapshot{} = s, ws, _acc) do
-    t = weekly_threshold(ws)
+  defp secondary_utilization_binding(%Snapshot{} = s, policy, _acc) do
+    t = weekly_threshold(policy)
 
     if s.secondary_window_label && utilization_over?(s.secondary_utilization, t) do
       %{
@@ -501,15 +590,15 @@ defmodule Arbiter.Quota.Gate do
     end
   end
 
-  defp secondary_warning_binding(%Snapshot{} = s, ws, _acc) do
-    if s.secondary_status == "allowed_warning" and weekly_warning_policy(ws) == :hold do
+  defp secondary_warning_binding(%Snapshot{} = s, policy, _acc) do
+    if s.secondary_status == "allowed_warning" and weekly_warning_policy(policy) == :hold do
       %{
         provider: s.provider,
         window: s.secondary_window_label,
         signal: :warning,
         status: s.secondary_status,
         utilization: s.secondary_utilization,
-        threshold: weekly_threshold(ws)
+        threshold: weekly_threshold(policy)
       }
     end
   end
@@ -535,13 +624,13 @@ defmodule Arbiter.Quota.Gate do
       blocked — 7d quota exhausted (status=rejected)
       blocked — 7d quota allowed_warning (weekly_warning_policy: hold)
   """
-  @spec hold_phrase(quota_source(), Workspace.t() | nil) :: String.t() | nil
-  def hold_phrase(quota, workspace), do: hold_phrase(quota, workspace, [])
+  @spec hold_phrase(quota_source(), policy()) :: String.t() | nil
+  def hold_phrase(quota, policy), do: hold_phrase(quota, policy, [])
 
   @doc "Same as `hold_phrase/2`, but forwards `opts` to `gating_window/3` (bd-7qj58o)."
-  @spec hold_phrase(quota_source(), Workspace.t() | nil, keyword()) :: String.t() | nil
-  def hold_phrase(quota, workspace, opts) do
-    quota |> gating_window(workspace, opts) |> phrase()
+  @spec hold_phrase(quota_source(), policy(), keyword()) :: String.t() | nil
+  def hold_phrase(quota, policy, opts) do
+    quota |> gating_window(policy, opts) |> phrase()
   end
 
   defp phrase(nil), do: nil
@@ -595,8 +684,8 @@ defmodule Arbiter.Quota.Gate do
   (fail open), while a long-window reject keeps counting until
   `long_window_stale?/1` says otherwise.
   """
-  @spec in_overage?(quota_source(), Workspace.t() | nil) :: boolean()
-  def in_overage?(quota, _workspace) do
+  @spec in_overage?(quota_source(), policy()) :: boolean()
+  def in_overage?(quota, _policy) do
     case Snapshot.normalize(quota) do
       nil ->
         false

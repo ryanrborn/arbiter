@@ -659,6 +659,18 @@ defmodule Arbiter.Quota.GateProviderTest do
   describe "Workflows.QuotaGate.Default — provider-aware cap clamp" do
     alias Arbiter.Workflows.QuotaGate
 
+    # P7: the gate is keyed by the provider account; the workspace rides
+    # along as policy context. This mirrors what `Conductor` now passes.
+    defp headroom(workspace) do
+      provider = Arbiter.Quota.default_provider(workspace)
+
+      QuotaGate.Default.quota_headroom(
+        Arbiter.Quota.account_id(workspace.id, provider),
+        workspace: workspace,
+        provider: provider
+      )
+    end
+
     defp provider_workspace(type) do
       {:ok, workspace} =
         Ash.create(Workspace, %{
@@ -681,7 +693,7 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
-      assert QuotaGate.Default.quota_headroom(workspace.id) == 0
+      assert headroom(workspace) == 0
     end
 
     test "allows when the codex workspace has headroom" do
@@ -695,7 +707,7 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
-      assert QuotaGate.Default.quota_headroom(workspace.id) == :unlimited
+      assert headroom(workspace) == :unlimited
     end
 
     test "a blown Anthropic snapshot does not clamp a codex workspace" do
@@ -709,7 +721,7 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
-      assert QuotaGate.Default.quota_headroom(workspace.id) == :unlimited
+      assert headroom(workspace) == :unlimited
     end
   end
 

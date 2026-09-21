@@ -447,7 +447,7 @@ defmodule Arbiter.Workflows.ConductorTest do
     defmodule HoldGate do
       @behaviour Arbiter.Workflows.QuotaGate
       @impl true
-      def quota_headroom(_workspace_id), do: 0
+      def quota_headroom(_provider_account_id, _opts), do: 0
     end
 
     # A gate that returns a fixed partial headroom — used to assert the min
@@ -455,14 +455,14 @@ defmodule Arbiter.Workflows.ConductorTest do
     defmodule PartialGate do
       @behaviour Arbiter.Workflows.QuotaGate
       @impl true
-      def quota_headroom(_workspace_id), do: 1
+      def quota_headroom(_provider_account_id, _opts), do: 1
     end
 
     # A gate that always allows — baseline for "quota imposes no restriction".
     defmodule UnlimitedGate do
       @behaviour Arbiter.Workflows.QuotaGate
       @impl true
-      def quota_headroom(_workspace_id), do: :unlimited
+      def quota_headroom(_provider_account_id, _opts), do: :unlimited
     end
 
     test "quota hold (headroom = 0) prevents all dispatch", %{ws: ws} do

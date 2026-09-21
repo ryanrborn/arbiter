@@ -14,7 +14,14 @@ defmodule Arbiter.Quota.Gate.Continue do
   `CodexQuota` or `GoogleQuota` row. Only Anthropic reports an explicit
   `overage_status`; for Codex / Google the past-plan `status` (Codex's
   `limit_reached`) is the trigger, and `spend_usd` is the same windowed
-  workspace spend from the usage ledger.
+  spend from the usage ledger.
+
+  `spend_usd` is the **account's** windowed spend since P7 (§5 row 9): the
+  plan that was exhausted is the account's, so the overage figure has to be
+  too. The account arrives as `opts[:account]` from
+  `Arbiter.Worker.Dispatch`; without one (a caller that has not resolved an
+  account, or a workspace with no link) the spend is `0.0` and dispatch still
+  proceeds — the contract is cap + alert, never stop.
 
   Fails open on a `nil` (or unrecognized) snapshot — plain `:allow`, no overage
   tag.
@@ -27,14 +34,16 @@ defmodule Arbiter.Quota.Gate.Continue do
   alias Arbiter.Quota.Overage
 
   @impl true
-  def check(_task, quota, workspace, _opts) do
+  def check(_task, quota, workspace, opts) do
+    account = Keyword.get(opts, :account)
+
     case Snapshot.normalize(quota) do
       nil ->
         :allow
 
       %Snapshot{} = snapshot ->
-        if Gate.in_overage?(snapshot, workspace) do
-          {:overage, Overage.windowed_spend(workspace, snapshot)}
+        if Gate.in_overage?(snapshot, {account, workspace}) do
+          {:overage, Overage.windowed_spend(account, snapshot)}
         else
           :allow
         end

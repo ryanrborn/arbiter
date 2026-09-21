@@ -1055,6 +1055,18 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> :claude
   end
 
+  # The account half of the gate's threshold policy and the key its overage
+  # spend sums by (P7, `docs/provider-account-design.md` §4.2 / §5 rows 4, 9).
+  # `nil` when the workspace has no link — the gate then resolves
+  # workspace-only, exactly as it did before P7.
+  defp safe_gate_account(ws_id, provider) do
+    Arbiter.Accounts.Resolver.get(Arbiter.Quota.account_id(ws_id, provider))
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   defp apply_quota_gate(%Issue{} = task, workspace, provider, ws_id, opts) do
     gate = Arbiter.Quota.gate_for_workspace(workspace)
     quota = safe_quota_latest(ws_id, provider)
@@ -1063,7 +1075,10 @@ defmodule Arbiter.Worker.Dispatch do
     # verbatim on drain) must stay exactly what the caller passed, or a
     # best-effort Antigravity bucket guess would silently override the real
     # dispatch's model resolution later.
-    gate_opts = maybe_add_gemini_model_hint(provider, task, workspace, opts)
+    gate_opts =
+      provider
+      |> maybe_add_gemini_model_hint(task, workspace, opts)
+      |> Keyword.put(:account, safe_gate_account(ws_id, provider))
 
     case gate.check(task, quota, workspace, gate_opts) do
       :allow ->

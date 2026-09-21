@@ -3,16 +3,23 @@ defmodule Arbiter.Quota.Overage do
   Overage-spend accounting for `:continue`-mode dispatch (bd-7cd38f).
 
   When a workspace dispatches past the Anthropic plan cap (see
-  `Arbiter.Quota.Gate.Continue`), we account the overage as the workspace's spend
-  over the current 5h window, read straight from the token-cost ledger
-  (`Arbiter.Usage.summarize/1`). This is the zero-migration v1 approach from the
-  bd-3qcd8y design: a windowed sum of `cost_usd`, not a per-request tag.
+  `Arbiter.Quota.Gate.Continue`), we account the overage as the **provider
+  account's** spend over the current 5h window, read straight from the
+  token-cost ledger (`Arbiter.Usage.summarize/1`). This is the zero-migration
+  v1 approach from the bd-3qcd8y design: a windowed sum of `cost_usd`, not a
+  per-request tag.
+
+  The sum is `by: :provider_account` since P7
+  (`docs/provider-account-design.md` §5 row 9) — the plan that was exhausted
+  is the account's, so every workspace metered under it contributes to the
+  overage figure, and the window comes from the account's snapshot.
 
   The window is `[reset_5h_at - 5h, now]` — i.e. spend since the current 5h
   window opened. When the snapshot carries no `reset_5h_at`, we fall back to the
   trailing 5 hours from now.
   """
 
+  alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Usage
@@ -20,39 +27,38 @@ defmodule Arbiter.Quota.Overage do
   @five_hours_seconds 5 * 60 * 60
 
   @doc """
-  The workspace's total spend (USD) over the current 5h window — the figure the
-  overage indicator and alert threshold compare against. Returns `0.0` on any
-  read error so accounting never disrupts dispatch.
+  The **account's** total spend (USD) over the current 5h window — the figure
+  the overage indicator and alert threshold compare against. Returns `0.0` on
+  any read error so accounting never disrupts dispatch.
+
+  Keyed by the provider account since P7 (§5 row 9): the plan whose cap was
+  passed is the account's, so the spend that ran past it is every workspace's
+  on that account, not just the one whose dispatch happened to trip the gate.
+  Accepts a `ProviderAccount`, a bare account id, or anything else (which
+  spends `0.0`).
   """
-  # Deliberately wider than `Arbiter.Tasks.Workspace.t()`/`Snapshot.t()`: this reads exactly
-  # `workspace.id` and hands `quota` to `window_start/1`, which has a catch-all
-  # clause. `ArbiterWeb.UsageLive.assign_overage/1` passes a bare `%{id: ws_id}`
-  # and a quota row plucked out of untyped LiveView assigns, so the narrower
-  # spec made that call a `:call` warning while the code is correct.
   @spec windowed_spend(
-          %{:id => String.t() | nil, optional(any()) => any()} | nil,
+          ProviderAccount.t() | String.t() | nil,
           Snapshot.t() | AnthropicQuota.t() | map() | nil
         ) :: float()
-  def windowed_spend(workspace, quota) do
-    ws_id = workspace && workspace.id
+  def windowed_spend(account, quota) do
+    case account_id(account) do
+      nil ->
+        0.0
 
-    if is_binary(ws_id) do
-      since = window_start(quota)
-
-      case Usage.summarize(by: :workspace, since: since, workspace_id: ws_id) do
-        {:ok, rows} ->
-          rows
-          |> Enum.reduce(0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
-
-        _ ->
-          0.0
-      end
-    else
-      0.0
+      id ->
+        case Usage.summarize(by: :provider_account, since: window_start(quota), provider_account_id: id) do
+          {:ok, rows} -> Enum.reduce(rows, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+          _ -> 0.0
+        end
     end
   rescue
     _ -> 0.0
   end
+
+  defp account_id(%ProviderAccount{id: id}), do: id
+  defp account_id(id) when is_binary(id) and id != "", do: id
+  defp account_id(_), do: nil
 
   @doc """
   Start of the current 5h window as a `DateTime`. Derived from the snapshot's
