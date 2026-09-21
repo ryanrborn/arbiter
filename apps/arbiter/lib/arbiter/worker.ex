@@ -630,8 +630,18 @@ defmodule Arbiter.Worker do
     end)
   end
 
+  # bd-45tkhq: this used to give a live worker only 500ms to answer
+  # `:snapshot` before `list_children/0` treated it the same as a crashed
+  # child — dropped from `worker_list`, `arb worker list`, and `arb prime`'s
+  # active-workers section. A worker draining a burst of subprocess output
+  # (e.g. verbose `mix test` lines) can easily miss a 500ms window on its
+  # mailbox without being dead or even unusually slow; `state/1` (what
+  # `worker_show` / `worker_runs` use) has no such tight budget, which is why
+  # those correctly reported the worker as running at the same instant this
+  # reported none. Match `state/1`'s effective (default) `GenServer.call/2`
+  # timeout so a busy-but-alive worker gets the same benefit of the doubt.
   defp safe_snapshot(pid) do
-    GenServer.call(pid, :snapshot, 500)
+    GenServer.call(pid, :snapshot, 5_000)
   rescue
     _ -> nil
   catch

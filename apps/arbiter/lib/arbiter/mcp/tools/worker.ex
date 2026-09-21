@@ -310,6 +310,14 @@ defmodule Arbiter.MCP.Tools.Worker do
   List active workers in the scope's workspace. Coordinator only. Backs onto
   `Arbiter.Worker.list_children/0`, filtered to the scope's workspace_id so a
   coordinator never sees workers running in other workspaces.
+
+  bd-45tkhq: a workspace-agnostic coordinator that names no `workspace` gets
+  one resolved for it (`Tools.resolve_workspace_id/2` — the scope's bound
+  workspace, else the installation default). That guess can be wrong for
+  where a given worker is actually running, and an empty `workers: []` on
+  its own reads as "nothing is running" rather than "scoped to a workspace
+  with nothing running". The response always echoes the `workspace_id` it
+  scoped to so that ambiguity is never silent.
   """
   @spec worker_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_list(%Scope{} = scope, args) do
@@ -328,7 +336,7 @@ defmodule Arbiter.MCP.Tools.Worker do
         |> Arbiter.Worker.Phase.annotate()
         |> Enum.map(&serialize_worker_summary(&1, Map.get(costs, &1.task_id, 0.0)))
 
-      {:ok, %{workers: workers, count: length(workers)}}
+      {:ok, %{workers: workers, count: length(workers), workspace_id: ws_id}}
     end
   end
 

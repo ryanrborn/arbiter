@@ -5068,6 +5068,26 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, reloaded} = Ash.get(Issue, data.id)
       assert reloaded.workspace_id == default.id
     end
+
+    # bd-45tkhq: an unscoped `worker_list` from a workspace-agnostic
+    # coordinator silently resolves to a guessed default workspace the same
+    # way `task_create` does above. When a worker is genuinely live in a
+    # *different* workspace, that guess returns `count: 0` — indistinguishable
+    # from "nothing is running" — unless the response says which workspace it
+    # scoped to.
+    test "an agnostic coordinator's unscoped worker_list names the workspace it scoped to" do
+      {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+      {:ok, other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
+      {:ok, task} = Ash.create(Issue, %{title: "live elsewhere", workspace_id: other.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: other.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, %{workers: [], workspace_id: ws_id}} = Tools.worker_list(agnostic, %{})
+      assert ws_id == default.id
+    end
   end
 
   describe "workspace-bound scope rejection" do
