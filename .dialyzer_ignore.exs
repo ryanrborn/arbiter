@@ -91,13 +91,15 @@
   #     atom clause beside the `{:no_verdict, reason}` tuple one, and a
   #     `load_member_issues([])` clause. Both are cheap total-function
   #     hygiene on a private helper.
-  #   * arbiter_cli/version.ex — the same compile-time-constant shape as the
-  #     `@git_dirty` case noted above, but for `@git_available` (`dev_build?/0`).
-  #     Unlike `@git_dirty`, this one bakes to `true` in the CI build (git
-  #     present, no `RELEASE_VERSION`), so the warning fires every run rather
-  #     than only on a dirty dev machine, and needs a real filter instead of
-  #     staying implicitly quiet.
-  {"lib/arbiter_cli/version.ex", :pattern_match},
+  #   * arbiter_cli/version.ex / cmd/doctor/checks.ex — the same
+  #     compile-time-constant shape as the `@git_dirty` case above, for
+  #     `@git_available` (`dev_build?/0`). A prior pass here assumed this
+  #     bakes to `true` in CI (git present, no `RELEASE_VERSION`) and added
+  #     filters for it, but `actions/checkout@v4`'s default `fetch-depth: 1`
+  #     means CI's clone has no tags, so `git describe --tags --abbrev=0`
+  #     fails and `@git_available` folds to `false` there instead — same as
+  #     `@git_dirty`, the warning never fires in CI and a filter for it sits
+  #     unused. No entry needed for either module.
   {"lib/arbiter/agents/preflight.ex", :pattern_match},
   {"lib/arbiter/mcp/tools.ex", :pattern_match},
   {"lib/arbiter/mcp/tools/loop_pending.ex", :pattern_match},
@@ -122,15 +124,15 @@
   #     persisted task rows, where a NULL column is one migration away.
   #   * loop/analysis.ex, arbiter_cli/cmd/self_update.ex — the same shape on
   #     a report map and a version string.
-  #   * arbiter_cli/cmd/doctor/checks.ex — `if dev_install?() do`, downstream
-  #     of the same `ArbiterCli.Version.dev_build?/0` constant filtered above
-  #     (`arbiter_cli/version.ex`, group 2). Both entries share one root cause.
+  #
+  #   `arbiter_cli/cmd/doctor/checks.ex`'s `if dev_install?() do` is
+  #   downstream of the same `ArbiterCli.Version.dev_build?/0` constant noted
+  #   in group 2 — no filter here either, for the same reason.
   {"lib/arbiter/loop/analysis.ex", :guard_fail},
   {"lib/arbiter/trackers/gitlab.ex", :guard_fail},
   {"lib/arbiter/worker.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :neg_guard_fail},
-  {"lib/arbiter_cli/cmd/doctor/checks.ex", :guard_fail},
   {"lib/arbiter_cli/cmd/self_update.ex", :guard_fail},
 
   # ── 4. MapSet opaqueness (`contract_with_opaque`, `call_without_opaque`) ──
