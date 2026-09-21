@@ -319,7 +319,7 @@ defmodule Arbiter.Agents.Preflight do
     # bd-adyhvn: the process ran, so it spent — split the CLI's structured
     # result out of the output *before* classifying (its integers would
     # otherwise read as provider-error signatures) and record the draw.
-    {usage, diagnostic_lines} = Usage.Probe.parse(lines)
+    {usage, diagnostic_lines} = Usage.Probe.parse(lines, safe_provider(adapter))
     record_usage(adapter, usage, status, opts, elapsed)
 
     verdict(outcome, diagnostic_lines, adapter, timeout, elapsed, usage != nil)

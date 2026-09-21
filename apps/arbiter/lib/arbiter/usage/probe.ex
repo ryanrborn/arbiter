@@ -75,6 +75,8 @@ defmodule Arbiter.Usage.Probe do
 
   require Logger
 
+  alias Arbiter.Agents.Codex.Stream, as: CodexStream
+  alias Arbiter.Agents.Gemini.Stream, as: GeminiStream
   alias Arbiter.Usage.Event
 
   @type usage :: %{
@@ -98,6 +100,15 @@ defmodule Arbiter.Usage.Probe do
   # per-call priced API, so an agy probe row's cost stays nil permanently.
   @agy_cost_unavailable_note "agy/Antigravity reports no cost: it's a subscription metered by Antigravity quota percentage, not a per-call priced API"
 
+  # bd-96mn8i round 2, finding 4: `@no_usage_note` used to fire on *any* row
+  # without a `cost_usd`, including ones that parsed real token counts —
+  # upstream gemini's `stats` has no `"models"` breakdown, so
+  # `Gemini.Pricing.cost_usd/1` returns nil on a genuine success and the row
+  # landed with real tokens next to a note claiming no usage was found at
+  # all. This note is for that case: tokens are known, the dollar figure
+  # just isn't.
+  @tokens_no_cost_note "cost unavailable: tokens were parsed but the probe reported no priceable cost figure"
+
   @doc """
   Split a probe's captured output into `{usage_or_nil, lines_for_the_classifier}`.
 
@@ -105,21 +116,130 @@ defmodule Arbiter.Usage.Probe do
   When one of them is the CLI's successful `result` object, its token counts
   are extracted and that line is removed from the returned list (see the
   moduledoc). Anything else passes through untouched.
+
+  `provider` selects which wire schema to look for (`"codex"`, `"gemini"`, or
+  `nil`/anything else for Claude's `{"type":"result"}` / agy's
+  `{"event":"result"}` shapes). Without this, `parse/1` only ever recognized
+  those two shapes — so a codex probe's `{"type":"turn.completed","usage":{…}}`
+  line was never matched at all (bd-96mn8i: confirmed live against installed
+  codex-cli 0.153.4, this is exactly what the CLI emits on success), and every
+  one of the 1,620 codex `usage_events` rows over 7 days landed with `tokens_in`
+  / `tokens_out` NULL. A gemini probe running the upstream (non-agy) `gemini`
+  binary hit a related but different bug: its `{"type":"result",...}` line
+  *was* matched, but the fallback clause read `event["usage"]` — upstream
+  gemini's token counts live under `event["stats"]` (see
+  `Arbiter.Agents.Gemini.Stream`'s documented schema) — so `usage` was always
+  computed from an empty map, i.e. all-nil, even on a genuine success.
   """
-  @spec parse([String.t()]) :: {usage() | nil, [String.t()]}
-  def parse(lines) when is_list(lines) do
+  @spec parse([String.t()], String.t() | nil) :: {usage() | nil, [String.t()]}
+  def parse(lines, provider \\ nil) when is_list(lines) do
+    decoder = decoder_for(provider)
+
     Enum.reduce(lines, {nil, []}, fn line, {usage, kept} ->
-      case decode_result(line) do
-        {:ok, event} ->
+      case decoder.(line) do
+        {:ok, fields} ->
           # A success payload is structured data, not diagnostics — extract and
           # drop it. An error payload stays visible to the classifier.
-          {from_result(event), kept}
+          {fields, kept}
+
+        {:error_with_usage, fields} ->
+          # bd-96mn8i round 2, finding 2: an error result can still report
+          # real tokens spent before it failed (e.g. a quota-exhausted agy
+          # turn) — that is known spend, not unknown, and must not be
+          # recorded as NULL. The line itself is still diagnostic (it's what
+          # tells `StopReason.classify/2` the run failed), so it stays in
+          # `kept` exactly like a plain `:error`.
+          {fields, [line | kept]}
 
         :error ->
           {usage, [line | kept]}
       end
     end)
     |> then(fn {usage, kept} -> {usage, Enum.reverse(kept)} end)
+  end
+
+  defp decoder_for("codex"), do: &codex_result/1
+  defp decoder_for("gemini"), do: &gemini_result/1
+  defp decoder_for(_provider), do: &claude_result/1
+
+  defp claude_result(line) do
+    case decode_result(line) do
+      {:ok, event} -> {:ok, from_result(event)}
+      :error -> :error
+    end
+  end
+
+  # Only codex's *terminal* events carry (or explicitly lack) usage —
+  # everything else (thread.started, item.*, …) is display-only and must pass
+  # through untouched, exactly like a non-JSON line.
+  defp codex_result(line) do
+    with {:ok, event} <- decode_json_object(line),
+         true <- codex_terminal?(event) do
+      fields = CodexStream.usage_fields(event, nil)
+      result_with_usage(fields)
+    else
+      _ -> :error
+    end
+  end
+
+  defp codex_terminal?(%{"type" => type}) when type in ["turn.completed", "turn.failed"], do: true
+  defp codex_terminal?(_event), do: false
+
+  # Gemini's own stream parser already knows both shapes on the wire (upstream
+  # `{"type":"result",...,"stats":{...}}` and agy's
+  # `{"event":"result","result":{...,"usage":{...}}}`) and already flags
+  # `is_error` correctly for each — reuse it rather than re-deriving the same
+  # schema knowledge here and risking the two definitions drifting apart.
+  defp gemini_result(line) do
+    with {:ok, event} <- decode_json_object(line),
+         true <- gemini_terminal?(event) do
+      fields = GeminiStream.usage_fields(event, nil)
+      result_with_usage(fields)
+    else
+      _ -> :error
+    end
+  end
+
+  # Shared by `codex_result/1` and `gemini_result/1` (bd-96mn8i round 2,
+  # finding 2). A successful line yields `{:ok, fields}`. A failed line yields
+  # `:error` (usage stays nil, the whole point of this ticket) UNLESS the
+  # provider still reported *nonzero* tokens on the way to failing — an agy
+  # quota-exhaustion result reports real input/output tokens alongside
+  # `status: "ERROR"`, and that spend is known, not unknown. Such a line
+  # yields `{:error_with_usage, fields}`: the tokens are captured, and the
+  # line still reaches the classifier as diagnostic output.
+  #
+  # Checking for *nonzero* usage rather than merely present usage matters: a
+  # genuinely token-free error (e.g. rejected before any call was made, all
+  # reported buckets literally `0`) must still record nil, not a literal
+  # zero — the exact zero-vs-unknown distinction this ticket exists to fix.
+  defp result_with_usage(fields) do
+    error? = Map.get(fields, :is_error, false)
+
+    nonzero_usage? =
+      (Map.get(fields, :tokens_in) || 0) > 0 or (Map.get(fields, :tokens_out) || 0) > 0
+
+    cond do
+      not is_number(Map.get(fields, :tokens_in)) -> :error
+      error? and nonzero_usage? -> {:error_with_usage, fields}
+      error? -> :error
+      true -> {:ok, fields}
+    end
+  end
+
+  defp gemini_terminal?(%{"type" => "result"}), do: true
+  defp gemini_terminal?(%{"event" => "result", "result" => result}), do: is_map(result)
+  defp gemini_terminal?(_event), do: false
+
+  defp decode_json_object(line) when is_binary(line) do
+    trimmed = String.trim(line)
+
+    with true <- String.starts_with?(trimmed, "{"),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(trimmed) do
+      {:ok, decoded}
+    else
+      _ -> :error
+    end
   end
 
   @doc """
@@ -182,7 +302,16 @@ defmodule Arbiter.Usage.Probe do
   # ---- internals ---------------------------------------------------------
 
   defp cost_note(usage) do
-    if Map.get(usage, :cost_usd), do: nil, else: @no_usage_note
+    cond do
+      Map.get(usage, :cost_usd) ->
+        nil
+
+      is_number(Map.get(usage, :tokens_in)) or is_number(Map.get(usage, :tokens_out)) ->
+        @tokens_no_cost_note
+
+      true ->
+        @no_usage_note
+    end
   end
 
   # A line is a probe result payload when it decodes to either:

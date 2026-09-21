@@ -819,11 +819,27 @@ defmodule Arbiter.Loop.Analysis do
     end
   end
 
-  defp zero_token_note(%{provider: provider, rows: rows}) do
-    "⚠ **#{provider}**: all #{rows} usage_events row(s) this window carry zero tokens — " <>
-      "this reads as \"#{provider} is cheap\" but more likely means its stream parser is " <>
-      "silently dropping usage. Verify empirically before trusting this provider's spend numbers."
+  # bd-96mn8i round 2, finding 3: mirrors `Arbiter.Mcp.Tools.zero_token_warning/1` —
+  # literal zeros are the parser-bug signature, all-NULL rows are an honest
+  # "we don't know" (failed probes) and must not read as the same thing.
+  defp zero_token_note(%{provider: provider, rows: rows, zero_rows: zero_rows} = report)
+       when zero_rows > 0 do
+    "⚠ **#{provider}**: #{zero_rows} of #{rows} usage_events row(s) this window carry literal zero " <>
+      "tokens — this reads as \"#{provider} is cheap\" but more likely means its stream parser is " <>
+      "silently dropping usage. Verify empirically before trusting this provider's spend numbers." <>
+      unknown_note_suffix(report)
   end
+
+  defp zero_token_note(%{provider: provider, rows: rows}) do
+    "⚠ **#{provider}**: all #{rows} usage_events row(s) this window recorded no usage at all " <>
+      "(NULL tokens, not zero) — likely failed probes or an unrecognized result shape, not a " <>
+      "genuinely free provider. Excluded from cost/token aggregates."
+  end
+
+  defp unknown_note_suffix(%{unknown_rows: n}) when n > 0,
+    do: " A further #{n} row(s) recorded no usage at all (NULL, not zero)."
+
+  defp unknown_note_suffix(_report), do: ""
 
   defp window(opts) do
     meta = Keyword.get(opts, :meta, %{})
