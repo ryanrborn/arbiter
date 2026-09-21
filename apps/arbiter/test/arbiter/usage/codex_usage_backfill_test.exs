@@ -1,0 +1,183 @@
+defmodule Arbiter.Usage.CodexUsageBackfillTest do
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Usage.CodexUsageBackfill
+  alias Arbiter.Usage.Event
+
+  defp create_event!(attrs) do
+    base = %{
+      provider: "codex",
+      source: :preflight,
+      step: :other,
+      occurred_at: DateTime.utc_now()
+    }
+
+    {:ok, ev} = Ash.create(Event, Map.merge(base, attrs))
+    ev
+  end
+
+  defp write_rollout!(sessions_dir, date, session_id, timestamp, tokens_in, cached, tokens_out) do
+    dir =
+      Path.join([
+        sessions_dir,
+        pad(date.year, 4),
+        pad(date.month, 2),
+        pad(date.day, 2)
+      ])
+
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "rollout-#{session_id}.jsonl")
+
+    # Envelope confirmed live against installed codex-cli 0.153.4 — see
+    # `Arbiter.Usage.CodexSessionFileTest` for the full match against a real
+    # rollout file.
+    lines = [
+      ~s({"timestamp":"#{timestamp}","ordinal":0,"type":"session_meta",) <>
+        ~s("payload":{"session_id":"#{session_id}","timestamp":"#{timestamp}"}}),
+      ~s({"timestamp":"#{timestamp}","ordinal":1,"type":"event_msg",) <>
+        ~s("payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":#{tokens_in},) <>
+        ~s("cached_input_tokens":#{cached},"cache_write_input_tokens":0,) <>
+        ~s("output_tokens":#{tokens_out},"reasoning_output_tokens":0}}}})
+    ]
+
+    File.write!(path, Enum.join(lines, "\n") <> "\n")
+    path
+  end
+
+  defp pad(n, len), do: n |> Integer.to_string() |> String.pad_leading(len, "0")
+
+  defp tmp_sessions_dir do
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "codex-usage-backfill-test-#{System.os_time(:nanosecond)}-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    dir
+  end
+
+  describe "backfill/1" do
+    test "dry-run reports what it would write and does not touch the row" do
+      dir = tmp_sessions_dir()
+      occurred_at = ~U[2026-09-17 00:04:36.349Z]
+
+      write_rollout!(
+        dir,
+        ~D[2026-09-17],
+        "sid-dry",
+        "2026-09-17T00:04:32.619Z",
+        18_915,
+        18_176,
+        5
+      )
+
+      ev =
+        create_event!(%{
+          occurred_at: occurred_at,
+          duration_ms: 4505,
+          tokens_in: nil,
+          tokens_out: nil
+        })
+
+      report = CodexUsageBackfill.backfill(sessions_dir: dir)
+
+      assert report.scanned == 1
+      assert report.would_backfill == 1
+      assert report.backfilled == 0
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.tokens_in == nil
+    end
+
+    test "--apply writes recovered tokens and a provenance cost_note" do
+      dir = tmp_sessions_dir()
+      occurred_at = ~U[2026-09-17 00:04:36.349Z]
+
+      write_rollout!(
+        dir,
+        ~D[2026-09-17],
+        "sid-apply",
+        "2026-09-17T00:04:32.619Z",
+        18_915,
+        18_176,
+        5
+      )
+
+      ev =
+        create_event!(%{
+          occurred_at: occurred_at,
+          duration_ms: 4505,
+          tokens_in: nil,
+          tokens_out: nil
+        })
+
+      report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
+
+      assert report.scanned == 1
+      assert report.backfilled == 1
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.tokens_in == 18_915
+      assert reloaded.tokens_out == 5
+      assert reloaded.cache_read_tokens == 18_176
+      assert reloaded.cost_note =~ "backfilled from on-disk codex rollout JSONL"
+      # Cost stays unknown — codex is metered, not billed per call.
+      assert reloaded.cost_usd == nil
+    end
+
+    test "a row already carrying tokens is never touched (idempotent)" do
+      dir = tmp_sessions_dir()
+
+      ev =
+        create_event!(%{
+          occurred_at: DateTime.utc_now(),
+          tokens_in: 42,
+          tokens_out: 7
+        })
+
+      report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
+      assert report.scanned == 0
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.tokens_in == 42
+    end
+
+    test "a row with no matching rollout is counted, not silently dropped" do
+      dir = tmp_sessions_dir()
+
+      create_event!(%{occurred_at: DateTime.utc_now(), tokens_in: nil, tokens_out: nil})
+
+      report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
+      assert report.scanned == 1
+      assert report.no_rollout_file == 1
+      assert report.backfilled == 0
+    end
+
+    test "a matched rollout with no token_count line is counted separately" do
+      dir = tmp_sessions_dir()
+      occurred_at = ~U[2026-09-17 00:04:36.349Z]
+
+      dated_dir = Path.join([dir, "2026", "09", "17"])
+      File.mkdir_p!(dated_dir)
+
+      File.write!(
+        Path.join(dated_dir, "rollout-sid-nousage.jsonl"),
+        ~s({"type":"session_meta","payload":{"session_id":"sid-nousage",) <>
+          ~s("timestamp":"2026-09-17T00:04:32.619Z"}}) <> "\n"
+      )
+
+      create_event!(%{
+        occurred_at: occurred_at,
+        duration_ms: 4505,
+        tokens_in: nil,
+        tokens_out: nil
+      })
+
+      report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
+      assert report.no_token_count == 1
+      assert report.backfilled == 0
+    end
+  end
+end
