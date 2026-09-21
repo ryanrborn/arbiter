@@ -403,9 +403,7 @@ defmodule Arbiter.Quota do
       %AnthropicQuota{} = q ->
         q
         |> serialize_quota()
-        |> Map.merge(
-          gating_fields(q, Resolver.get(account_id), gate_workspace(account_id, opts))
-        )
+        |> Map.merge(gating_fields(q, Resolver.get(account_id), gate_workspace(account_id, opts)))
         |> Map.merge(account_fields(account_id, provider, Keyword.get(opts, :spend_cache, %{})))
     end
   end

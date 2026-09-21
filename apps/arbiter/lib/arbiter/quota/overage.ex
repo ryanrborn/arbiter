@@ -47,7 +47,11 @@ defmodule Arbiter.Quota.Overage do
         0.0
 
       id ->
-        case Usage.summarize(by: :provider_account, since: window_start(quota), provider_account_id: id) do
+        case Usage.summarize(
+               by: :provider_account,
+               since: window_start(quota),
+               provider_account_id: id
+             ) do
           {:ok, rows} -> Enum.reduce(rows, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
           _ -> 0.0
         end
