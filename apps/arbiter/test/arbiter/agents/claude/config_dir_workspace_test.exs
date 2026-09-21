@@ -10,16 +10,24 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
   guessing one from workspace agreement.
 
   The load-bearing property here is the **lockstep invariant**: seeding is
-  suppressed exactly when a token is injected. Breaking it leaves the
-  fleet-wide watchdog probe with an emptied config dir and no token, which
-  401s, marks the adapter expired and stops every dispatch.
+  suppressed exactly when a token is injected, and — since P4 (bd-cblemv)
+  made `env/1` emit an explicit `{"CLAUDE_CODE_OAUTH_TOKEN", false}` unset
+  rather than merely omitting the pair — a spawn that carries no token also
+  carries an explicit instruction to unset any value it would otherwise
+  inherit from the arbiter server's own process environment. Breaking either
+  half leaves the fleet-wide watchdog probe with an emptied config dir and no
+  token (a guaranteed 401 that marks the adapter expired and stops every
+  dispatch), or leaves a suppressed-seeding spawn quietly authenticated as
+  the operator via an inherited server token (bd-6umoh9's dual-refresher
+  race). `"env/1 lockstep: seeding suppressed iff a token pair is injected"`
+  below asserts the property directly across every shape this file covers.
   """
   # async: false — toggles Application/System env that other tests read.
   use Arbiter.DataCase, async: false
 
-  # The ambiguous-token case logs a warning by design; capture it so the run
-  # stays readable (logs still surface on failure).
-  @moduletag :capture_log
+  alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Accounts.ProviderCredential
+  alias Arbiter.Accounts.WorkspaceProviderAccount
 
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Tasks.Workspace
@@ -137,7 +145,10 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
       _ = token_workspace()
       _ = token_workspace()
 
-      assert ConfigDir.env() == [{"CLAUDE_CONFIG_DIR", target}]
+      assert ConfigDir.env() == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
     end
 
     test "the workspace-bearing spawn is unaffected by workspace-less calls carrying no token",
@@ -160,6 +171,108 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
 
       assert File.read!(Path.join(target, ".credentials.json")) ==
                File.read!(Path.join(source, ".credentials.json"))
+    end
+  end
+
+  describe "env/1 lockstep: seeding suppressed iff a token pair is injected" do
+    defp account(opts \\ []) do
+      {:ok, acct} =
+        Ash.create(ProviderAccount, %{
+          provider: :claude,
+          slug: "acct-#{System.unique_integer([:positive])}",
+          enabled: Keyword.get(opts, :enabled, true)
+        })
+
+      acct
+    end
+
+    defp credential(account, secret) do
+      {:ok, cred} =
+        Ash.create(ProviderCredential, %{
+          provider_account_id: account.id,
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          fingerprint: Base.encode16(:crypto.hash(:sha256, secret), case: :lower),
+          active: true,
+          secret: secret
+        })
+
+      cred
+    end
+
+    defp link_account(ws, account) do
+      {:ok, link} =
+        Ash.create(WorkspaceProviderAccount, %{
+          workspace_id: ws.id,
+          provider: account.provider,
+          provider_account_id: account.id
+        })
+
+      link
+    end
+
+    # The property under test: exactly one of (a real token pair, seeding
+    # suppressed) or (an explicit `{..., false}` unset pair, seeding
+    # happens) holds for any workspace/flag shape. Breaking it either
+    # 401s the fleet-wide watchdog (gate fires with nothing injected) or
+    # quietly re-opens bd-6umoh9 (gate stands down while a server-process
+    # token still reaches the child via Port.open's ambient inheritance).
+    defp assert_lockstep(workspace, target) do
+      env = ConfigDir.env(workspace)
+      token_pair = List.keyfind(env, "CLAUDE_CODE_OAUTH_TOKEN", 0)
+
+      assert {:ok, ^target} = ConfigDir.ensure(workspace)
+      seeded? = File.exists?(Path.join(target, ".credentials.json"))
+
+      case token_pair do
+        {"CLAUDE_CODE_OAUTH_TOKEN", token} when is_binary(token) ->
+          refute seeded?, "expected seeding suppressed when a real token is injected"
+
+        {"CLAUDE_CODE_OAUTH_TOKEN", false} ->
+          assert seeded?, "expected seeding once the token pair is an explicit unset"
+      end
+    end
+
+    test "flag off, no workspace, no token anywhere", %{target: target} do
+      assert_lockstep(nil, target)
+    end
+
+    test "flag off, workspace with its own token", %{target: target} do
+      assert_lockstep(token_workspace(), target)
+    end
+
+    test "flag off, workspace with no token, server env set (ignored)", %{target: target} do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+      ws = workspace_with_env(%{"LOG_LEVEL" => %{"value" => "debug", "secret" => false}})
+
+      assert_lockstep(ws, target)
+    end
+
+    test "flag on, workspace joined to an account credential", %{target: target} do
+      Application.put_env(:arbiter, :provider_accounts_enabled, true)
+      ws = workspace_with_env(%{})
+      acct = account()
+      credential(acct, "account-token")
+      link_account(ws, acct)
+
+      assert_lockstep(ws, target)
+    end
+
+    test "flag on, no workspace, one unambiguous install-wide account credential", %{
+      target: target
+    } do
+      Application.put_env(:arbiter, :provider_accounts_enabled, true)
+      acct = account()
+      credential(acct, "install-token")
+      link_account(workspace_with_env(%{}), acct)
+
+      assert_lockstep(nil, target)
+    end
+
+    test "flag on, no workspace, no account anywhere", %{target: target} do
+      Application.put_env(:arbiter, :provider_accounts_enabled, true)
+
+      assert_lockstep(nil, target)
     end
   end
 end

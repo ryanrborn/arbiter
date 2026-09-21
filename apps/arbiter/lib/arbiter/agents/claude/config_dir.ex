@@ -135,12 +135,17 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   @doc """
   The env pairs to inject into a worker spawn: `[{"CLAUDE_CONFIG_DIR", dir}]`
   when isolation is enabled and the dir is ready (`[]` otherwise — inherit the
-  host config unchanged), plus `{"CLAUDE_CODE_OAUTH_TOKEN", token}` whenever a
-  worker OAuth token (bd-2zigo1) is configured. All three `ConfigDir` consumers
-  (`claude.ex`, `worker/claude_session.ex`,
+  host config unchanged), plus a `CLAUDE_CODE_OAUTH_TOKEN` pair — either
+  `{"CLAUDE_CODE_OAUTH_TOKEN", token}` when a worker OAuth token (bd-2zigo1)
+  is configured, or `{"CLAUDE_CODE_OAUTH_TOKEN", false}` (an explicit unset,
+  understood by `Port.open`'s `{:env, …}` and by
+  `Arbiter.Worker.ReleaseEnv.cmd/3`) when it is not — so a value inherited
+  from the arbiter server's own process environment can never reach a spawn
+  this function decided should carry no token. All three `ConfigDir`
+  consumers (`claude.ex`, `worker/claude_session.ex`,
   `workflows/code_review/checks.ex`) call this single function, so the token
-  reaches every worker spawn path rather than only the ones that separately
-  remember to compose it in (bd-6umoh9).
+  (or its absence) reaches every worker spawn path rather than only the ones
+  that separately remember to compose it in (bd-6umoh9).
 
   Pass the spawn's workspace (struct or id) so a token configured the
   per-workspace way — `worker_env`, encrypted at rest — is found. The
@@ -155,7 +160,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   the workspace's provider account instead of its `worker_env` blob; see
   `oauth_token/1`.
   """
-  @spec env(workspace_source()) :: [{String.t(), String.t()}]
+  @spec env(workspace_source()) :: [{String.t(), String.t() | false}]
   def env(workspace \\ nil) do
     config_pairs =
       case ensure(workspace) do
@@ -311,10 +316,21 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
       %{}
   end
 
+  # A `false` value (rather than simply omitting the pair) tells `Port.open`
+  # to *unset* the var in the child's environment. That matters because
+  # `Port.open`'s `{:env, …}` extends the BEAM's own process environment
+  # rather than replacing it (`Arbiter.Worker.ClaudeSession.open_port/1`) —
+  # so a bare `[]` here would let an install-wide `CLAUDE_CODE_OAUTH_TOKEN`
+  # set on the arbiter server process (`.arbiter.env` / the service unit)
+  # leak into every spawn regardless of what `oauth_token/1` decided, which
+  # is exactly the lockstep invariant above (gate fires ⟺ token injected)
+  # this function must not break: without the explicit unset, `seed_links/2`
+  # could suppress seeding while the server's token still reached the child
+  # unseeded, reintroducing bd-6umoh9's dual-refresher race post-P4.
   defp oauth_token_pairs(workspace) do
     case oauth_token(workspace) do
       token when is_binary(token) -> [{@oauth_token_var, token}]
-      _ -> []
+      _ -> [{@oauth_token_var, false}]
     end
   end
 

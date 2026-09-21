@@ -171,10 +171,16 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
     end
 
-    test "env/0 returns the CLAUDE_CONFIG_DIR pair pointing at the isolated dir", %{
+    test "env/0 returns the CLAUDE_CONFIG_DIR pair and an explicit token unset", %{
       target: target
     } do
-      assert ConfigDir.env() == [{"CLAUDE_CONFIG_DIR", target}]
+      # {..., false} is Port.open's "unset this var" pair — required because
+      # a bare omission would leave an inherited server-process
+      # CLAUDE_CODE_OAUTH_TOKEN reaching the child unfiltered.
+      assert ConfigDir.env() == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
     end
 
     test "tolerates a source dir missing the seed files (auth falls back to env)", %{
@@ -222,12 +228,18 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert File.exists?(Path.join(target, "settings.json"))
     end
 
-    test "env/0 no longer reads CLAUDE_CODE_OAUTH_TOKEN from the server env", %{
-      target: target
-    } do
+    test "env/0 no longer reads CLAUDE_CODE_OAUTH_TOKEN from the server env, and explicitly unsets it",
+         %{target: target} do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      assert ConfigDir.env() == [{"CLAUDE_CONFIG_DIR", target}]
+      # Not just "no pair for it" — an explicit {..., false} unset, so the
+      # server's own value (still present in this process's env, and
+      # therefore still inherited by Port.open unless countered) can never
+      # reach the spawned child.
+      assert ConfigDir.env() == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
     end
 
     test "seeding still happens when the OS env var is unset (no regression)", %{
@@ -336,7 +348,10 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
       ws = workspace_with_worker_env(%{"SOME_OTHER" => "x"})
 
-      assert ConfigDir.env(ws) == [{"CLAUDE_CONFIG_DIR", target}]
+      assert ConfigDir.env(ws) == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
 
       assert {:ok, ^target} = ConfigDir.ensure(ws)
       assert File.exists?(Path.join(target, ".credentials.json"))
@@ -384,16 +399,21 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
         encrypted_worker_env: "not-base64-ciphertext!!"
       }
 
-      assert ConfigDir.env(ws) == [{"CLAUDE_CONFIG_DIR", target}]
+      assert ConfigDir.env(ws) == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
     end
   end
 
   describe "ensure/0 when disabled" do
-    test "returns :disabled and env/0 is empty", %{target: target} do
+    test "returns :disabled and env/0 carries only the explicit token unset", %{target: target} do
       Application.put_env(:arbiter, :worker_isolate_config, false)
 
       assert ConfigDir.ensure() == :disabled
-      assert ConfigDir.env() == []
+      # Isolation being off only drops the CLAUDE_CONFIG_DIR pair — the token
+      # unset still applies, since no token is configured in this setup.
+      assert ConfigDir.env() == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
       refute File.exists?(target)
     end
   end
