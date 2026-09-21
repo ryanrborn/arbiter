@@ -25,6 +25,7 @@ defmodule Arbiter.Accounts.ReadFlipTest do
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.ProviderCredential
   alias Arbiter.Accounts.WorkspaceProviderAccount
+  alias Arbiter.Agents.Claude
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -214,6 +215,20 @@ defmodule Arbiter.Accounts.ReadFlipTest do
                {"LOG_LEVEL", "debug"},
                {"OPENAI_API_KEY", "sk-openai"}
              ]
+    end
+  end
+
+  describe "the production spawn path" do
+    test "Claude.spawn_env/1 carries the account's token, not the blob's" do
+      ws = token_workspace("stale-blob-token")
+      workspace_on_account(ws, "account-token")
+
+      flag(true)
+
+      # `Arbiter.Agents.Claude.spawn_env/1` is what actually builds a worker
+      # spawn's environment (`claude.ex:258` → `ConfigDir.env/1`), so this is
+      # the flip observed where it matters rather than one function down.
+      assert Claude.spawn_env(workspace: ws) == [{@oauth_var, "account-token"}]
     end
   end
 
