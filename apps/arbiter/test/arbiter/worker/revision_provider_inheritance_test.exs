@@ -10,6 +10,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
   alias Arbiter.Agents
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.TestSandbox
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
 
@@ -34,13 +35,6 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
     path
   end
 
-  defp prepend_path(dir) do
-    old = System.get_env("PATH") || ""
-    System.put_env("PATH", "#{dir}:#{old}")
-    on_exit(fn -> System.put_env("PATH", old) end)
-    :ok
-  end
-
   defp calls(log) do
     case File.read(log) do
       {:ok, body} -> String.split(body, "\n", trim: true)
@@ -49,23 +43,6 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
   end
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
-
-  defp init_repo(dir) do
-    repo = Path.join(dir, "repo")
-    bare = Path.join(dir, "origin.git")
-    File.mkdir_p!(repo)
-    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
-    {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
-    {_, 0} = git(["config", "user.name", "Repo"], repo)
-    {_, 0} = git(["config", "commit.gpgsign", "false"], repo)
-    File.write!(Path.join(repo, "README.md"), "seed\n")
-    {_, 0} = git(["add", "README.md"], repo)
-    {_, 0} = git(["commit", "-q", "-m", "seed"], repo)
-    {_, 0} = System.cmd("git", ["clone", "--bare", "-q", repo, bare])
-    {_, 0} = git(["remote", "add", "origin", bare], repo)
-    {_, 0} = git(["fetch", "-q", "origin"], repo)
-    repo
-  end
 
   defp seed_feature_branch(repo, branch) do
     {_, 0} = git(["checkout", "-q", "-b", branch], repo)
@@ -96,31 +73,40 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
   end
 
   setup do
-    tmp = Path.join(System.tmp_dir!(), "rev-provider-#{:erlang.unique_integer([:positive])}")
-    File.mkdir_p!(tmp)
-    repo = init_repo(tmp)
+    # bd-b6noq9 (#1930): this fixture is the one that lost `fp-7zn1p7`,
+    # `fp-6u0wu1`, `cr-ag13cz` and `fp-ry8klj`. It provisioned a repo, a bare
+    # `origin.git` and `worktrees/` under a single `/tmp/rev-provider-<n>`
+    # root, stubbed `agy` but not `claude` (so a Claude-resolving dispatch ran
+    # the operator's real CLI), and deleted the whole root on `on_exit` while
+    # those sessions were still working — taking the worktree, the origin and
+    # the only copy of the branch at once. `Arbiter.TestSandbox` exists so
+    # that shape cannot be written again; see its moduledoc.
+    sandbox = TestSandbox.provision!("rev-provider")
 
-    put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
-    put_app_env(:arbiter, :repo_paths, %{"test/repo" => repo})
-
-    stub_dir = Path.join(tmp, "bin")
-    File.mkdir_p!(stub_dir)
-    log = Path.join(tmp, "cli-calls.log")
-
-    prepend_path(stub_dir)
+    put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
+    put_app_env(:arbiter, :repo_paths, %{"test/repo" => sandbox.repo})
 
     CredentialWatchdog.mark_recovered(Agents.Gemini)
     CredentialWatchdog.mark_recovered(Agents.Claude)
     _ = :sys.get_state(CredentialWatchdog)
 
+    # Registered after `provision!/1`, so it runs BEFORE the teardown that
+    # call registered (`on_exit` is LIFO). Any worker this test left running
+    # is adopted as an owner and stopped before a byte is deleted.
     on_exit(fn ->
       CredentialWatchdog.mark_recovered(Agents.Gemini)
       CredentialWatchdog.mark_recovered(Agents.Claude)
       _ = :sys.get_state(CredentialWatchdog)
-      File.rm_rf!(tmp)
+      TestSandbox.own_live_workers!(sandbox)
     end)
 
-    %{repo: repo, tmp: tmp, stub_dir: stub_dir, log: log}
+    %{
+      repo: sandbox.repo,
+      tmp: sandbox.root,
+      stub_dir: sandbox.bin,
+      log: sandbox.log,
+      sandbox: sandbox
+    }
   end
 
   describe "ReviewGate implementer provider inheritance (AC1, AC2, AC3)" do

@@ -1515,7 +1515,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         exit_line(reason),
         activity_line(snapshot),
         reason.remediation && "Remediation: #{reason.remediation}",
-        resume_hint(event, task_id)
+        resume_hint(event, task_id, reason)
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
@@ -1528,16 +1528,23 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # from scratch. Offer the resume verb right in the escalation. Only for
   # `:worker_stopped` — a `:preflight_failed` refusal happens before any work,
   # so there is no worktree to resume.
-  defp resume_hint(:worker_stopped, task_id),
+  # bd-b6noq9: a destroyed workspace is the one stop where the worktree is NOT
+  # preserved — the whole point of the category. Offering the resume verb here
+  # points the operator (and any automation reading the page) at a directory
+  # that no longer exists, which is exactly the contradictory advice the #1930
+  # escalations arrived with. Checked ahead of the generic clause below.
+  defp resume_hint(_event, _task_id, %StopReason{category: :workspace_destroyed}), do: nil
+
+  defp resume_hint(:worker_stopped, task_id, _reason),
     do: "Resume: run `arb worker resume #{task_id}` to continue from the preserved worktree."
 
   # bd-bi5pn0: a spawn failure happens before the agent ever ran, so there is
   # no prior session/worktree progress to resume from — a plain re-dispatch
   # (not `resume`) is the correct retry.
-  defp resume_hint(:spawn_failed, task_id),
+  defp resume_hint(:spawn_failed, task_id, _reason),
     do: "Re-dispatch: run `arb dispatch #{task_id}` to retry."
 
-  defp resume_hint(_event, _task_id), do: nil
+  defp resume_hint(_event, _task_id, _reason), do: nil
 
   defp repo(%{repo: repo}) when is_binary(repo) and repo != "", do: repo
   defp repo(_), do: "unknown"

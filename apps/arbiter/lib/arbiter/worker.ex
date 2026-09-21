@@ -2732,6 +2732,18 @@ defmodule Arbiter.Worker do
   end
 
   defp on_claude_done_reviewable(%State{} = state, meta) do
+    # bd-b6noq9: before anything looks at the branch, check the workspace is
+    # still on disk. `commit_gate/1` gates on `File.dir?(worktree)` and fails
+    # OPEN when it is gone, so a run whose worktree was deleted mid-session
+    # used to sail past the gate into the review gate / merger and fail there
+    # as a generic "merge failed" page. Catch it here and name it.
+    case destroyed_workspace(state) do
+      nil -> on_claude_done_live_workspace(state, meta)
+      {kind, path} -> fail_workspace_destroyed(state, kind, path)
+    end
+  end
+
+  defp on_claude_done_live_workspace(%State{} = state, meta) do
     case mergeable_branch(meta) do
       nil ->
         cond do
@@ -2827,6 +2839,55 @@ defmodule Arbiter.Worker do
     Logger.warning(
       "Worker: task=#{state.task_id} signalled done with no mergeable branch " <>
         "(worktree never provisioned) — refusing to close; failing + escalating (bd-7pe74i)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | status: :failed, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    new_state
+  end
+
+  # bd-b6noq9 (#1930): a workspace that was provisioned and then deleted out
+  # from under a live run. Returns `{:worktree | :repo, path}` for the missing
+  # directory, or `nil` when the workspace is intact — or when there never was
+  # one, which is the DIFFERENT condition `fail_missing_worktree/1` reports as
+  # `:missing_worktree`. A path only counts as destroyed if meta declares it,
+  # so ad-hoc runs that never provisioned anything are untouched.
+  defp destroyed_workspace(%State{meta: meta}) do
+    meta = meta || %{}
+
+    cond do
+      missing_dir?(meta, :worktree_path) -> {:worktree, Map.get(meta, :worktree_path)}
+      missing_dir?(meta, :repo_path) -> {:repo, Map.get(meta, :repo_path)}
+      true -> nil
+    end
+  end
+
+  defp missing_dir?(meta, key) do
+    case Map.get(meta, key) do
+      path when is_binary(path) and path != "" -> not File.dir?(path)
+      _ -> false
+    end
+  end
+
+  # The run's workspace is gone. Mirror fail_missing_worktree/1: mark the
+  # worker :failed, leave the task open (no {:worker_done} broadcast, so the
+  # MergeQueue can never enqueue or close it), and raise an addressed
+  # coordinator escalation — but with the `:workspace_destroyed` category, so
+  # the condition is recognisable instead of arriving as free-text prose.
+  defp fail_workspace_destroyed(%State{} = state, kind, path) do
+    reason = Arbiter.Worker.StopReason.workspace_destroyed(kind, path)
+
+    Logger.error(
+      "Worker: task=#{state.task_id} workspace destroyed mid-run — " <>
+        "#{kind} #{path} no longer exists; failing + escalating (bd-b6noq9)"
     )
 
     meta =
@@ -3619,7 +3680,18 @@ defmodule Arbiter.Worker do
     :async_wait_abandoned
   ]
 
-  defp maybe_resume_continuation(%State{meta: meta} = state, session) do
+  defp maybe_resume_continuation(%State{} = state, session) do
+    case destroyed_workspace(state) do
+      nil -> do_maybe_resume_continuation(state, session)
+      # bd-b6noq9: `:exited_without_done` and friends are resumable categories,
+      # but there is nothing to resume INTO — `claude --resume` would be spawned
+      # with a cwd that no longer exists ("spawn: Could not cd to ..."). Fail
+      # with the specific reason instead of burning resume attempts.
+      {kind, path} -> fail_workspace_destroyed(state, kind, path)
+    end
+  end
+
+  defp do_maybe_resume_continuation(%State{meta: meta} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
 

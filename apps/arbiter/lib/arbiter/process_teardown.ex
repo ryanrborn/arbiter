@@ -62,6 +62,47 @@ defmodule Arbiter.ProcessTeardown do
   end
 
   @doc """
+  Stop `pid` between callbacks, running its `terminate/2`.
+
+  The difference from the exit signal a supervisor sends — and from the
+  `Process.exit(pid, :shutdown)` a caller reaches for by hand — is that an
+  exit signal skips `terminate/2` entirely on a process that does not trap
+  exits, which none of Arbiter's workers do. For `Arbiter.Worker` that
+  callback is the only thing that SIGKILLs the agent's OS process and its
+  descendants (bd-bmmj4w), so skipping it leaves a live `claude` — and
+  whatever it spawned — running with its cwd inside a workspace the caller is
+  about to reclaim. `GenServer.stop/3` goes through the `sys` terminate path
+  instead, which a suspended `gen_*` still handles, so the quiesce still
+  holds.
+
+  Always returns `:ok`. A process that will not stop within `timeout` is
+  resumed and **left alive**: the caller can see that with `Process.alive?/1`
+  and decide what to do, and killing it here would skip `terminate/2` for a
+  second time.
+  """
+  @spec stop(pid(), timeout()) :: :ok
+  def stop(pid, timeout \\ @default_timeout) when is_pid(pid) do
+    if sys_process?(pid) do
+      quiesce(pid, timeout)
+
+      try do
+        GenServer.stop(pid, :shutdown, timeout)
+        :ok
+      catch
+        # Not a `gen_*` after all, already gone, or it would not stop in time.
+        :exit, _ -> resume(pid)
+      end
+    else
+      # No `sys` loop, so there is no `terminate/2` to preserve and
+      # `GenServer.stop/3` would only block for the whole timeout before
+      # timing out. One that traps exits and declines to stop stays alive, as
+      # above.
+      Process.exit(pid, :shutdown)
+      :ok
+    end
+  end
+
+  @doc """
   Block until `pid` is between callbacks, then leave it suspended.
 
   Returns `:ok` whether or not the suspend succeeded — the caller is expected
