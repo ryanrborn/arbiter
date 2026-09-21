@@ -52,6 +52,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @revise_dirty Path.expand("../../fixtures/revise_dirty.sh", __DIR__)
   @revise_non_file_fix Path.expand("../../fixtures/revise_non_file_fix.sh", __DIR__)
+  @revise_commit_once_non_file_fix Path.expand(
+                                      "../../fixtures/revise_commit_once_non_file_fix.sh",
+                                      __DIR__
+                                    )
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
@@ -3308,6 +3312,70 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert escalation.body =~ "NOT auto-accepted"
     end
 
+    # bd-cb7wpq (Finding 2a): the approval-gap escalation must win even when
+    # the no-op fix round ALSO prints the `NO-FILE-CHANGE:` marker —
+    # `commit_gate_outcome/3` checks `approval_gap_pending?/1` first, before
+    # `non_file_fix_declared?/1`, so a guard-rejected APPROVE never gets
+    # silently swapped for the generic non-file-fix advance/park. The park
+    # reason is the gap-specific one, and the verdict label surfaces the real
+    # (guard-refused) APPROVE instead of a bare INCONCLUSIVE.
+    test "a no-op fix round that ALSO declares NO-FILE-CHANGE still escalates the approval gap, not the generic non-file-fix path",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 3,
+            worktree_path: repo,
+            review_command: [@unaddressed, "NOT_ADDRESSED"],
+            revise_command: [@revise_commit_once_non_file_fix],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 0
+
+      parked = Ash.get!(Issue, task.id)
+      assert parked.review_park_reason == "no_changes_after_approval_gap"
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.body =~ "APPROVE was rejected ONLY because"
+      assert escalation.body =~ "F1.1"
+      assert escalation.body =~ "NOT auto-accepted"
+
+      # The last real review round's verdict was APPROVE (rejected only by the
+      # guard) — the label must surface that, not "INCONCLUSIVE (no verdict)".
+      assert Ash.get!(Issue, task.id).notes =~ "ReviewGate verdict: APPROVE (a guard refused it)"
+
+      require Ash.Query
+
+      [_round1, round2] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.Query.sort(inserted_at: :asc)
+        |> Ash.read!()
+
+      assert round2.commit_gate == :escalated_no_changes
+    end
+
     test "rereview_prompt/1 hands the reviewer the open findings, their ids, and the revision diff",
          %{ws: ws} do
       task = new_task(ws)
@@ -3810,6 +3878,16 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert escalation, "expected an escalation to the coordinator"
       assert escalation.subject =~ "fix round produced no changes"
       refute escalation.subject =~ "review inconclusive"
+
+      # bd-cb7wpq (Finding 2b): the plain no-changes park still surfaces the
+      # real round-1 REQUEST_CHANGES verdict rather than a bare
+      # "INCONCLUSIVE (no verdict)" — this also pins that
+      # `last_review_gate_verdict/1`'s `Ash.read!` genuinely resolves here
+      # (rather than silently degrading via its bare `rescue`).
+      assert Ash.get!(Issue, task.id).review_park_reason == "commit_gate_no_changes"
+
+      assert Ash.get!(Issue, task.id).notes =~
+               "ReviewGate verdict: REQUEST_CHANGES (parked pending human review"
 
       require Ash.Query
 
