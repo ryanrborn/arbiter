@@ -93,7 +93,7 @@ defmodule Arbiter.Workflows.QuotaGate do
 
     defp throttle_headroom(ws_id, workspace) do
       provider = if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
-      snapshot = Arbiter.Quota.latest_for_provider(ws_id, provider)
+      snapshot = Arbiter.Quota.latest_for_workspace(ws_id, provider)
 
       if Arbiter.Quota.Gate.over_cap?(snapshot, workspace), do: 0, else: :unlimited
     end

@@ -103,7 +103,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
     * `:dispatcher` → `:arbiter, :dispatch_queue_dispatcher` → `Arbiter.Worker.Dispatch`
       — the module whose `dispatch/2` drains held intents. Tests pass a stub.
-    * `:quota_reader` → `Arbiter.Quota` — supplies `latest_for_provider/2`
+    * `:quota_reader` → `Arbiter.Quota` — supplies `latest_for_workspace/2`
       snapshots on drain (one per distinct provider held).
     * `:notifier` → `Arbiter.Messages.CoordinatorNotifier` — the overage-alert channel.
     * `:auto_subscribe` (default `true`) — subscribe to the `quota:<ws>` topic.
@@ -581,7 +581,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
   end
 
   defp safe_latest(%State{quota_reader: reader, workspace_id: ws_id}, provider) do
-    reader.latest_for_provider(ws_id, provider)
+    reader.latest_for_workspace(ws_id, provider)
   rescue
     _ -> nil
   catch

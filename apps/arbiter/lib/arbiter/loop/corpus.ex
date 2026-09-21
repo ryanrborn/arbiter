@@ -388,7 +388,7 @@ defmodule Arbiter.Loop.Corpus do
   # ledger hiccup.
   defp scarcity(workspace_id) do
     ws_id = resolve_workspace_id(workspace_id)
-    latest = ws_id && Quota.latest(ws_id, "claude")
+    latest = ws_id && Quota.latest_for_workspace(ws_id, "claude")
 
     # `Quota.latest/2` reads a latest-only cache, so it returns whatever was
     # captured last — possibly from a window that rolled days ago. Calibrating

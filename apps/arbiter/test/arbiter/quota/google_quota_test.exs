@@ -58,7 +58,7 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       assert length(snap.models) == 2
 
       # The row persisted under the UI-facing provider code.
-      row = CloudCode.latest(ws.id, "gemini_cli")
+      row = CloudCode.latest(quota_account_id!(ws.id, "gemini_cli"), "gemini_cli")
       assert %GoogleQuota{} = row
       assert row.provider == "gemini_cli"
       assert row.plan == "Free"
@@ -86,7 +86,9 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
 
       assert CloudCode.refresh(ws.id, :gemini, opts(creds, project_id: "p"))
 
-      serialized = CloudCode.serialize_latest(ws.id, "gemini_cli")
+      serialized =
+        CloudCode.serialize_latest(quota_account_id!(ws.id, "gemini_cli"), "gemini_cli")
+
       assert serialized["provider"] in ["gemini-cli", "gemini_cli"]
       assert [model] = serialized["models"]
       assert model["model_id"] == "gemini-2.5-pro"
@@ -100,7 +102,7 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       assert CloudCode.refresh(ws.id, :gemini, creds_path: missing, plug: {Req.Test, @stub}) ==
                nil
 
-      assert CloudCode.latest(ws.id, "gemini_cli") == nil
+      assert CloudCode.latest(quota_account_id!(ws.id, "gemini_cli"), "gemini_cli") == nil
     end
   end
 
@@ -120,7 +122,7 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
 
       assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:ok, body}))
 
-      row = CloudCode.latest(ws.id, "antigravity")
+      row = CloudCode.latest(quota_account_id!(ws.id, "antigravity"), "antigravity")
       assert %GoogleQuota{provider: "antigravity", used_percent: 75.0} = row
     end
 
@@ -138,12 +140,12 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
         ])
 
       assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:ok, body}))
-      good_row = CloudCode.latest(ws.id, "antigravity")
+      good_row = CloudCode.latest(quota_account_id!(ws.id, "antigravity"), "antigravity")
       assert good_row.used_percent == 75.0
       refute is_nil(good_row.reset_at)
 
       assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:error, {:exit, 1}}))
-      degraded_row = CloudCode.latest(ws.id, "antigravity")
+      degraded_row = CloudCode.latest(quota_account_id!(ws.id, "antigravity"), "antigravity")
 
       assert degraded_row.used_percent == good_row.used_percent
       assert degraded_row.reset_at == good_row.reset_at
@@ -154,7 +156,10 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       # message, not the stale good-row copy — only the numeric figures
       # (used_percent/reset_at, asserted above) are preserved.
       assert degraded_row.snapshot["message"] == degraded_row.message
-      assert CloudCode.serialize_latest(ws.id, "antigravity")["message"] == degraded_row.message
+
+      assert CloudCode.serialize_latest(quota_account_id!(ws.id, "antigravity"), "antigravity")[
+               "message"
+             ] == degraded_row.message
     end
   end
 
@@ -176,10 +181,14 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       end)
 
       CloudCode.refresh(ws.id, :gemini, opts(creds, project_id: "p"))
-      view = ws.id |> CloudCode.latest("gemini_cli") |> CloudCode.view()
+
+      view =
+        quota_account_id!(ws.id, "gemini_cli")
+        |> CloudCode.latest("gemini_cli")
+        |> CloudCode.view()
 
       assert view.provider == "gemini_cli"
-      assert view.workspace_id == ws.id
+      assert view.provider_account_id == quota_account_id!(ws.id, "gemini_cli")
       assert_in_delta view.utilization_5h, 0.75, 0.0001
       assert %DateTime{} = view.reset_5h_at
       assert view.utilization_7d == nil

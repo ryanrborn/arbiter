@@ -114,7 +114,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       AnthropicQuota,
       Map.merge(
         %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id),
           provider: "claude",
           captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
         },

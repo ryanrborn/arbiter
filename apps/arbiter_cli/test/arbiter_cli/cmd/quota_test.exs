@@ -266,6 +266,180 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "recent spend (30d): $12.50"
     end
 
+    # ---- P5 (docs/provider-account-design.md §6) -------------------------
+
+    test "heads the block with the account, its provider, and the workspaces on it" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "cost_usd" => 30.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 12.5},
+                %{"id" => "ws-3", "name" => "vstim", "cost_usd" => 7.5}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+
+      assert out =~
+               "Anthropic quota (account personal-max · claude · 3 workspaces: default, emricare, vstim)"
+
+      refute out =~ "Anthropic quota (workspace"
+    end
+
+    test "prints the account spend total with a per-workspace breakdown underneath" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "cost_usd" => 30.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 12.5},
+                %{"id" => "ws-3", "name" => "vstim", "cost_usd" => 7.5}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $30.00"
+      assert out =~ "default $10.00 · emricare $12.50 · vstim $7.50"
+    end
+
+    test "omits the breakdown when the account has a single workspace" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "cost_usd" => 10.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $10.00"
+      # The breakdown would restate the total for the only workspace on it.
+      refute out =~ "    default $10.00"
+    end
+
+    test "--workspace stays a lookup shorthand and says which workspace it went through" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-2",
+          "workspace" => %{"id" => "ws-2", "name" => "emricare"},
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [%{"id" => "ws-2", "name" => "emricare", "cost_usd" => 1.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Quota.run(["--workspace", "emricare"]) end)
+
+      assert code == 0
+      assert out =~ "via workspace emricare"
+      assert out =~ "Anthropic quota (account personal-max"
+    end
+
+    test "says nothing about a workspace when none was asked for" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "workspace" => %{"id" => "ws-1", "name" => "default"},
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 1.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "via workspace"
+    end
+
+    test "falls back to the workspace header when the server reports no account" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "quotas" => []}
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Anthropic quota (workspace ws-1)"
+    end
+
+    test "heads the Codex block with its own account" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "codex" => @codex,
+          "quotas" => [
+            %{
+              "provider" => "codex",
+              "account" => %{"slug" => "work", "provider" => "codex"},
+              "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 2.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Codex quota (account work · codex · 1 workspace: default)"
+    end
+
+    test "--json keeps workspace_id as a deprecated alias alongside account/workspaces" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0}],
+          "claude" => @snapshot
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run(["--json"]) end)
+      assert code == 0
+      decoded = Jason.decode!(out)
+      assert decoded["workspace_id"] == "ws-1"
+      assert decoded["account"]["slug"] == "personal-max"
+      assert [%{"name" => "default"}] = decoded["workspaces"]
+    end
+
     test "--json mode emits the raw snapshot" do
       stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})
 

@@ -148,7 +148,9 @@ defmodule Arbiter.Quota.CloudProbeTest do
       refute_receive {:oauth_usage_call, _}, 300
 
       for ws <- [alpha, beta, gamma] do
-        assert Arbiter.Quota.serialize(ws.id).per_model_utilization == %{"sonnet" => 0.42}
+        assert Arbiter.Quota.serialize(quota_account_id!(ws.id)).per_model_utilization == %{
+                 "sonnet" => 0.42
+               }
       end
     end
 
@@ -184,7 +186,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
 
       assert_receive {:quota_updated, _ws_id, %{utilization_5h: 0.91}}, 2_000
 
-      q = Arbiter.Quota.latest(ws.id)
+      q = Arbiter.Quota.latest(quota_account_id!(ws.id))
       assert q.status_5h == "allowed"
       assert q.utilization_7d == 0.12
       assert q.representative_claim == "five_hour"
@@ -221,7 +223,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       stub_utilization.(10)
       CloudProbe.probe(pid)
       assert_receive {:quota_updated, _ws_id, %{utilization_5h: 0.10}}, 2_000
-      first = Arbiter.Quota.latest(ws.id)
+      first = Arbiter.Quota.latest(quota_account_id!(ws.id))
       assert first.capture_source == "oauth_poll"
 
       # Backdate the first row's `captured_at` (second-resolution) into a
@@ -233,8 +235,8 @@ defmodule Arbiter.Quota.CloudProbeTest do
 
       {:ok, _} =
         Arbiter.Repo.query(
-          "UPDATE anthropic_quotas SET captured_at = ? WHERE workspace_id = ? AND provider = 'claude'",
-          [backdated, ws.id]
+          "UPDATE anthropic_quotas SET captured_at = ? WHERE provider_account_id = ? AND provider = 'claude'",
+          [backdated, quota_account_id!(ws.id)]
         )
 
       first = %{first | captured_at: backdated}
@@ -242,7 +244,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       stub_utilization.(20)
       CloudProbe.probe(pid)
       assert_receive {:quota_updated, _ws_id, %{utilization_5h: 0.20}}, 2_000
-      second = Arbiter.Quota.latest(ws.id)
+      second = Arbiter.Quota.latest(quota_account_id!(ws.id))
       assert second.capture_source == "oauth_poll"
       assert DateTime.compare(second.captured_at, first.captured_at) == :gt
     end

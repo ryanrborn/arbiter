@@ -28,7 +28,7 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
     # over `[window_start, captured_at]`, the interval this reading describes.
     {:ok, _q} =
       Ash.create(AnthropicQuota, %{
-        workspace_id: ws.id,
+        provider_account_id: quota_account_id!(ws.id, "claude"),
         provider: "claude",
         utilization_5h: 0.5,
         captured_at: DateTime.utc_now()

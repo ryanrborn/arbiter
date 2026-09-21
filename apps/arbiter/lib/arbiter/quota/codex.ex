@@ -75,6 +75,10 @@ defmodule Arbiter.Quota.Codex do
   Fetch Codex quota for `workspace_id` via a direct usage API call, upsert the
   snapshot, and return the serialized windows.
 
+  The row is keyed by the provider account the workspace meters under (P5,
+  `docs/provider-account-design.md` §6), resolved here so the probe's call
+  site is unchanged; two workspaces on one Codex plan write the same row.
+
   Never raises. Returns `%{codex: map() | nil, message: String.t() | nil}`:
 
     * creds absent → `%{codex: nil, message: "Codex CLI not authenticated…"}`,
@@ -140,42 +144,41 @@ defmodule Arbiter.Quota.Codex do
   # ---- persistence -------------------------------------------------------
 
   defp upsert(workspace_id, attrs) do
-    full =
-      attrs
-      |> Map.put(:workspace_id, workspace_id)
-      |> Map.put(:provider, @default_provider)
-      |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
+    with {:ok, account_id} <- Arbiter.Quota.ensure_account_id(workspace_id, @default_provider) do
+      full =
+        attrs
+        |> Map.put(:provider_account_id, account_id)
+        |> Map.put(:provider, @default_provider)
+        |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
 
-    result =
-      CodexQuota
-      |> Ash.Changeset.for_create(:upsert, full)
-      |> Ash.create()
+      result =
+        CodexQuota
+        |> Ash.Changeset.for_create(:upsert, full)
+        |> Ash.create()
 
-    with {:ok, row} <- result do
-      broadcast(workspace_id, row)
+      with {:ok, row} <- result do
+        broadcast(account_id, row)
+      end
+
+      result
     end
-
-    result
   end
 
   # Broadcast the uniform `{:quota_updated, ws, view}` (not the raw resource
   # struct) so the LiveView `:quota` hook — which only handles that message —
   # picks up Codex live, exactly like the Anthropic and Google paths (bd-ajh7bd).
-  defp broadcast(workspace_id, %CodexQuota{} = row) do
-    Phoenix.PubSub.broadcast(
-      Arbiter.PubSub,
-      "quota:#{workspace_id}",
-      {:quota_updated, workspace_id, view(row)}
-    )
-  rescue
-    _ -> :error
+  # One account-keyed write fans out to every workspace on that account (P5).
+  defp broadcast(account_id, %CodexQuota{} = row) do
+    Arbiter.Quota.Broadcast.quota_updated(account_id, view(row))
   end
 
-  @doc "Latest stored Codex snapshot for `workspace_id`, or `nil`."
-  @spec latest(String.t(), String.t()) :: CodexQuota.t() | nil
-  def latest(workspace_id, provider \\ @default_provider) when is_binary(workspace_id) do
+  @doc "Latest stored Codex snapshot for `provider_account_id`, or `nil`."
+  @spec latest(String.t() | nil, String.t()) :: CodexQuota.t() | nil
+  def latest(account_id, provider \\ @default_provider)
+
+  def latest(account_id, provider) when is_binary(account_id) do
     CodexQuota
-    |> Ash.Query.filter(workspace_id == ^workspace_id and provider == ^provider)
+    |> Ash.Query.filter(provider_account_id == ^account_id and provider == ^provider)
     |> Ash.read_one()
     |> case do
       {:ok, %CodexQuota{} = row} -> row
@@ -184,6 +187,9 @@ defmodule Arbiter.Quota.Codex do
   rescue
     _ -> nil
   end
+
+  # A workspace with no Codex account yet reads as "nothing captured".
+  def latest(_account_id, _provider), do: nil
 
   # ---- normalize ---------------------------------------------------------
 
@@ -277,10 +283,10 @@ defmodule Arbiter.Quota.Codex do
     }
   end
 
-  @doc "Serialize the latest stored snapshot for `workspace_id`, or `nil`."
+  @doc "Serialize the latest stored snapshot for `provider_account_id`, or `nil`."
   @spec serialize_latest(String.t()) :: map() | nil
-  def serialize_latest(workspace_id) do
-    case latest(workspace_id) do
+  def serialize_latest(account_id) do
+    case latest(account_id) do
       nil -> nil
       %CodexQuota{} = row -> serialize(row)
     end
@@ -296,7 +302,7 @@ defmodule Arbiter.Quota.Codex do
   def view(%CodexQuota{} = row) do
     Arbiter.Quota.blank_view(row.provider)
     |> Map.merge(%{
-      workspace_id: row.workspace_id,
+      provider_account_id: row.provider_account_id,
       utilization_5h: fraction(row.session_used_percent),
       reset_5h_at: row.session_reset_at,
       utilization_7d: fraction(row.weekly_used_percent),

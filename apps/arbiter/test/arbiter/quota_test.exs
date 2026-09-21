@@ -53,7 +53,7 @@ defmodule Arbiter.QuotaTest do
       ws = workspace!()
 
       assert {:ok, quota} = Quota.capture(ws.id, @headers)
-      assert quota.workspace_id == ws.id
+      assert quota.provider_account_id == quota_account_id!(ws.id)
       assert quota.provider == "claude"
       assert quota.utilization_5h == 0.24
       assert %DateTime{} = quota.captured_at
@@ -80,23 +80,23 @@ defmodule Arbiter.QuotaTest do
       assert {:ok, q2} = Quota.capture(ws.id, updated)
       assert q2.utilization_5h == 0.99
 
-      assert Quota.latest(ws.id).utilization_5h == 0.99
+      assert Quota.latest(quota_account_id!(ws.id)).utilization_5h == 0.99
     end
 
     test "falls back to the default workspace when none is given" do
       ws = workspace!()
       assert {:ok, quota} = Quota.capture(nil, @headers)
-      assert quota.workspace_id == ws.id
+      assert quota.provider_account_id == quota_account_id!(ws.id)
     end
   end
 
   describe "serialize/2" do
     test "renders ISO-8601 timestamps and nil when absent" do
       ws = workspace!()
-      assert Quota.serialize(ws.id) == nil
+      assert Quota.serialize(quota_account_id!(ws.id)) == nil
 
       {:ok, _} = Quota.capture(ws.id, @headers)
-      serialized = Quota.serialize(ws.id)
+      serialized = Quota.serialize(quota_account_id!(ws.id))
 
       assert serialized.utilization_5h == 0.24
       assert is_binary(serialized.reset_5h_at)
@@ -106,7 +106,7 @@ defmodule Arbiter.QuotaTest do
     test "includes the provider field" do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
-      assert Quota.serialize(ws.id).provider == "claude"
+      assert Quota.serialize(quota_account_id!(ws.id)).provider == "claude"
     end
 
     test "includes stale indicator (false for fresh snapshots)" do
@@ -132,7 +132,7 @@ defmodule Arbiter.QuotaTest do
       ]
 
       {:ok, _} = Quota.capture(ws.id, headers)
-      serialized = Quota.serialize(ws.id)
+      serialized = Quota.serialize(quota_account_id!(ws.id))
 
       # Fresh snapshot (just captured) should not be stale
       refute serialized.stale
@@ -151,11 +151,11 @@ defmodule Arbiter.QuotaTest do
 
       {:ok, _} =
         Arbiter.Repo.query(
-          "UPDATE anthropic_quotas SET captured_at = ? WHERE workspace_id = ? AND provider = 'claude'",
-          [old_time, ws.id]
+          "UPDATE anthropic_quotas SET captured_at = ? WHERE provider_account_id = ? AND provider = 'claude'",
+          [old_time, quota_account_id!(ws.id)]
         )
 
-      serialized = Quota.serialize(ws.id)
+      serialized = Quota.serialize(quota_account_id!(ws.id))
 
       # Old snapshot should be stale
       assert serialized.stale == true
@@ -176,11 +176,11 @@ defmodule Arbiter.QuotaTest do
 
       {:ok, _} =
         Arbiter.Repo.query(
-          "UPDATE anthropic_quotas SET captured_at = ?, oauth_captured_at = ? WHERE workspace_id = ? AND provider = 'claude'",
-          [old_time, DateTime.utc_now(), ws.id]
+          "UPDATE anthropic_quotas SET captured_at = ?, oauth_captured_at = ? WHERE provider_account_id = ? AND provider = 'claude'",
+          [old_time, DateTime.utc_now(), quota_account_id!(ws.id)]
         )
 
-      serialized = Quota.serialize(ws.id)
+      serialized = Quota.serialize(quota_account_id!(ws.id))
 
       assert serialized.stale == true
       assert serialized.oauth_poll_fresh == true
@@ -190,7 +190,7 @@ defmodule Arbiter.QuotaTest do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
 
-      refute Quota.serialize(ws.id).oauth_poll_fresh
+      refute Quota.serialize(quota_account_id!(ws.id)).oauth_poll_fresh
     end
 
     # bd-1pmf9h: `stale` alone can't tell a coordinator "nothing has succeeded
@@ -205,7 +205,7 @@ defmodule Arbiter.QuotaTest do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
 
-      refute Quota.serialize(ws.id).credentials_expired
+      refute Quota.serialize(quota_account_id!(ws.id)).credentials_expired
 
       :ok =
         Arbiter.Agents.CredentialWatchdog.mark_expired(
@@ -223,7 +223,7 @@ defmodule Arbiter.QuotaTest do
       # sync on it deterministically instead of sleeping.
       _ = :sys.get_state(Arbiter.Agents.CredentialWatchdog)
 
-      assert Quota.serialize(ws.id).credentials_expired
+      assert Quota.serialize(quota_account_id!(ws.id)).credentials_expired
     end
 
     defp restore_test_env do
@@ -238,7 +238,7 @@ defmodule Arbiter.QuotaTest do
   describe "list_latest/1" do
     test "returns an empty list when nothing has been captured" do
       ws = workspace!()
-      assert Quota.list_latest(ws.id) == []
+      assert Quota.list_latest_for_workspace(ws.id) == []
     end
 
     test "returns one row per tracked provider" do
@@ -246,18 +246,66 @@ defmodule Arbiter.QuotaTest do
       {:ok, _} = Quota.capture(ws.id, @headers)
       {:ok, _} = Quota.capture(ws.id, @headers, provider: "codex")
 
-      providers = ws.id |> Quota.list_latest() |> Enum.map(& &1.provider) |> Enum.sort()
+      providers =
+        ws.id |> Quota.list_latest_for_workspace() |> Enum.map(& &1.provider) |> Enum.sort()
+
       assert providers == ["claude", "codex"]
     end
 
-    test "does not include another workspace's rows" do
+    test "does not include another account's rows" do
       ws = workspace!()
       other = workspace!("other")
+
+      # Two accounts, explicitly linked, so the workspaces do not share a
+      # snapshot — an unlinked workspace would adopt the install's sole
+      # account, which is the behaviour the *other* test covers.
+      for {workspace, slug} <- [{ws, "mine"}, {other, "theirs"}] do
+        Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+          workspace_id: workspace.id,
+          provider: :claude,
+          provider_account_id:
+            Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: slug}).id
+        })
+      end
+
       {:ok, _} = Quota.capture(ws.id, @headers)
       {:ok, _} = Quota.capture(other.id, @headers)
 
-      assert [%{workspace_id: id}] = Quota.list_latest(ws.id)
-      assert id == ws.id
+      assert [%{provider_account_id: id}] = Quota.list_latest_for_workspace(ws.id)
+      assert id == quota_account_id!(ws.id)
+      refute id == quota_account_id!(other.id)
+    end
+
+    # P5 acceptance 4: three workspaces on one account report one row, not
+    # three (`docs/provider-account-design.md` §6).
+    test "three workspaces on one account collapse to a single reported row" do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "shared"})
+
+      workspaces =
+        for name <- ["default", "emricare", "vstim"] do
+          ws = workspace!(name)
+
+          Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+            workspace_id: ws.id,
+            provider: :claude,
+            provider_account_id: account.id
+          })
+
+          ws
+        end
+
+      for ws <- workspaces, do: {:ok, _} = Quota.capture(ws.id, @headers)
+
+      assert [row] = Ash.read!(Arbiter.Quota.AnthropicQuota)
+      assert row.provider_account_id == account.id
+
+      for ws <- workspaces do
+        assert [view] = Quota.list_latest_for_workspace(ws.id)
+        assert view.provider_account_id == account.id
+        assert Enum.map(view.workspaces, & &1.name) == ["default", "emricare", "vstim"]
+        assert view.account.slug == "shared"
+      end
     end
   end
 
@@ -287,7 +335,7 @@ defmodule Arbiter.QuotaTest do
       {:ok, _} = Quota.capture(ws.id, @headers)
       {:ok, _} = Quota.capture(ws.id, @headers, provider: "codex")
 
-      serialized = Quota.list_serialized(ws.id)
+      serialized = Quota.list_serialized_for_workspace(ws.id)
       providers = serialized |> Enum.map(& &1.provider) |> Enum.sort()
 
       assert providers == ["claude", "codex"]
@@ -315,7 +363,7 @@ defmodule Arbiter.QuotaTest do
       {:ok, _} = Quota.capture(ws.id, @headers)
 
       Ash.create!(CodexQuota, %{
-        workspace_id: ws.id,
+        provider_account_id: quota_account_id!(ws.id, "codex"),
         provider: "codex",
         session_used_percent: 10.0,
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -327,7 +375,7 @@ defmodule Arbiter.QuotaTest do
       usage_event!(ws.id, "claude", 0.75)
       usage_event!(ws.id, "openai", 3.0)
 
-      views = Quota.list_latest(ws.id)
+      views = Quota.list_latest_for_workspace(ws.id)
       claude = Enum.find(views, &(&1.provider == "claude"))
       codex = Enum.find(views, &(&1.provider == "codex"))
 
@@ -335,11 +383,45 @@ defmodule Arbiter.QuotaTest do
       assert_in_delta codex.cost_usd, 3.0, 0.0001
     end
 
+    # §6: `recent spend (30d)` is the ACCOUNT total, with the per-workspace
+    # breakdown underneath it. Before P5 each workspace reported only its own
+    # spend against a budget it did not own alone.
+    test "cost_usd is the account total, and equals the per-workspace breakdown" do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "shared"})
+
+      [a, b] =
+        for {name, cost} <- [{"emricare", 1.25}, {"vstim", 3.75}] do
+          ws = workspace!(name)
+
+          Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+            workspace_id: ws.id,
+            provider: :claude,
+            provider_account_id: account.id
+          })
+
+          usage_event!(ws.id, "claude", cost)
+          ws
+        end
+
+      {:ok, _} = Quota.capture(a.id, @headers)
+
+      assert [view] = Quota.list_latest_for_workspace(b.id)
+      assert_in_delta view.cost_usd, 5.0, 0.0001
+
+      assert [%{name: "emricare", cost_usd: first}, %{name: "vstim", cost_usd: second}] =
+               view.workspaces
+
+      assert_in_delta first, 1.25, 0.0001
+      assert_in_delta second, 3.75, 0.0001
+      assert_in_delta first + second, view.cost_usd, 0.0001
+    end
+
     test "cost_usd is nil for a provider with no ledger spend" do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
 
-      views = Quota.list_latest(ws.id)
+      views = Quota.list_latest_for_workspace(ws.id)
       claude = Enum.find(views, &(&1.provider == "claude"))
       assert claude.cost_usd == nil
     end
@@ -349,7 +431,7 @@ defmodule Arbiter.QuotaTest do
       {:ok, _} = Quota.capture(ws.id, @headers)
 
       Ash.create!(CodexQuota, %{
-        workspace_id: ws.id,
+        provider_account_id: quota_account_id!(ws.id, "codex"),
         provider: "codex",
         plan: "plus",
         session_used_percent: 42.0,
@@ -358,7 +440,7 @@ defmodule Arbiter.QuotaTest do
       })
 
       Ash.create!(GoogleQuota, %{
-        workspace_id: ws.id,
+        provider_account_id: quota_account_id!(ws.id, "gemini_cli"),
         provider: "gemini_cli",
         plan: "Free",
         used_percent: 75.0,
@@ -366,7 +448,7 @@ defmodule Arbiter.QuotaTest do
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
       })
 
-      views = Quota.list_latest(ws.id)
+      views = Quota.list_latest_for_workspace(ws.id)
       providers = Enum.map(views, & &1.provider)
 
       # claude sorts first; the rest present regardless of order
@@ -386,6 +468,65 @@ defmodule Arbiter.QuotaTest do
       assert_in_delta google.utilization_5h, 0.75, 0.0001
     end
 
+    # Each `workspace_spend/1` term is a full scan of the 30-day usage ledger
+    # and does not vary by provider, so one pass must scan once per workspace
+    # — not once per workspace per provider (four providers × three
+    # workspaces on the live install).
+    test "spend_cache/1 memoizes each workspace's ledger spend once per workspace" do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "shared"})
+
+      workspaces =
+        for {name, cost} <- [{"emricare", 1.25}, {"vstim", 3.75}] do
+          ws = workspace!(name)
+
+          Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+            workspace_id: ws.id,
+            provider: :claude,
+            provider_account_id: account.id
+          })
+
+          usage_event!(ws.id, "claude", cost)
+          ws
+        end
+
+      cache = Quota.spend_cache(account.id)
+
+      assert Enum.sort(Map.keys(cache)) == workspaces |> Enum.map(& &1.id) |> Enum.sort()
+
+      for {ws, cost} <- Enum.zip(workspaces, [1.25, 3.75]) do
+        assert_in_delta cache[ws.id]["claude"], cost, 0.0001
+      end
+    end
+
+    test "a supplied spend cache is what every provider's view reads" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      Ash.create!(CodexQuota, %{
+        provider_account_id: quota_account_id!(ws.id, "codex"),
+        provider: "codex",
+        session_used_percent: 10.0,
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      # Ledger rows that the cache deliberately disagrees with: any view that
+      # rescans instead of reading the cache reports these numbers.
+      usage_event!(ws.id, "claude", 1.0)
+      usage_event!(ws.id, "openai", 2.0)
+
+      views =
+        Quota.list_latest_for_workspace(ws.id,
+          spend_cache: %{ws.id => %{"claude" => 9.0, "openai" => 7.0}}
+        )
+
+      claude = Enum.find(views, &(&1.provider == "claude"))
+      codex = Enum.find(views, &(&1.provider == "codex"))
+
+      assert_in_delta claude.cost_usd, 9.0, 0.0001
+      assert_in_delta codex.cost_usd, 7.0, 0.0001
+    end
+
     test "the dedicated Codex table wins over a same-provider generic row" do
       ws = workspace!()
       # A generic 'codex' row in the anthropic/quota table (legacy capture path)…
@@ -394,13 +535,13 @@ defmodule Arbiter.QuotaTest do
       # …and the real CodexQuota snapshot. Only one 'codex' entry, from the
       # dedicated table.
       Ash.create!(CodexQuota, %{
-        workspace_id: ws.id,
+        provider_account_id: quota_account_id!(ws.id, "codex"),
         provider: "codex",
         session_used_percent: 90.0,
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
       })
 
-      views = Quota.list_latest(ws.id)
+      views = Quota.list_latest_for_workspace(ws.id)
       codex_views = Enum.filter(views, &(&1.provider == "codex"))
 
       assert length(codex_views) == 1
@@ -460,7 +601,7 @@ defmodule Arbiter.QuotaTest do
       end)
 
       assert {:ok, quota} =
-               Quota.capture_oauth_usage(ws.id,
+               Quota.capture_oauth_usage(quota_account_id!(ws.id),
                  token: "test-token",
                  plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
                )
@@ -476,7 +617,7 @@ defmodule Arbiter.QuotaTest do
       assert quota.capture_source == "oauth_poll"
       assert quota.provider == "claude"
 
-      serialized = Quota.serialize(ws.id)
+      serialized = Quota.serialize(quota_account_id!(ws.id))
       assert serialized.utilization_5h == 0.24
       assert serialized.per_model_utilization == %{"sonnet" => 0.55, "opus" => 0.05}
       assert serialized.extra_usage == %{"amount_usd" => 12.5}
@@ -490,7 +631,7 @@ defmodule Arbiter.QuotaTest do
       end)
 
       assert {:ok, quota} =
-               Quota.capture_oauth_usage(ws.id,
+               Quota.capture_oauth_usage(quota_account_id!(ws.id),
                  token: "test-token",
                  plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
                )
@@ -508,12 +649,12 @@ defmodule Arbiter.QuotaTest do
       end)
 
       assert {:error, {:http_error, 500}} =
-               Quota.capture_oauth_usage(ws.id,
+               Quota.capture_oauth_usage(quota_account_id!(ws.id),
                  token: "test-token",
                  plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
                )
 
-      assert Quota.serialize(ws.id).per_model_utilization == %{}
+      assert Quota.serialize(quota_account_id!(ws.id)).per_model_utilization == %{}
     end
   end
 
@@ -553,7 +694,7 @@ defmodule Arbiter.QuotaTest do
       refute_received :http_call
 
       for ws <- [ws_a, ws_b, ws_c] do
-        serialized = Quota.serialize(ws.id)
+        serialized = Quota.serialize(quota_account_id!(ws.id))
         assert serialized.oauth_utilization_5h == 0.24
         assert serialized.per_model_utilization == %{"sonnet" => 0.55}
       end
@@ -573,8 +714,8 @@ defmodule Arbiter.QuotaTest do
                  plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
                )
 
-      assert Quota.serialize(ws_a.id) == nil
-      assert Quota.serialize(ws_b.id) == nil
+      assert Quota.serialize(quota_account_id!(ws_a.id)) == nil
+      assert Quota.serialize(quota_account_id!(ws_b.id)) == nil
     end
   end
 
@@ -615,7 +756,7 @@ defmodule Arbiter.QuotaTest do
         Req.Test.json(conn, %{"seven_day_sonnet" => %{"utilization" => 42}})
       end)
 
-      result = Quota.refresh_and_serialize(ws.id)
+      result = Quota.refresh_and_serialize(quota_account_id!(ws.id))
 
       assert result.utilization_5h == 0.24
       assert result.per_model_utilization == %{"sonnet" => 0.42}
@@ -625,14 +766,14 @@ defmodule Arbiter.QuotaTest do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
 
-      result = Quota.refresh_and_serialize(ws.id)
+      result = Quota.refresh_and_serialize(quota_account_id!(ws.id))
 
       assert result.utilization_5h == 0.24
     end
 
     test "returns nil when nothing has ever been captured, without raising" do
       ws = workspace!()
-      assert Quota.refresh_and_serialize(ws.id) == nil
+      assert Quota.refresh_and_serialize(quota_account_id!(ws.id)) == nil
     end
   end
 end

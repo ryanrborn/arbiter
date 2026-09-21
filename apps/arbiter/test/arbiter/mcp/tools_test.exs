@@ -805,7 +805,7 @@ defmodule Arbiter.MCP.ToolsTest do
       # thing that fetches Codex live. Persist a snapshot the way the probe
       # would, then assert quota_get reads it straight back.
       Ash.create!(Arbiter.Quota.CodexQuota, %{
-        workspace_id: ctx.ws.id,
+        provider_account_id: quota_account_id!(ctx.ws.id, "codex"),
         provider: "codex",
         plan: "plus",
         session_used_percent: 33.0,
@@ -820,7 +820,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "surfaces the persisted Gemini CLI snapshot from the DB (bd-ajh7bd)", ctx do
       Ash.create!(Arbiter.Quota.GoogleQuota, %{
-        workspace_id: ctx.ws.id,
+        provider_account_id: quota_account_id!(ctx.ws.id, "gemini_cli"),
         provider: "gemini_cli",
         plan: "Free",
         used_percent: 75.0,
