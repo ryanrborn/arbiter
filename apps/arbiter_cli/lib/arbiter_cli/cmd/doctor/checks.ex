@@ -172,13 +172,19 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         }
 
       true ->
+        hint =
+          if dev_install?() do
+            "The server's compiled version is stale — restart the server (via `systemctl --user restart arbiter` or `pkill -f 'phx.server'` + rebuild)."
+          else
+            "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
+              "the #{server_vsn} release asset to match the server."
+          end
+
         %Result{
           name: "version",
           status: :fail,
           detail: "server #{server_vsn} @ #{server_sha}, CLI #{cli_vsn} @ #{cli_sha}",
-          hint:
-            "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
-              "the #{server_vsn} release asset to match the server.",
+          hint: hint,
           fatal: false,
           blocks_readiness: false
         }
@@ -189,6 +195,16 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     case Version.parse(vsn) do
       {:ok, %Version{major: major}} -> major
       :error -> nil
+    end
+  end
+
+  # True if the CLI is running from a source checkout (has access to git).
+  # A dev/source install's version mismatch hint should point to the stale
+  # compile-time value, not to reinstalling from a release asset.
+  defp dev_install? do
+    case System.cmd("git", ["describe"], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      _ -> false
     end
   end
 

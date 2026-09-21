@@ -89,8 +89,22 @@ defmodule Arbiter.Version do
   @doc "App version from mix.exs at compile time."
   def app_version, do: @app_version
 
-  @doc "Short git SHA at compile time."
-  def git_sha, do: @git_sha
+  @doc """
+  Short git SHA.
+
+  When git is available at runtime, returns the current HEAD SHA. This ensures
+  dev installs always report the correct SHA even if the compile-time version is stale.
+  In release builds without git at runtime, returns the compile-time SHA.
+  """
+  def git_sha do
+    case System.cmd("git", ["rev-parse", "--short", "HEAD"],
+           cd: @git_dir_root,
+           stderr_to_stdout: true
+         ) do
+      {sha, 0} -> String.trim(sha)
+      _ -> @git_sha
+    end
+  end
 
   @doc "ISO-8601 UTC timestamp when this module was compiled."
   def built_at, do: @built_at
