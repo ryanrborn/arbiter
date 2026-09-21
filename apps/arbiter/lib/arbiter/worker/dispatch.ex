@@ -418,17 +418,27 @@ defmodule Arbiter.Worker.Dispatch do
         else
           require Logger
 
-          Logger.info(
-            "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
-              "provider #{inspect(session_provider)} does not match resolved provider " <>
-              "#{inspect(provider)}; degrading to a git-derived resume briefing instead"
-          )
-
           target_branch = resolve_target_branch(task, Keyword.put(opts, :repo, repo))
 
           case ResumeContext.build(task, worktree_path, target_branch) do
-            {:ok, context} -> Keyword.put(base_opts, :resume_context, context)
-            {:error, _reason} -> base_opts
+            {:ok, context} ->
+              Logger.info(
+                "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
+                  "provider #{inspect(session_provider)} does not match resolved provider " <>
+                  "#{inspect(provider)}; degrading to a git-derived resume briefing instead"
+              )
+
+              Keyword.put(base_opts, :resume_context, context)
+
+            {:error, reason} ->
+              Logger.warning(
+                "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
+                  "provider #{inspect(session_provider)} does not match resolved provider " <>
+                  "#{inspect(provider)}; failed to build a git-derived resume briefing " <>
+                  "(#{inspect(reason)}), proceeding with no briefing"
+              )
+
+              base_opts
           end
         end
 
@@ -716,7 +726,7 @@ defmodule Arbiter.Worker.Dispatch do
         {p, nil}
 
       _ ->
-        if is_atom(session_provider) and Agents.provider_available?(session_provider) do
+        if not is_nil(session_provider) and Agents.provider_available?(session_provider) do
           {session_provider, nil}
         else
           resolve_resume_provider(task, opts)
