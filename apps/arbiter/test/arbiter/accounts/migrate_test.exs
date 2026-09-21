@@ -8,6 +8,19 @@ defmodule Arbiter.Accounts.MigrateTest do
   are the ones §7.3/§7.5 name: only allowlisted keys move, a Vault-encrypted
   backup row is written *before* the workspace is touched, and the whole thing
   is idempotent enough to re-run after a partial failure.
+
+  P2 folded §7.5's Release N+2 (the destructive `worker_env` removal, its
+  gating backup row, and `mix arbiter.accounts.rollback`) into this same
+  release rather than shipping it as a separate phase — see the design doc's
+  "What P2 actually shipped" note. So this file's "removes only the
+  allowlisted keys from worker_env" and "restores the removed keys through
+  MergeWorkerEnv" tests already stand as P4's (bd-cblemv) acceptance 1, 2 and
+  4 evidence: no allowlisted key survives in `worker_env` post-migration, the
+  backup row is written unconditionally before any strip (so removal without
+  a backup cannot happen), and rollback restores a workspace's credential
+  after the destructive step. P4's own new work is deleting `ConfigDir`'s
+  now-dead server-env and install-wide-unambiguous fallbacks
+  (`config_dir_test.exs`, `config_dir_workspace_test.exs`).
   """
   use Arbiter.DataCase, async: false
 

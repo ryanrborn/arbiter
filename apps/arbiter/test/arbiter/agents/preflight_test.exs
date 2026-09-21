@@ -91,10 +91,15 @@ defmodule Arbiter.Agents.PreflightTest do
       :ok
     end
 
-    test "Claude.spawn_env/1 exports the token verbatim, never remapped" do
+    # P4 (bd-cblemv) deleted the server-env fallback `oauth_token/1` used to
+    # check: `spawn_env/1` no longer surfaces a server-process
+    # CLAUDE_CODE_OAUTH_TOKEN itself. The probe below still authenticates
+    # because Erlang's `Port.open` extends (not replaces) the BEAM's own OS
+    # environment, so the var reaches the spawned shell regardless.
+    test "Claude.spawn_env/1 does not surface a server-process token" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-session-token")
 
-      assert {"CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-session-token"} in Claude.spawn_env([])
+      refute List.keyfind(Claude.spawn_env([]), "CLAUDE_CODE_OAUTH_TOKEN", 0)
     end
 
     test "probe succeeds via the install-wide CLAUDE_CODE_OAUTH_TOKEN even with no personal API key/session" do

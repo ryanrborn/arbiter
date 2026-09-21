@@ -355,26 +355,28 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert Claude.spawn_env([]) == []
     end
 
-    test "exports CLAUDE_CODE_OAUTH_TOKEN under its own literal name, unchanged" do
+    # P4 (bd-cblemv) deleted the server-env fallback `oauth_token/1` used to
+    # check: a workspace-less spawn no longer reads CLAUDE_CODE_OAUTH_TOKEN
+    # from the server process environment at all, set or not.
+    test "ignores CLAUDE_CODE_OAUTH_TOKEN in the server process env" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"}]
+      assert Claude.spawn_env([]) == []
     end
 
-    test "never remaps the OAuth token onto ANTHROPIC_API_KEY" do
+    test "never remaps a configured ANTHROPIC_API_KEY onto CLAUDE_CODE_OAUTH_TOKEN" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      env = Claude.spawn_env([])
+      env = Claude.spawn_env(api_key: "literal-token")
 
-      assert {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"} in env
-      refute List.keyfind(env, "ANTHROPIC_API_KEY", 0)
+      refute List.keyfind(env, "CLAUDE_CODE_OAUTH_TOKEN", 0)
+      assert {"ANTHROPIC_API_KEY", "literal-token"} in env
     end
 
-    test "composes alongside ANTHROPIC_API_KEY without disturbing it" do
+    test "composes alongside ANTHROPIC_API_KEY without carrying the server env token" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
       assert Claude.spawn_env(api_key: "literal-token") == [
-               {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"},
                {"ANTHROPIC_API_KEY", "literal-token"}
              ]
     end
@@ -436,18 +438,20 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}]
     end
 
-    test "falls back to the server env var when the workspace defines no token" do
+    # P4 (bd-cblemv) deleted the server-env fallback: a workspace that defines
+    # no token of its own carries none, even with the server env var set.
+    test "carries no token when the workspace defines none, even with a server env var set" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
       ws = workspace_with_worker_env(%{"LOG_LEVEL" => "debug"})
 
-      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
+      assert Claude.spawn_env(workspace: ws) == []
     end
 
-    test "a nil / absent :workspace opt is unchanged from the bd-2zigo1 behaviour" do
+    test "a nil / absent :workspace opt carries no token either, server env var or not" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
 
-      assert Claude.spawn_env(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
+      assert Claude.spawn_env(workspace: nil) == []
+      assert Claude.spawn_env([]) == []
     end
   end
 

@@ -191,7 +191,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
     end
   end
 
-  describe "ensure/0 + env/0 with CLAUDE_CODE_OAUTH_TOKEN set (bd-6umoh9)" do
+  describe "ensure/0 + env/0 ignore the server process env (P4, bd-cblemv)" do
     setup do
       prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
 
@@ -205,42 +205,29 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       :ok
     end
 
-    test "does not seed .credentials.json when a worker OAuth token is configured", %{
-      target: target
-    } do
+    # P4 deletes the bd-6umoh9 server-env fallback: the account join
+    # (`Arbiter.Accounts.Credentials.install_credential/1`) is the only
+    # workspace-less source now, and `Arbiter.Accounts.enabled?/0` is false in
+    # this file's setup, so a workspace-less spawn carries no token at all —
+    # the server process env is never consulted.
+    test "does not seed .credentials.json based on the server env — it does not carry a token",
+         %{target: target} do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
       assert {:ok, ^target} = ConfigDir.ensure()
 
-      # No operator credential should exist for the worker to refresh.
-      refute File.exists?(Path.join(target, ".credentials.json"))
-      # Everything else still seeds/generates normally.
+      # The server env var is no longer a source, so seeding still happens.
+      assert File.exists?(Path.join(target, ".credentials.json"))
       assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
       assert File.exists?(Path.join(target, "settings.json"))
     end
 
-    test "removes a stale seeded .credentials.json once a worker OAuth token appears", %{
-      target: target
-    } do
-      # Simulate a pre-existing install that seeded before the token was adopted.
-      assert {:ok, ^target} = ConfigDir.ensure()
-      assert File.exists?(Path.join(target, ".credentials.json"))
-
-      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
-      assert {:ok, ^target} = ConfigDir.ensure()
-
-      refute File.exists?(Path.join(target, ".credentials.json"))
-    end
-
-    test "env/0 includes CLAUDE_CODE_OAUTH_TOKEN alongside CLAUDE_CONFIG_DIR", %{
+    test "env/0 no longer reads CLAUDE_CODE_OAUTH_TOKEN from the server env", %{
       target: target
     } do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      assert ConfigDir.env() == [
-               {"CLAUDE_CONFIG_DIR", target},
-               {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"}
-             ]
+      assert ConfigDir.env() == [{"CLAUDE_CONFIG_DIR", target}]
     end
 
     test "seeding still happens when the OS env var is unset (no regression)", %{
@@ -330,7 +317,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
              ]
     end
 
-    test "the workspace token wins over a server env var of the same name",
+    test "the workspace token is used even when a server env var of the same name is set",
          %{target: target} do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
       ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
@@ -341,18 +328,18 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
              ]
     end
 
-    test "falls back to the server env var when the workspace defines no token",
+    # P4 (bd-cblemv) deletes the server-env fallback: a workspace that defines
+    # no token of its own carries none, full stop — the server process env is
+    # never consulted, even when set.
+    test "carries no token when the workspace defines none, even with a server env var set",
          %{target: target} do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
       ws = workspace_with_worker_env(%{"SOME_OTHER" => "x"})
 
-      assert ConfigDir.env(ws) == [
-               {"CLAUDE_CONFIG_DIR", target},
-               {"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}
-             ]
+      assert ConfigDir.env(ws) == [{"CLAUDE_CONFIG_DIR", target}]
 
       assert {:ok, ^target} = ConfigDir.ensure(ws)
-      refute File.exists?(Path.join(target, ".credentials.json"))
+      assert File.exists?(Path.join(target, ".credentials.json"))
     end
 
     # The other direction: a gate that never seeds would pass the tests above
@@ -387,7 +374,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
                File.read!(Path.join(source, ".credentials.json"))
     end
 
-    test "an undecryptable worker_env store degrades to the server env var",
+    test "an undecryptable worker_env store degrades to no token rather than raising",
          %{target: target} do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
 
@@ -397,10 +384,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
         encrypted_worker_env: "not-base64-ciphertext!!"
       }
 
-      assert ConfigDir.env(ws) == [
-               {"CLAUDE_CONFIG_DIR", target},
-               {"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}
-             ]
+      assert ConfigDir.env(ws) == [{"CLAUDE_CONFIG_DIR", target}]
     end
   end
 
