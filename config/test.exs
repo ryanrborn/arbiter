@@ -136,7 +136,21 @@ config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-
 # `:worktree_root` at its own tmp dir for the duration of its own tests. That
 # incidental overlap is what made the failures look order-dependent (bd-9j4znl).
 # Tests that need their own isolated root still override this per-test.
-config :arbiter, :worktree_root, Path.join(System.tmp_dir!(), "arbiter-worktrees-test")
+#
+# bd-b6noq9 (#1930): NOT under `System.tmp_dir!()`. A worktree holds real git
+# data for the lifetime of the run using it, and on the dogfood host `/tmp` is
+# a tmpfs swept daily by `systemd-tmpfiles` — a root nothing in Arbiter
+# controls. `scratch_root/0` is disk-backed and under `$HOME/.cache`.
+# Mirrors `Arbiter.Config.Paths.scratch_root/0`, which cannot be called from a
+# config script (the app isn't loaded yet) — hence the inline resolution. The
+# key is also configured so the resolver and this file agree even where the
+# two defaults could diverge (HOME unset).
+scratch_root =
+  System.get_env("ARBITER_SCRATCH_ROOT") ||
+    Path.join(System.get_env("HOME") || System.tmp_dir!(), ".cache/arbiter/scratch")
+
+config :arbiter, :scratch_root, scratch_root
+config :arbiter, :worktree_root, Path.join(scratch_root, "worktrees-test")
 
 # Stalled-worker detection (bd-awi4nw): shorten the post-exit grace so the
 # deferred classify+escalate check fires fast under test. Still > 0 so a normal
