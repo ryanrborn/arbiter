@@ -1,12 +1,19 @@
 defmodule ArbiterWeb.Api.QuotaControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Accounts.WorkspaceProviderAccount
   alias Arbiter.Quota
   alias Arbiter.Tasks.Workspace
 
   setup do
     ws = Ash.create!(Workspace, %{name: "default"})
     {:ok, ws: ws}
+  end
+
+  defp account_id!(ws_id, provider \\ "claude") do
+    {:ok, id} = Quota.ensure_account_id(ws_id, provider)
+    id
   end
 
   test "returns null claude quota before capture (default workspace)", %{conn: conn, ws: ws} do
@@ -126,7 +133,7 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     # The controller is now a pure DB read — no live Google fetch. A row
     # persisted by the CloudProbe (or here directly) is what surfaces.
     Ash.create!(Arbiter.Quota.GoogleQuota, %{
-      workspace_id: ws.id,
+      provider_account_id: account_id!(ws.id, "gemini_cli"),
       provider: "gemini_cli",
       plan: "Free",
       used_percent: 75.0,
@@ -150,5 +157,51 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     resp = conn |> get("/api/quota") |> json_response(200)
     providers = resp["data"]["quotas"] |> Enum.map(& &1["provider"]) |> Enum.sort()
     assert providers == ["claude", "codex"]
+  end
+  describe "P5: keyed by provider account (docs/provider-account-design.md §6)" do
+    test "three workspaces on one account report one account row, not three", %{conn: conn, ws: ws} do
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "personal-max"})
+
+      others =
+        for name <- ["emricare", "vstim"], do: Ash.create!(Workspace, %{name: name})
+
+      for w <- [ws | others] do
+        Ash.create!(WorkspaceProviderAccount, %{
+          workspace_id: w.id,
+          provider: :claude,
+          provider_account_id: account.id
+        })
+
+        {:ok, _} = Quota.capture(w.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+      end
+
+      assert [row] = Ash.read!(Arbiter.Quota.AnthropicQuota)
+      assert row.provider_account_id == account.id
+
+      for w <- [ws | others] do
+        resp = conn |> get("/api/quota?workspace=#{w.id}") |> json_response(200)
+
+        assert [quota] = resp["data"]["quotas"]
+        assert quota["account"]["slug"] == "personal-max"
+        assert quota["account"]["provider"] == "claude"
+
+        assert Enum.map(quota["workspaces"], & &1["name"]) ==
+                 ["default", "emricare", "vstim"]
+      end
+    end
+
+    test "--json keeps workspace_id as a deprecated alias alongside account/workspaces",
+         %{conn: conn, ws: ws} do
+      {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+      resp = conn |> get("/api/quota") |> json_response(200)
+
+      assert resp["data"]["workspace_id"] == ws.id
+      assert resp["data"]["workspace"]["name"] == "default"
+      assert resp["data"]["account"]["provider"] == "claude"
+      assert [%{"id" => id}] = resp["data"]["workspaces"]
+      assert id == ws.id
+      assert resp["data"]["claude"]["provider_account_id"] == account_id!(ws.id)
+    end
   end
 end

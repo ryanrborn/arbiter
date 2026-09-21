@@ -528,7 +528,7 @@ defmodule Arbiter.Workflows.ConductorTest do
     test "Default gate holds when status_5h is not allowed", %{ws: ws} do
       {:ok, _quota} =
         Ash.create(Arbiter.Quota.AnthropicQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id),
           utilization_5h: 0.50,
           status_5h: "restricted",
           captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -546,7 +546,7 @@ defmodule Arbiter.Workflows.ConductorTest do
     test "Default gate holds when utilization_5h exceeds ceiling", %{ws: ws} do
       {:ok, _quota} =
         Ash.create(Arbiter.Quota.AnthropicQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id),
           utilization_5h: 0.90,
           status_5h: "allowed",
           captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -573,7 +573,7 @@ defmodule Arbiter.Workflows.ConductorTest do
 
       {:ok, _quota} =
         Ash.create(Arbiter.Quota.AnthropicQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id),
           utilization_5h: 0.6,
           status_5h: "allowed",
           captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -599,7 +599,7 @@ defmodule Arbiter.Workflows.ConductorTest do
 
       {:ok, _quota} =
         Ash.create(Arbiter.Quota.AnthropicQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id),
           utilization_5h: 0.99,
           status_5h: "rejected",
           captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -618,7 +618,7 @@ defmodule Arbiter.Workflows.ConductorTest do
     test "Default gate allows dispatch when utilization_5h is below ceiling", %{ws: ws} do
       {:ok, _quota} =
         Ash.create(Arbiter.Quota.AnthropicQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id),
           utilization_5h: 0.70,
           status_5h: "allowed",
           captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
