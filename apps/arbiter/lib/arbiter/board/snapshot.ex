@@ -426,8 +426,9 @@ defmodule Arbiter.Board.Snapshot do
          workspace <- safe_workspace(ws_id),
          false <- Arbiter.Quota.continue_mode?(workspace),
          provider <- quota_provider(workspace),
-         snapshot when not is_nil(snapshot) <- latest_quota(ws_id, provider) do
-      describe_quota(snapshot, {quota_account(ws_id, provider), workspace})
+         account <- quota_account(ws_id, provider),
+         snapshot when not is_nil(snapshot) <- latest_quota(account, provider) do
+      describe_quota(snapshot, {account, workspace})
     else
       _ -> :ok
     end
@@ -1195,8 +1196,10 @@ defmodule Arbiter.Board.Snapshot do
     if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
   end
 
-  defp latest_quota(ws_id, provider) do
-    Arbiter.Quota.latest_for_workspace(ws_id, provider)
+  defp latest_quota(nil, _provider), do: nil
+
+  defp latest_quota(%{id: account_id}, provider) do
+    Arbiter.Quota.latest_for_provider(account_id, provider)
   rescue
     _ -> nil
   end
