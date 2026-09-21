@@ -377,7 +377,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, _worktree_path} <- resume_worktree(task, repo),
-         {:ok, session_id} <- latest_session_id(task_id) do
+         {:ok, session_id, session_provider} <- latest_session_id(task_id) do
       prior_run_id = latest_run_id(task_id)
 
       # Free the registry slot the same way resume/2 does: a stopped worker
@@ -388,7 +388,7 @@ defmodule Arbiter.Worker.Dispatch do
 
       resume_opts =
         opts
-        |> Keyword.put_new(:agent_type, latest_provider(task_id))
+        |> Keyword.put_new(:agent_type, session_provider)
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
@@ -588,14 +588,23 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> nil
   end
 
-  # The most-recent captured upstream session id for the task, newest first.
-  # Drawn from the usage ledger (`Arbiter.Usage.Event`), where the worker
-  # persists each Claude session's `session_id` on its terminal `result` event.
-  # The task_id filter is exact, so ReviewGate reviewer rows (which carry a
-  # `#review` suffix) are excluded — we resume the author's session, not a
-  # reviewer's. `{:error, :no_session}` when none was ever captured: the task
-  # was never worked by a session-capable agent, so there is nothing to resume
-  # at the session level (the caller must dispatch fresh).
+  # The most-recent captured upstream session id for the task, newest first,
+  # PLUS the provider recorded on that SAME row. Drawn from the usage ledger
+  # (`Arbiter.Usage.Event`), where the worker persists each session's
+  # `session_id` on its terminal `result` event. The task_id filter is exact,
+  # so ReviewGate reviewer rows (which carry a `#review` suffix) are excluded
+  # — we resume the author's session, not a reviewer's. `{:error, :no_session}`
+  # when none was ever captured: the task was never worked by a
+  # session-capable agent, so there is nothing to resume at the session level
+  # (the caller must dispatch fresh).
+  #
+  # bd-b7e33c post-merge finding (2026-09-19): this used to return only the
+  # session_id, and callers paired it with a SEPARATE `latest_provider/1`
+  # query. The two queries can pick different rows — e.g. a newer row from a
+  # failed attempt on a different provider that never got far enough to
+  # capture a session_id — pinning `:agent_type` to a provider that doesn't
+  # own the conversation id being resumed. Returning the provider off the
+  # exact row the session_id came from makes that mismatch impossible.
   defp latest_session_id(task_id) when is_binary(task_id) do
     Event
     |> Ash.Query.filter(task_id == ^task_id and not is_nil(session_id))
@@ -604,8 +613,11 @@ defmodule Arbiter.Worker.Dispatch do
     |> Ash.read!()
     |> List.first()
     |> case do
-      %Event{session_id: sid} when is_binary(sid) and sid != "" -> {:ok, sid}
-      _ -> {:error, :no_session}
+      %Event{session_id: sid, provider: p} when is_binary(sid) and sid != "" ->
+        {:ok, sid, safe_provider_atom(p)}
+
+      _ ->
+        {:error, :no_session}
     end
   rescue
     _ -> {:error, :no_session}
@@ -636,11 +648,13 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> nil
   end
 
-  defp safe_provider_atom(p) do
+  defp safe_provider_atom(p) when is_binary(p) do
     String.to_existing_atom(p)
   rescue
     ArgumentError -> nil
   end
+
+  defp safe_provider_atom(_), do: nil
 
   # `review: true` is the convenience hook used by `arb review`: it forces the
   # review-only defaults so the caller doesn't have to spell out four flags in
