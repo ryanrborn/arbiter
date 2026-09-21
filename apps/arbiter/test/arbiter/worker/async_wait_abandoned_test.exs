@@ -166,6 +166,60 @@ defmodule Arbiter.Worker.AsyncWaitAbandonedTest do
     end
   end
 
+  describe "StopReason.classify/3 — agy's own async-arm markers (bd-1zz5mn)" do
+    # Verbatim from the bd-40h2to investigation: agy emits none of the Claude
+    # CLI's wording, so `abandoned_async_wait?/1` used to always return false
+    # for it and every agy early-quit was misclassified as a plain
+    # `:exited_without_done`.
+    @agy_tail [
+      "run_command(mix test --failed)",
+      "Step is still running.",
+      "Status: RUNNING",
+      "was canceled with result: Tool execution was canceled"
+    ]
+
+    test "an agy run whose last act is a still-running/canceled background step is :async_wait_abandoned" do
+      reason = StopReason.classify(0, @agy_tail, "gemini")
+
+      assert reason.category == :async_wait_abandoned
+      assert reason.exit_status == 0
+    end
+
+    test "without the provider hint, the same tail falls back to Claude's signature and misses" do
+      assert StopReason.classify(0, @agy_tail).category == :exited_without_done
+      assert StopReason.classify(0, @agy_tail, nil).category == :exited_without_done
+    end
+
+    test "agy's markers do not leak into Claude's classification" do
+      assert StopReason.classify(0, @agy_tail, "claude").category == :exited_without_done
+    end
+
+    test "Claude's markers do not accidentally match under the gemini provider" do
+      assert StopReason.classify(0, @monitor_tail, "gemini").category == :exited_without_done
+    end
+
+    test "a real provider error in the agy tail still outranks the async-wait signature" do
+      lines = @agy_tail ++ ["RESOURCE_EXHAUSTED: rate limit"]
+
+      assert StopReason.classify(0, lines, "gemini").category == :rate_limited
+    end
+  end
+
+  describe "regression — Claude's existing classification is unchanged by the per-provider seam" do
+    test "classify/2 (no provider) still classifies the Claude fixtures as before" do
+      assert StopReason.classify(0, @monitor_tail).category == :async_wait_abandoned
+      assert StopReason.classify(0, @backgrounded_bash_tail).category == :async_wait_abandoned
+
+      assert StopReason.classify(0, @timed_out_to_background_tail).category ==
+               :async_wait_abandoned
+    end
+
+    test "classify/3 with the claude provider matches classify/2 exactly" do
+      assert StopReason.classify(0, @monitor_tail, "claude").category ==
+               StopReason.classify(0, @monitor_tail).category
+    end
+  end
+
   describe "Worker.resume_decision/6 — an abandoned async wait must survive the guards" do
     test "the category is resumable" do
       assert Arbiter.Worker.resume_decision(:async_wait_abandoned, "sess-1", 0, 3, nil, "fp-a") ==
@@ -249,7 +303,8 @@ defmodule Arbiter.Worker.AsyncWaitPromptGuidanceTest do
       {"work prompt", PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")},
       {"task prompt", PromptBuilder.prompt_for_task(task(%{issue_type: :task}), [])},
       {"review prompt", PromptBuilder.prompt_for_task(task(%{}), review: true)},
-      {"claude adapter async_tool_instruction", Arbiter.Agents.Claude.async_tool_instruction()}
+      {"claude adapter async_tool_instruction",
+       Arbiter.Agents.Claude.async_tool_instruction("your VERDICT")}
     ]
   end
 
@@ -320,5 +375,31 @@ defmodule Arbiter.Worker.AsyncWaitAbandonedIntegrationTest do
     assert reason.category == :async_wait_abandoned
 
     assert Arbiter.Worker.resume_decision(reason.category, "sess-1", 0, 3, nil, "fp") == :resume
+  end
+
+  test "bd-1zz5mn: an agy session gets the identical end-to-end treatment Claude does" do
+    reason =
+      Arbiter.Worker.StopReason.classify(
+        0,
+        [
+          "Step is still running.",
+          "Status: RUNNING",
+          "was canceled with result: Tool execution was canceled"
+        ],
+        "gemini"
+      )
+
+    assert reason.category == :async_wait_abandoned
+
+    # The corrective prompt fires, not the generic "pick up where you left off".
+    prompt = Arbiter.Worker.resume_continue_prompt(reason.category, "bd-1zz5mn")
+    assert prompt =~ "Monitor"
+    assert prompt =~ "TaskOutput"
+
+    # A resumed segment that only read files and relaunched a command (same
+    # worktree fingerprint) is not failed at attempt 1 of 3 — the no-progress
+    # guard is exempted for this category regardless of provider.
+    assert Arbiter.Worker.resume_decision(reason.category, "sess-1", 1, 3, "fp-a", "fp-a") ==
+             :resume
   end
 end

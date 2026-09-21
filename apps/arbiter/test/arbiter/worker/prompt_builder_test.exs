@@ -529,4 +529,112 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       assert prompt =~ "awaiting verification"
     end
   end
+
+  describe "adapter-aware async tools prompt (bd-937r5u)" do
+    test "gemini worker prompt contains no Claude tools and instructs polling manage_task status" do
+      work_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-gemini",
+          adapter: Arbiter.Agents.Gemini
+        )
+
+      # Acceptance criterion 2: no Claude tool references or Bash timeout instructions
+      refute work_prompt =~ "Monitor"
+      refute work_prompt =~ "ScheduleWakeup"
+      refute work_prompt =~ "TaskOutput"
+      refute work_prompt =~ "Bash"
+      refute work_prompt =~ "timeout parameter"
+      assert work_prompt =~ "WaitMsBeforeAsync"
+      assert work_prompt =~ "Blocking"
+
+      # Acceptance criterion 3: instructs polling manage_task status until finished
+      assert work_prompt =~ "manage_task status"
+      assert work_prompt =~ "RUNNING"
+      assert work_prompt =~ "terminates the session and discards the work"
+      assert work_prompt =~ "COMMIT correct work BEFORE"
+
+      # task prompt
+      task_prompt =
+        PromptBuilder.prompt_for_task(task(%{issue_type: :task}),
+          adapter: Arbiter.Agents.Gemini
+        )
+
+      refute task_prompt =~ "Monitor"
+      assert task_prompt =~ "manage_task status"
+
+      # review prompt
+      review_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          review: true,
+          adapter: Arbiter.Agents.Gemini
+        )
+
+      refute review_prompt =~ "Monitor"
+      refute review_prompt =~ "COMMIT correct work BEFORE"
+      assert review_prompt =~ "manage_task status"
+    end
+
+    test "codex worker prompt contains Codex synchronous execution instruction" do
+      work_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-codex",
+          adapter: Arbiter.Agents.Codex
+        )
+
+      assert work_prompt =~ "Codex `exec` executes commands synchronously"
+      assert work_prompt =~ "do not print `arb done` until"
+      refute work_prompt =~ "Monitor"
+
+      review_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          review: true,
+          adapter: Arbiter.Agents.Codex
+        )
+
+      assert review_prompt =~ "Codex `exec` executes commands synchronously"
+      assert review_prompt =~ "do not print `arb done` until"
+      refute review_prompt =~ "Monitor"
+    end
+
+    # Routing the block through the adapter must not quietly drop the
+    # provider-agnostic guidance codex used to get from the hard-coded Claude
+    # text: "commit before you verify" is about not losing work to a killed
+    # session, which is true on every CLI.
+    test "codex work prompt keeps the commit-before-verify guidance and the coda" do
+      work_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-codex",
+          adapter: Arbiter.Agents.Codex
+        )
+
+      assert work_prompt =~ "COMMIT correct work BEFORE running any long verification"
+      assert work_prompt =~ "the work is incomplete until every tool you launched has"
+
+      # ...but a reviewer, which cannot push, must not be told to commit.
+      review_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          review: true,
+          adapter: Arbiter.Agents.Codex
+        )
+
+      refute review_prompt =~ "COMMIT correct work BEFORE"
+    end
+
+    test "claude prompt remains unchanged with explicit or default adapter" do
+      default_prompt =
+        PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-claude")
+
+      claude_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-claude",
+          adapter: Arbiter.Agents.Claude
+        )
+
+      assert default_prompt == claude_prompt
+      assert claude_prompt =~ "Monitor"
+      assert claude_prompt =~ "ScheduleWakeup"
+      assert claude_prompt =~ "Bash"
+      assert claude_prompt =~ "`timeout` parameter"
+    end
+  end
 end

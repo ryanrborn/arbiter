@@ -49,6 +49,26 @@ defmodule Arbiter.Config.Paths do
   end
 
   @doc """
+  Root for **disposable sandbox scaffolding** whose lifetime is owned by a
+  run, not by a cleaner (bd-b6noq9, #1930).
+
+  Deliberately NOT `System.tmp_dir!()`. On the dogfood host `/tmp` is a
+  `tmpfs` swept by `systemd-tmpfiles` (`q /tmp 1777 root root 10d`, daily
+  timer), so anything provisioned there is on a clock that nothing in Arbiter
+  controls and is lost outright on reboot. A sandbox that holds the only copy
+  of a branch — a worktree plus its bare origin — must not live somewhere an
+  external janitor can reach it while the run that owns it is still alive.
+
+  Under `$HOME/.cache` rather than `$HOME` proper so an operator wiping their
+  cache is doing something they mean to do, and so it is disk-backed (a
+  `tmpfs` root means a sandbox competes with RAM and vanishes on reboot).
+  """
+  @spec scratch_root() :: String.t()
+  def scratch_root do
+    resolve("ARBITER_SCRATCH_ROOT", :scratch_root, "~/.cache/arbiter/scratch")
+  end
+
+  @doc """
   Root holding the shared memory layers a coordinator session mounts
   read-only (RFC §9.4, `Arbiter.Sessions.Memory`).
 

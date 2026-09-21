@@ -93,6 +93,23 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
 
       assert html =~ ~s(<header id="second-nav")
     end
+
+    test "when active_href is set, an item is active iff its href equals active_href" do
+      items = [
+        %{label: "Workers", href: "/workers"},
+        %{label: "Run history", href: "/workers/history"}
+      ]
+
+      html =
+        render_component(&top_nav/1, %{
+          items: items,
+          current_path: "/workers/history/123",
+          active_href: "/workers/history"
+        })
+
+      assert element_containing(html, "Run history") =~ "var(--surface-card)"
+      refute element_containing(html, "Workers") =~ "var(--surface-card)"
+    end
   end
 
   describe "filter_tabs/1" do

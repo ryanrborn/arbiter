@@ -1043,6 +1043,8 @@ defmodule Arbiter.Worker do
   # nil — subsequent terminal updates will no-op cleanly.
   defp record_run_started(%State{} = state) do
     worker_type = worker_type_from_meta(state.meta)
+    provider = provider_from_meta(state.meta) || default_run_provider(state, worker_type)
+    provider_fallback = provider_fallback_from_meta(state.meta)
 
     attrs = %{
       task_id: state.task_id,
@@ -1067,7 +1069,9 @@ defmodule Arbiter.Worker do
       # task_id strings. The base_task_id is the root task (strips #review/#impl etc),
       # and role denotes the run's purpose (base/review/impl).
       base_task_id: Arbiter.Worker.ReviewGate.base_task_id(state.task_id),
-      role: worker_type_to_role(worker_type)
+      role: worker_type_to_role(worker_type),
+      provider: provider,
+      provider_fallback: provider_fallback
     }
 
     case Ash.create(Arbiter.Workers.Run, attrs) do
@@ -1083,6 +1087,51 @@ defmodule Arbiter.Worker do
       log_run_warning("create", state.task_id, e)
       state
   end
+
+  defp provider_from_meta(meta) when is_map(meta) do
+    meta
+    |> find_meta_provider()
+    |> normalize_provider_string()
+  end
+
+  defp provider_from_meta(_), do: nil
+
+  defp find_meta_provider(meta) do
+    Enum.find_value(
+      [
+        Map.get(meta, :provider),
+        Map.get(meta, "provider"),
+        get_in(meta, [:routing_config, :provider]),
+        get_in(meta, ["routing_config", "provider"]),
+        Map.get(meta, :agent_type),
+        Map.get(meta, "agent_type")
+      ],
+      & &1
+    )
+  end
+
+  defp normalize_provider_string(p) when is_atom(p) and not is_nil(p), do: Atom.to_string(p)
+  defp normalize_provider_string(p) when is_binary(p) and p != "", do: p
+  defp normalize_provider_string(_), do: nil
+
+  defp default_run_provider(%State{task_id: task_id}, worker_type)
+       when worker_type in [:impl, :fix_pass, :conflict] and is_binary(task_id) do
+    case Arbiter.Workers.Run.latest_authoring_provider(task_id) do
+      p when is_atom(p) and not is_nil(p) -> Atom.to_string(p)
+      _ -> nil
+    end
+  end
+
+  defp default_run_provider(_state, _worker_type), do: nil
+
+  defp provider_fallback_from_meta(meta) when is_map(meta) do
+    case Map.get(meta, :provider_fallback) || Map.get(meta, "provider_fallback") do
+      fb when is_binary(fb) and fb != "" -> fb
+      _ -> nil
+    end
+  end
+
+  defp provider_fallback_from_meta(_), do: nil
 
   defp resumed_from_run_id(meta) when is_map(meta),
     do: Map.get(meta, :resumed_from_run_id) || Map.get(meta, "resumed_from_run_id")
@@ -1149,6 +1198,8 @@ defmodule Arbiter.Worker do
     # Extract the model from meta, checking both potential sources
     meta = state.meta || %{}
     model = Map.get(meta, :model)
+    provider = provider_from_meta(meta)
+    provider_fallback = provider_fallback_from_meta(meta)
 
     attrs = %{
       status: run_status(state),
@@ -1160,6 +1211,10 @@ defmodule Arbiter.Worker do
 
     # Only include model in the update if it's non-nil (to preserve NULL if not set)
     attrs = if model, do: Map.put(attrs, :model, model), else: attrs
+    attrs = if provider, do: Map.put(attrs, :provider, provider), else: attrs
+
+    attrs =
+      if provider_fallback, do: Map.put(attrs, :provider_fallback, provider_fallback), else: attrs
 
     # bd-9rdwe4: the structured terminal record (#1017 gap G5) — nil on a run
     # whose session never reached a terminal `result` event (crashed,
@@ -1816,19 +1871,7 @@ defmodule Arbiter.Worker do
 
   def handle_call({:report, key, value}, _from, %State{} = state) do
     state = %State{state | meta: Map.put(state.meta, key, value)}
-
-    if key == :model and not is_nil(state.run_id) do
-      backfill_run_model(state.run_id, value, state.task_id)
-    end
-
-    # bd-dzz6ly: routing/skills/standing_orders are resolved after this
-    # worker's Run row already exists (dispatch/spawn happens post-init), so
-    # they arrive as a single reported map and get patched onto the row the
-    # same way :model's late arrival does above.
-    if key == :run_provenance and not is_nil(state.run_id) and is_map(value) do
-      backfill_run_fields(state.run_id, value, state.task_id)
-    end
-
+    backfill_report(state.run_id, state.task_id, key, value)
     {:reply, :ok, state}
   end
 
@@ -1862,12 +1905,7 @@ defmodule Arbiter.Worker do
     # on reading it back off a temp file that might already be gone.
     persist_composed_prompt(state, session_config)
 
-    if spawn_args != pristine_args do
-      case get_prompt_tmpfile(adapter, pristine_args.argv) do
-        path when is_binary(path) -> File.rm(path)
-        nil -> :ok
-      end
-    end
+    cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
 
     port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
     now = DateTime.utc_now()
@@ -1911,21 +1949,68 @@ defmodule Arbiter.Worker do
       |> Map.delete(:resume_session_id)
       |> Map.put(:config_dir, config_dir)
       |> Map.put(:cwd, Map.get(port_args, :cd))
+      |> maybe_put(:provider, provider && to_string(provider))
 
     new_state = %State{state | claude_sessions: sessions, meta: meta}
     new_state = sync_session_meta(new_state, port)
 
-    # Persist config_dir onto the run row now, at dispatch, so a node that dies
-    # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
-    # a Gemini/Codex run has no Claude session file to reconcile against.
-    if config_dir && new_state.run_id &&
-         Map.get(session_config, :provider) in [nil, "claude"] do
-      backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
-    end
+    backfill_session_dispatch(
+      new_state.run_id,
+      new_state.task_id,
+      provider,
+      config_dir,
+      session_config
+    )
 
     {:reply, {:ok, port}, new_state}
   rescue
     e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+  end
+
+  defp backfill_report(nil, _task_id, _key, _value), do: :ok
+
+  defp backfill_report(run_id, task_id, :model, value) do
+    backfill_run_model(run_id, value, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :routing_config, %{} = value) do
+    case Map.get(value, :provider) || Map.get(value, "provider") do
+      nil -> :ok
+      prov -> backfill_run_fields(run_id, %{provider: to_string(prov)}, task_id)
+    end
+  end
+
+  defp backfill_report(run_id, task_id, :provider, value) when not is_nil(value) do
+    backfill_run_fields(run_id, %{provider: to_string(value)}, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :provider_fallback, value) when not is_nil(value) do
+    backfill_run_fields(run_id, %{provider_fallback: to_string(value)}, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :run_provenance, %{} = value) do
+    backfill_run_fields(run_id, value, task_id)
+  end
+
+  defp backfill_report(_run_id, _task_id, _key, _value), do: :ok
+
+  defp cleanup_orphaned_prompt(adapter, spawn_args, pristine_args) do
+    if spawn_args != pristine_args do
+      case get_prompt_tmpfile(adapter, pristine_args.argv) do
+        path when is_binary(path) -> File.rm(path)
+        nil -> :ok
+      end
+    end
+  end
+
+  defp backfill_session_dispatch(run_id, task_id, provider, config_dir, session_config) do
+    if run_id && provider do
+      backfill_run_fields(run_id, %{provider: to_string(provider)}, task_id)
+    end
+
+    if config_dir && run_id && Map.get(session_config, :provider) in [nil, "claude"] do
+      backfill_run_fields(run_id, %{config_dir: config_dir}, task_id)
+    end
   end
 
   # bd-1z7624: build the spawn argv for the first session, injecting
@@ -2539,7 +2624,9 @@ defmodule Arbiter.Worker do
   defp fail_stopped(%State{} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
-    reason = Arbiter.Worker.StopReason.classify(exit_status, output_lines)
+
+    reason =
+      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
 
     # bd-8lq2g7: name the subordinate pass in the log line too — "worker for
     # task=X stopped" reads as the task's own worker dying when it was a
@@ -2645,6 +2732,18 @@ defmodule Arbiter.Worker do
   end
 
   defp on_claude_done_reviewable(%State{} = state, meta) do
+    # bd-b6noq9: before anything looks at the branch, check the workspace is
+    # still on disk. `commit_gate/1` gates on `File.dir?(worktree)` and fails
+    # OPEN when it is gone, so a run whose worktree was deleted mid-session
+    # used to sail past the gate into the review gate / merger and fail there
+    # as a generic "merge failed" page. Catch it here and name it.
+    case destroyed_workspace(state) do
+      nil -> on_claude_done_live_workspace(state, meta)
+      {kind, path} -> fail_workspace_destroyed(state, kind, path)
+    end
+  end
+
+  defp on_claude_done_live_workspace(%State{} = state, meta) do
     case mergeable_branch(meta) do
       nil ->
         cond do
@@ -2740,6 +2839,55 @@ defmodule Arbiter.Worker do
     Logger.warning(
       "Worker: task=#{state.task_id} signalled done with no mergeable branch " <>
         "(worktree never provisioned) — refusing to close; failing + escalating (bd-7pe74i)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | status: :failed, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    new_state
+  end
+
+  # bd-b6noq9 (#1930): a workspace that was provisioned and then deleted out
+  # from under a live run. Returns `{:worktree | :repo, path}` for the missing
+  # directory, or `nil` when the workspace is intact — or when there never was
+  # one, which is the DIFFERENT condition `fail_missing_worktree/1` reports as
+  # `:missing_worktree`. A path only counts as destroyed if meta declares it,
+  # so ad-hoc runs that never provisioned anything are untouched.
+  defp destroyed_workspace(%State{meta: meta}) do
+    meta = meta || %{}
+
+    cond do
+      missing_dir?(meta, :worktree_path) -> {:worktree, Map.get(meta, :worktree_path)}
+      missing_dir?(meta, :repo_path) -> {:repo, Map.get(meta, :repo_path)}
+      true -> nil
+    end
+  end
+
+  defp missing_dir?(meta, key) do
+    case Map.get(meta, key) do
+      path when is_binary(path) and path != "" -> not File.dir?(path)
+      _ -> false
+    end
+  end
+
+  # The run's workspace is gone. Mirror fail_missing_worktree/1: mark the
+  # worker :failed, leave the task open (no {:worker_done} broadcast, so the
+  # MergeQueue can never enqueue or close it), and raise an addressed
+  # coordinator escalation — but with the `:workspace_destroyed` category, so
+  # the condition is recognisable instead of arriving as free-text prose.
+  defp fail_workspace_destroyed(%State{} = state, kind, path) do
+    reason = Arbiter.Worker.StopReason.workspace_destroyed(kind, path)
+
+    Logger.error(
+      "Worker: task=#{state.task_id} workspace destroyed mid-run — " <>
+        "#{kind} #{path} no longer exists; failing + escalating (bd-b6noq9)"
     )
 
     meta =
@@ -3452,7 +3600,7 @@ defmodule Arbiter.Worker do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
 
-    Arbiter.Worker.StopReason.classify(exit_status, output_lines).category ==
+    Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider)).category ==
       :exited_without_done
   end
 
@@ -3532,10 +3680,23 @@ defmodule Arbiter.Worker do
     :async_wait_abandoned
   ]
 
-  defp maybe_resume_continuation(%State{meta: meta} = state, session) do
+  defp maybe_resume_continuation(%State{} = state, session) do
+    case destroyed_workspace(state) do
+      nil -> do_maybe_resume_continuation(state, session)
+      # bd-b6noq9: `:exited_without_done` and friends are resumable categories,
+      # but there is nothing to resume INTO — `claude --resume` would be spawned
+      # with a cwd that no longer exists ("spawn: Could not cd to ..."). Fail
+      # with the specific reason instead of burning resume attempts.
+      {kind, path} -> fail_workspace_destroyed(state, kind, path)
+    end
+  end
+
+  defp do_maybe_resume_continuation(%State{meta: meta} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
-    reason = Arbiter.Worker.StopReason.classify(exit_status, output_lines)
+
+    reason =
+      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
 
     session_id =
       session |> Arbiter.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
@@ -3861,7 +4022,8 @@ defmodule Arbiter.Worker do
   defp session_stop_category(session) when is_map(session) do
     Arbiter.Worker.StopReason.classify(
       Map.get(session, :exit_status),
-      Enum.reverse(Map.get(session, :output_lines, []))
+      Enum.reverse(Map.get(session, :output_lines, [])),
+      Map.get(session, :provider)
     ).category
   end
 

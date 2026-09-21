@@ -38,9 +38,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.ReviewGate, :prepare_branch_for_review, 1,
      "checkout/rebase failure before the review starts; surfaced through G1's " <>
        "escalate_pre_review path. §2 does not inventory it as a guard — P10's audit owns it"},
-    {Arbiter.Worker.ReviewGate, :start_worker_process, 3,
+    {Arbiter.Worker.ReviewGate, :start_worker_process, 4,
      "agent spawn failure: infrastructure, not a refusal of the work"},
-    {Arbiter.Worker.ReviewGate, :start_worker_session, 5,
+    {Arbiter.Worker.ReviewGate, :start_worker_session, 6,
      "agent session failure: infrastructure, not a refusal of the work"},
     {Arbiter.Worker.ReviewGate, :escalate_coverage_write_failure, 4,
      "bd-203cl5: pages when an APPROVE's review-coverage row could not be written " <>
@@ -49,6 +49,11 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.ReviewGate, :coverage_net_diff_id, 1,
      "bd-203cl5: computes net_diff_id for the coverage row; its {:error, _} means " <>
        "'no fingerprint', consumed by the page above, and blocks no merge"},
+    {Arbiter.Worker.ReviewGate, :resolve_revision, 2,
+     "bd-2exkl0: provider fallback visibility: notifies coordinator on fallback, not a refusal " <>
+       "(moved here from worker_meta/2 when the provider was resolved once per spawn " <>
+       "and threaded through worker_meta/adapter_for/build_session_opts instead of " <>
+       "re-resolved at each)"},
 
     # --- watchdog.ex ---
     {Arbiter.Worker.Watchdog, :maybe_notify_awaiting_manual_merge, 2,
@@ -78,7 +83,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "the public sink every failure arrives at, not a guard of its own"},
     {Arbiter.Worker, :fail_stopped, 2, "records an externally stopped worker"},
     {Arbiter.Worker, :fail_missing_worktree, 1,
-     "the worktree vanished under a running worker: infrastructure"},
+     "no worktree was ever provisioned for the run: infrastructure"},
+    {Arbiter.Worker, :fail_workspace_destroyed, 3,
+     "the workspace was deleted under a running worker: infrastructure (bd-b6noq9)"},
     {Arbiter.Worker, :broadcast_done, 1, "completion notification"},
     {Arbiter.Worker, :handle_call, 3, "awaiting-review status notification"},
     {Arbiter.Worker, :escalate_output_log_failure, 2,

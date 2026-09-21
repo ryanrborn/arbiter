@@ -49,6 +49,10 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
     default: nil,
     doc: "request path, for prefix-matching the active item"
 
+  attr :active_href, :string,
+    default: nil,
+    doc: "optional active item href; when nil, falls back to nav_active?/2 prefix-matching"
+
   attr :id, :string,
     default: "top-nav",
     doc:
@@ -78,12 +82,13 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         <.link
           :for={item <- @items}
           navigate={item.href}
-          aria-current={nav_active?(@current_path, item.href) && "page"}
+          aria-current={item_active?(@active_href, @current_path, item.href) && "page"}
           class={[
             "px-[10px] py-[5px] rounded-[var(--radius-field)] whitespace-nowrap font-[family-name:var(--font-sans)] text-xs",
-            nav_active?(@current_path, item.href) &&
+            item_active?(@active_href, @current_path, item.href) &&
               "bg-[var(--surface-card)] font-medium text-[var(--text-title)]",
-            !nav_active?(@current_path, item.href) && "font-normal text-[var(--text-secondary)]"
+            !item_active?(@active_href, @current_path, item.href) &&
+              "font-normal text-[var(--text-secondary)]"
           ]}
         >
           {item.label}<.nav_badge count={item[:badge]} />
@@ -99,11 +104,13 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
             <.link
               navigate={item.href}
               phx-click={JS.remove_attribute("open", to: "##{@id}-mobile-menu")}
-              aria-current={nav_active?(@current_path, item.href) && "page"}
+              aria-current={item_active?(@active_href, @current_path, item.href) && "page"}
               class={[
                 "font-[family-name:var(--font-sans)] text-xs",
-                nav_active?(@current_path, item.href) && "font-medium text-[var(--text-title)]",
-                !nav_active?(@current_path, item.href) && "font-normal text-[var(--text-secondary)]"
+                item_active?(@active_href, @current_path, item.href) &&
+                  "font-medium text-[var(--text-title)]",
+                !item_active?(@active_href, @current_path, item.href) &&
+                  "font-normal text-[var(--text-secondary)]"
               ]}
             >
               {item.label}<.nav_badge count={item[:badge]} />
@@ -133,6 +140,11 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
     </span>
     """
   end
+
+  defp item_active?(active_href, _current, href) when not is_nil(active_href),
+    do: href == active_href
+
+  defp item_active?(nil, current, href), do: nav_active?(current, href)
 
   # Ports the pre-existing `nav_class/2` prefix-matching logic verbatim: "/"
   # only matches exactly so the dashboard entry doesn't claim every page;

@@ -95,6 +95,23 @@ defmodule Arbiter.Worker.StopReason do
       classification — synthesized by the completion path to refuse closing a
       task that produced no deliverable. Remediation: investigate why
       provisioning was skipped, then re-dispatch.
+    * `:workspace_destroyed` — the worker's workspace **was** provisioned and
+      then vanished from disk while the run was alive (bd-b6noq9). The exact
+      opposite of `:missing_worktree`: there was a worktree, a branch and work
+      in progress, and the directory holding them is simply gone. Synthesized
+      by the completion and stop paths, never by `classify/2` — the exit status
+      of a subprocess whose cwd was deleted says nothing useful.
+
+      Called out separately because both of the generic outcomes are actively
+      wrong here. `commit_gate/1` gates on `File.dir?(worktree)` and fails
+      *open*, so a destroyed workspace used to route to the review gate /
+      merger like a healthy completion and surface as a free-text "merge
+      failed" page; and `:exited_without_done` is *resumable*, so the worker
+      would respawn `claude --resume` into a directory that no longer exists.
+      Remediation is neither re-dispatch-as-is nor resume: the branch may have
+      existed only inside the destroyed root, so the first question is whether
+      any copy of the work survives (a pushed remote, another checkout) before
+      the task is re-run from scratch.
     * `:agent_print_timeout` — the `agy` (Gemini fork) CLI's own internal
       print-mode turn timeout fired mid-turn ("print timeout … with turn in
       progress; returning partial output") and agy returned whatever partial
@@ -143,6 +160,7 @@ defmodule Arbiter.Worker.StopReason do
           | :stalled
           | :preflight_timeout
           | :missing_worktree
+          | :workspace_destroyed
           | :spawn_failed
 
   @type t :: %__MODULE__{
@@ -316,22 +334,16 @@ defmodule Arbiter.Worker.StopReason do
   # future CLI phrasing tweak doesn't silently fall through to :crashed.
   @context_thrash_signature ~r/autocompact[^\n]{0,20}thrash/i
 
-  # bd-606zlr: the harness's OWN markers for "an asynchronous wait is now
-  # armed". Every one of them is text this Arbiter build did not write and the
-  # agent did not choose the wording of — they are emitted by the CLI tool
-  # harness when a `Bash` call is backgrounded (either up front or after
-  # blowing its tool timeout), when a `Monitor` starts, or when a
-  # `ScheduleWakeup` is booked. Matching the harness's phrasing rather than the
-  # agent's prose ("I'll wait for the notification") is deliberate: the prose
-  # is unbounded paraphrase, the markers are fixed strings.
-  @async_arm_signature ~r/
-      you[ _]will[ _]be[ _]notified
-    | moved[ _]to[ _]the[ _]background[ _]\(id:
-    | running[ _]in[ _]the[ _]background[ _]with[ _]id:
-    | command[ _]running[ _]in[ _]background[ _]with[ _]id:
-    | monitor[ _]started[ _]\(task
-    | wakeup[ _]scheduled
-  /ix
+  # bd-1zz5mn: the "an asynchronous wait is now armed" signature is
+  # provider-shaped — each agent CLI wraps a backgrounded call / monitor /
+  # wakeup in its own fixed wording, so there is no single shared regex that
+  # covers every harness (the previous one only matched Claude's markers,
+  # which meant every agy early-quit was misclassified — see
+  # `abandoned_async_wait?/2`). Each adapter declares its own via the
+  # `Arbiter.Agents.Agent` behaviour's optional `async_arm_signature/0`
+  # callback; this is the fallback for a provider that hasn't (or can't be
+  # resolved), so existing callers of `classify/2` are unaffected.
+  @default_async_arm_signature Arbiter.Agents.Claude.async_arm_signature()
 
   # The counterpart: evidence the agent actually *drained* what it armed, in
   # the same session, before the run ended. A blocking `TaskOutput` /
@@ -357,14 +369,22 @@ defmodule Arbiter.Worker.StopReason do
   — order does not matter, we only scan the tail for signatures. Pass the
   worker's `meta[:output_lines]` (oldest-first) directly.
 
+  `provider` (bd-1zz5mn) is the session's provider string (e.g. `"gemini"`,
+  `"codex"`, `nil`/`"claude"`) — it selects which adapter's
+  `async_arm_signature/0` is used to recognize an abandoned async wait.
+  Defaults to `nil`, which resolves to the Claude signature, so every
+  existing caller that doesn't know its provider (or doesn't care — the
+  async-wait refinement is the only thing that's provider-shaped) is
+  unaffected.
+
   Returns a `%StopReason{}`.
   """
-  @spec classify(integer() | nil, [String.t()]) :: t()
+  @spec classify(integer() | nil, [String.t()], String.t() | nil) :: t()
   # Pre-existing complexity 18 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  def classify(exit_status, output_lines) when is_list(output_lines) do
+  def classify(exit_status, output_lines, provider \\ nil) when is_list(output_lines) do
     haystack = signature_haystack(output_lines)
     signal = signal_for(exit_status)
 
@@ -533,7 +553,7 @@ defmodule Arbiter.Worker.StopReason do
       # plain clean-exit clause it refines. Scoped to `exit_status == 0`
       # because a crash that happens to have backgrounded something earlier is
       # a crash — the exit status stays authoritative.
-      exit_status == 0 and abandoned_async_wait?(output_lines) ->
+      exit_status == 0 and abandoned_async_wait?(output_lines, provider) ->
         %__MODULE__{
           category: :async_wait_abandoned,
           summary:
@@ -675,6 +695,41 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   @doc """
+  Build a `:workspace_destroyed` reason (bd-b6noq9): the run's provisioned
+  workspace is gone from disk while the run is still alive.
+
+  `path` is the directory that went missing and `kind` says which role it
+  played (`:worktree` or `:repo`). Both are named in the summary so the
+  coordinator escalation identifies the destroyed root exactly, instead of the
+  four differently-worded free-text pages that #1930 was raised from.
+  """
+  @spec workspace_destroyed(:worktree | :repo, String.t()) :: t()
+  def workspace_destroyed(kind, path) when kind in [:worktree, :repo] and is_binary(path) do
+    what =
+      case kind do
+        :worktree -> "worktree"
+        :repo -> "repo checkout"
+      end
+
+    %__MODULE__{
+      category: :workspace_destroyed,
+      summary:
+        "the run's #{what} #{path} was provisioned but no longer exists — the workspace " <>
+          "was destroyed while the run was still alive, so there is no checkout to " <>
+          "commit, review, rebase or push from",
+      remediation:
+        "Do NOT resume or re-dispatch blindly: the per-task branch may have existed only " <>
+          "inside the destroyed root, in which case the work is unrecoverable. First " <>
+          "establish whether any copy survives (a pushed remote, another checkout), then " <>
+          "find what deleted #{path} while the run owned it — an automatic /tmp sweep, a " <>
+          "test fixture teardown racing a live run, or a manual cleanup — before re-running " <>
+          "the task from scratch.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
   A compact one-line label for logs / message subjects, e.g.
   `"credentials expired (exit 1)"`.
   """
@@ -702,6 +757,7 @@ defmodule Arbiter.Worker.StopReason do
         :stalled -> "stalled (no output)"
         :preflight_timeout -> "auth pre-flight probe timed out"
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
+        :workspace_destroyed -> "workspace destroyed mid-run (worktree gone from disk)"
         :spawn_failed -> "spawn failed (dispatch error after worker registration)"
       end
 
@@ -768,10 +824,11 @@ defmodule Arbiter.Worker.StopReason do
   # it drains the thing it armed. The drain check is what keeps the correct
   # pattern — background a command, then block on `TaskOutput` in the same
   # turn — from being misread as this failure.
-  defp abandoned_async_wait?(output_lines) do
+  defp abandoned_async_wait?(output_lines, provider) do
     window = Enum.take(output_lines, -@async_arm_window)
+    signature = async_arm_signature_for(provider)
 
-    case last_index_matching(window, @async_arm_signature) do
+    case last_index_matching(window, signature) do
       nil ->
         false
 
@@ -780,6 +837,31 @@ defmodule Arbiter.Worker.StopReason do
         |> Enum.drop(idx + 1)
         |> Enum.any?(&Regex.match?(@async_drain_signature, &1))
         |> Kernel.not()
+    end
+  end
+
+  # bd-1zz5mn: resolve the provider string carried on the session (`"gemini"`,
+  # `"codex"`, `nil`/`"claude"`) to its adapter's own async-arm markers,
+  # falling back to Claude's when the provider is unknown or its adapter
+  # hasn't declared one yet — the same "optional, caller-side default"
+  # convention `async_tool_instruction/0` already uses.
+  defp async_arm_signature_for(provider) do
+    adapter =
+      case provider do
+        "gemini" -> Arbiter.Agents.Gemini
+        "codex" -> Arbiter.Agents.Codex
+        _ -> Arbiter.Agents.Claude
+      end
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :async_arm_signature, 0) do
+      # bd-1zz5mn: `apply/3` (not a direct remote call) deliberately, so the
+      # compiler's xref pass doesn't flag adapters (e.g. Codex today) that
+      # haven't implemented this optional callback yet — the `function_exported?`
+      # guard above is what actually protects the call at runtime.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(adapter, :async_arm_signature, [])
+    else
+      @default_async_arm_signature
     end
   end
 

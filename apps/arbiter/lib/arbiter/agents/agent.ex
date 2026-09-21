@@ -199,12 +199,37 @@ defmodule Arbiter.Agents.Agent do
   default (the Claude async block), so existing adapters remain unaffected.
   """
   @callback async_tool_instruction() :: String.t()
+  @callback async_tool_instruction(String.t(), String.t() | nil, keyword()) :: String.t()
+
+  @doc """
+  The harness's OWN fixed markers for "an asynchronous wait is now armed" —
+  text this Arbiter build did not write and the model did not choose the
+  wording of, emitted when a tool call is backgrounded (up front or after
+  blowing its tool timeout), a monitor starts, or a wakeup is booked
+  (bd-1zz5mn / bd-606zlr).
+
+  `Arbiter.Worker.StopReason.classify/3` uses this, keyed by the session's
+  provider, to recognize a clean exit that happened immediately after the
+  agent armed a wait it could never be notified on (`claude --print` and
+  `agy`/`gemini` are both non-interactive: the process exits the instant a
+  turn produces no tool call). Each provider's CLI wraps this in its own
+  wording, so the signature is per-adapter rather than one shared,
+  Claude-shaped list — a new adapter (e.g. codex) declares its own instead of
+  editing this module's regex.
+
+  Optional — adapters that omit this callback fall back to the Claude
+  signature, so existing adapters remain unaffected until they hit the same
+  failure mode and add their own markers.
+  """
+  @callback async_arm_signature() :: Regex.t()
 
   @optional_callbacks [
     spawn_env: 1,
     security_enforced?: 0,
     auth_probe_argv: 1,
     resolved_model: 1,
-    async_tool_instruction: 0
+    async_tool_instruction: 0,
+    async_tool_instruction: 3,
+    async_arm_signature: 0
   ]
 end

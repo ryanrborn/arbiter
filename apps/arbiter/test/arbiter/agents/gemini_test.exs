@@ -839,4 +839,60 @@ defmodule Arbiter.Agents.GeminiTest do
       refute "--print-timeout" in argv
     end
   end
+
+  describe "async_tool_instruction" do
+    test "async_tool_instruction/0 renders reviewer instruction without Claude tools or disproven flags" do
+      text = Gemini.async_tool_instruction()
+
+      assert text =~ "manage_task status"
+      assert text =~ "RUNNING"
+      assert text =~ "your VERDICT"
+      assert text =~ "terminates the session and discards the work"
+      refute text =~ "Monitor"
+      refute text =~ "ScheduleWakeup"
+      refute text =~ "TaskOutput"
+      assert text =~ "WaitMsBeforeAsync"
+      assert text =~ "Blocking"
+      refute text =~ "COMMIT correct work BEFORE"
+    end
+
+    test "async_tool_instruction/3 respects completion signal, coda, and commit_first option" do
+      work_text =
+        Gemini.async_tool_instruction("`arb done`", "extra explanation", commit_first: true)
+
+      assert work_text =~ "COMMIT correct work BEFORE"
+      assert work_text =~ "before you print `arb done` —\nextra explanation."
+      assert work_text =~ "manage_task status"
+      assert work_text =~ "RUNNING"
+      refute work_text =~ "Monitor"
+      refute work_text =~ "ScheduleWakeup"
+      assert work_text =~ "WaitMsBeforeAsync"
+      assert work_text =~ "Blocking"
+
+      no_commit = Gemini.async_tool_instruction("`arb done`", nil, commit_first: false)
+      refute no_commit =~ "COMMIT correct work BEFORE"
+      assert no_commit =~ "before you print `arb done`."
+    end
+
+    # bd-apq1g6: the spike invoked `"Blocking": true` / `"WaitMsBeforeAsync": 0`
+    # verbatim and agy backgrounded the command anyway. The instruction may
+    # still tell the worker to pass those arguments, but it must not promise
+    # they produce foreground/synchronous execution — that claim is disproven,
+    # and a worker that believes it will be surprised by empty inline output.
+    test "does not promise that Blocking/WaitMsBeforeAsync produce synchronous execution" do
+      for text <- [
+            Gemini.async_tool_instruction(),
+            Gemini.async_tool_instruction("`arb done`", nil, commit_first: true)
+          ] do
+        refute text =~ "executes synchronously"
+        refute text =~ "returns its output inline"
+        refute text =~ ~r/synchronously in the\s+foreground/
+
+        # the corrected framing: flags are set, but backgrounding is expected
+        # and the drain is the polling loop.
+        assert text =~ "does NOT keep a long"
+        assert text =~ "manage_task status"
+      end
+    end
+  end
 end

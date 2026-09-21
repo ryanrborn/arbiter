@@ -310,6 +310,25 @@ defmodule Arbiter.Loop.FailureClassifierTest do
       assert r.evidence == :stop_category
     end
 
+    test "workspace_destroyed is conclusive operational, even against a git-noisy transcript" do
+      # bd-b6noq9: a run whose worktree vanished leaves a transcript full of
+      # git failures. Those read like the agent's own mess; the cause is
+      # infrastructure, so the typed category must decide outright.
+      r =
+        FC.classify(
+          "the run's worktree /tmp/rev-provider-203586 was provisioned but no longer exists",
+          [
+            "fatal: not a git repository",
+            "fatal: could not read from remote repository"
+          ],
+          stop_category: :workspace_destroyed
+        )
+
+      assert r.class == :operational
+      assert r.subcategory == :workspace_destroyed
+      assert r.evidence == :stop_category
+    end
+
     test "a string category (as read back off the DB column) is accepted" do
       r = FC.classify("server restarted", [], stop_category: "context_thrash")
       assert r.class == :agent_quality

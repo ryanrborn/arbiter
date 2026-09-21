@@ -127,54 +127,34 @@ defmodule Arbiter.Worker.PromptBuilder do
   correct but uncommitted fix. Permission to background is only safe when it
   arrives with the drain that actually works.
   """
-  @spec async_tools_section(String.t(), String.t() | nil, keyword()) :: String.t()
-  def async_tools_section(completion_signal, coda \\ nil, opts \\ []) do
-    tail =
-      case coda do
-        nil -> "before you print #{completion_signal}."
-        extra -> "before you print #{completion_signal} —\n#{extra}."
-      end
+  @spec async_tools_section(atom() | module(), String.t(), String.t() | nil, keyword()) ::
+          String.t()
+  def async_tools_section(completion_signal, coda, opts)
+      when is_binary(completion_signal) and is_list(opts) do
+    async_tools_section(Arbiter.Agents.Claude, completion_signal, coda, opts)
+  end
 
-    # A reviewer is forbidden from pushing code, so "commit before verifying"
-    # is meaningless (and contradictory) guidance on that surface.
-    commit_bullet =
-      if Keyword.get(opts, :commit_first, true) do
-        """
-          * COMMIT correct work BEFORE running any long verification. Verification
-            confirms work; it must never be the thing that loses it.
-        """
-      else
-        ""
-      end
+  def async_tools_section(completion_signal, coda) when is_binary(completion_signal) do
+    async_tools_section(Arbiter.Agents.Claude, completion_signal, coda, [])
+  end
 
-    """
-    *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
-    turn ends the session outright, and no notification can ever reach you
-    afterward — not from `Monitor`, not `ScheduleWakeup`, not a backgrounded
-    shell job. The process that would receive it no longer exists. If you
-    background a long command (`mix test`, `mix precommit`, `dialyzer`, or
-    similar) and end your turn to "wait" for it, the run ends on the spot, the
-    command is killed with it, and any uncommitted work is lost. So:
+  def async_tools_section(completion_signal) when is_binary(completion_signal) do
+    async_tools_section(Arbiter.Agents.Claude, completion_signal, nil, [])
+  end
 
-    #{commit_bullet}\
-      * Run `mix test`, `mix precommit`, `dialyzer`, and any other long
-        verification command in the FOREGROUND, in the same tool call, and
-        wait for it to finish before your turn ends. Raise the `Bash` tool's
-        own `timeout` parameter (up to 600000 ms / 10 minutes) if the default
-        is too short, or narrow the command — the specific failing test
-        files, not the whole suite.
-      * NEVER background a verification command and end your turn expecting to
-        be woken up later. NEVER call `Monitor` or `ScheduleWakeup` to wait for
-        one. There is no "later" in a headless session.
-
-    You MUST read every command's full output #{tail}\
-    """
+  def async_tools_section(adapter, completion_signal, coda \\ nil, opts \\ []) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :async_tool_instruction, 3) do
+      adapter.async_tool_instruction(completion_signal, coda, opts)
+    else
+      Arbiter.Agents.Claude.async_tool_instruction(completion_signal, coda, opts)
+    end
   end
 
   # The authoring prompts' coda, kept out of the interpolation line so the
   # sentence stays readable at source width.
-  defp work_async_tools_section do
+  defp work_async_tools_section(adapter) do
     async_tools_section(
+      adapter,
       "`arb done`",
       "the work is incomplete until every tool you launched has\nfinished and you have read its result"
     )
@@ -266,6 +246,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
   defp base_work_prompt(%Issue{} = task, opts) do
     worktree_path = Keyword.get(opts, :worktree_path)
+    adapter = Keyword.get(opts, :adapter, Arbiter.Agents.Claude)
     isolation_section = isolation_section(worktree_path)
 
     """
@@ -315,7 +296,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     finish is to print `arb done` once the work is complete — if you are about
     to stop without having printed `arb done`, keep working.
 
-    #{work_async_tools_section()}
+    #{work_async_tools_section(adapter)}
 
     When you are completely done, print the line:
 
@@ -342,6 +323,8 @@ defmodule Arbiter.Worker.PromptBuilder do
   # provisioned) in place of the generic "you are not expected to edit a repo"
   # line.
   defp task_prompt(%Issue{} = task, opts) do
+    adapter = Keyword.get(opts, :adapter, Arbiter.Agents.Claude)
+
     """
     You are a worker working autonomously on task #{task.id}.
 
@@ -383,7 +366,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     directory. If it exists, read it, act on any coordinator instructions it
     contains, then delete the file to acknowledge receipt.
 
-    #{async_tools_section("`arb done`", nil)}
+    #{async_tools_section(adapter, "`arb done`", nil)}
 
     When you are completely done — findings written to `notes` — print the line:
 
@@ -626,6 +609,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp review_prompt(%Issue{} = task, opts) do
     checkout = review_checkout(opts)
+    adapter = Keyword.get(opts, :adapter, Arbiter.Agents.Claude)
 
     tracker_line =
       case task.pr_ref do
@@ -690,7 +674,7 @@ defmodule Arbiter.Worker.PromptBuilder do
       * Do NOT merge or close the PR/MR.
       * Do NOT modify any branch, including the PR's head.
 
-    #{async_tools_section("`arb done`", nil, commit_first: false)}
+    #{async_tools_section(adapter, "`arb done`", nil, commit_first: false)}
 
     #{ReviewVerification.anti_stale_reflag_block()}
     After you post the review to the tracker, print your conclusion on its

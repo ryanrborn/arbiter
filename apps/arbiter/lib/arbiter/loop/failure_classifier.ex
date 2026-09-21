@@ -133,6 +133,8 @@ defmodule Arbiter.Loop.FailureClassifier do
   # unknown) and `:missing_worktree` (needs a provisioning investigation, not
   # a class) say nothing on their own, so they are absent here and fall
   # through to the transcript/label path rather than being force-bucketed.
+  # `:workspace_destroyed` is the opposite and IS listed: it names its own
+  # cause exactly.
   @stop_category_map %{
     auth_expired: {:operational, :auth_failure},
     quota_exhausted: {:operational, :quota_exhausted},
@@ -143,6 +145,11 @@ defmodule Arbiter.Loop.FailureClassifier do
     killed: {:operational, :killed},
     spawn_exec_failed: {:operational, :spawn_failure},
     spawn_failed: {:operational, :spawn_failure},
+    # bd-b6noq9: the run's workspace was deleted while it was alive. Always
+    # infrastructure, never agent quality — and conclusive on its own,
+    # because the transcript of such a run is nothing but git failures that
+    # read like the agent's own mess.
+    workspace_destroyed: {:operational, :workspace_destroyed},
     context_thrash: {:agent_quality, :context_exhaustion},
     exited_without_done: {:agent_quality, :never_signalled_done},
     # bd-606zlr: the pass armed a Monitor/ScheduleWakeup/backgrounded command

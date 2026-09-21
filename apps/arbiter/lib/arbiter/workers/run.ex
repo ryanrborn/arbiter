@@ -122,7 +122,9 @@ defmodule Arbiter.Workers.Run do
         :thinking,
         :stop_category,
         :base_task_id,
-        :role
+        :role,
+        :provider,
+        :provider_fallback
       ]
     end
 
@@ -154,7 +156,9 @@ defmodule Arbiter.Workers.Run do
         :result_message,
         :stop_category,
         :base_task_id,
-        :role
+        :role,
+        :provider,
+        :provider_fallback
       ]
     end
   end
@@ -213,6 +217,22 @@ defmodule Arbiter.Workers.Run do
 
       description "Resolved agent model id for the run (e.g. \"claude-opus-4-8\"); " <>
                     "nil for a no-agent run or before the stream reports one."
+    end
+
+    attribute :provider, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description ~s|Resolved agent provider for the run ("claude", "gemini", "codex"); | <>
+                    "nil for a no-agent run or before the stream reports one."
+    end
+
+    attribute :provider_fallback, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "Recorded fallback explanation when the original provider was unavailable; " <>
+                    "nil when no fallback occurred."
     end
 
     attribute :started_at, :utc_datetime_usec do
@@ -475,4 +495,109 @@ defmodule Arbiter.Workers.Run do
 
   @doc "All valid worker_type atoms."
   def worker_types, do: @worker_types
+
+  @doc """
+  Find the provider of the most recent authoring worker run for `task_id`.
+
+  Strips synthetic suffixes (`#review`, `#impl<N>`, `:fixpass`, `:conflict`) to
+  locate the root task. Considers only authoring worker types (`:main`, `:impl`,
+  `:fix_pass`, `:conflict`), explicitly excluding `:review` passes (which are
+  governed by `review_agent.type`).
+
+  bd-2exkl0 (finding 4): prefers the most recent row whose `provider_fallback`
+  is nil — i.e. a run that actually got the originally-intended provider,
+  not one that itself had to fall back. Without this, a single round where
+  the intended provider was briefly unavailable (credentials flagged
+  expired) would get silently "adopted" as the new original on every
+  subsequent round: round 2 would read round 1's fallback provider as if it
+  were the real original, report no fallback (because round 2 *did* get the
+  provider it asked for — round 1's fallback provider), and never attempt to
+  return to the real original once it recovered. Only when every authoring
+  run on record is itself a fallback do we fall back to the latest of those.
+
+  Falls back to `Arbiter.Usage.Event` when historical run rows predate the
+  `provider` column. Returns `nil` when no prior authoring provider is found.
+  """
+  @spec latest_authoring_provider(String.t()) :: atom() | nil
+  def latest_authoring_provider(task_id) when is_binary(task_id) do
+    base_id =
+      task_id
+      |> String.split("#", parts: 2)
+      |> List.first()
+      |> String.replace(~r/:(fixpass|fix_pass|conflict)$/, "")
+
+    case query_latest_run_provider(base_id) do
+      p when is_atom(p) and not is_nil(p) ->
+        p
+
+      nil ->
+        query_latest_usage_provider(base_id)
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp query_latest_run_provider(base_id) do
+    case query_latest_run_provider(base_id, require_no_fallback: true) do
+      p when is_atom(p) and not is_nil(p) -> p
+      nil -> query_latest_run_provider(base_id, require_no_fallback: false)
+    end
+  end
+
+  defp query_latest_run_provider(base_id, require_no_fallback: require_no_fallback?) do
+    require Ash.Query
+
+    base_filter =
+      Ash.Query.filter(
+        __MODULE__,
+        (task_id == ^base_id or base_task_id == ^base_id) and
+          worker_type in [:main, :impl, :fix_pass, :conflict] and
+          not is_nil(provider)
+      )
+
+    query =
+      if require_no_fallback? do
+        Ash.Query.filter(base_filter, is_nil(provider_fallback))
+      else
+        base_filter
+      end
+
+    query
+    |> Ash.Query.sort(started_at: :desc, inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %{provider: p} when is_binary(p) and p != "" -> safe_provider_atom(p)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp query_latest_usage_provider(base_id) do
+    require Ash.Query
+
+    Arbiter.Usage.Event
+    |> Ash.Query.filter(
+      (task_id == ^base_id or contains(task_id, ^base_id)) and
+        not is_nil(provider)
+    )
+    |> Ash.Query.sort(occurred_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %Arbiter.Usage.Event{provider: p} when is_binary(p) and p != "" -> safe_provider_atom(p)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp safe_provider_atom(p) do
+    String.to_existing_atom(p)
+  rescue
+    ArgumentError -> nil
+  end
 end

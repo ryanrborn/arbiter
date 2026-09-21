@@ -4823,14 +4823,14 @@ defmodule Arbiter.Worker.ReviewGateTest do
       task = new_task(gemini_ws)
       prompt = ReviewGate.review_prompt(state_for(task, gemini_ws))
 
-      refute prompt =~ "ASYNC TOOLS",
-             "Gemini workspace must not include the ASYNC TOOLS heading"
+      assert prompt =~ "ASYNC TOOLS",
+             "Gemini workspace must include the ASYNC TOOLS heading"
 
-      refute prompt =~ "HEADLESS AND NON-INTERACTIVE",
-             "Gemini workspace must not include the Claude headless-session phrase"
+      assert prompt =~ "HEADLESS AND NON-INTERACTIVE",
+             "Gemini workspace must include the HEADLESS phrase"
 
-      assert prompt =~ "synchronously",
-             "Gemini workspace must include the sync-only instruction"
+      assert prompt =~ "Blocking",
+             "Gemini workspace must include the Blocking instruction"
     end
 
     test "Gemini workspace emits sync-only instruction in verdict_reprompt_prompt/1" do
@@ -4847,8 +4847,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       task = new_task(gemini_ws)
       prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, gemini_ws), :empty_findings)
 
-      refute prompt =~ "ASYNC TOOLS"
-      assert prompt =~ "synchronously"
+      assert prompt =~ "ASYNC TOOLS"
+      assert prompt =~ "Blocking"
     end
 
     test "review_prompt/1 always includes the timeout fallback note (bd-c1qbee)", %{ws: ws} do
