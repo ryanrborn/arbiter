@@ -100,6 +100,15 @@ defmodule Arbiter.Usage.Probe do
   # per-call priced API, so an agy probe row's cost stays nil permanently.
   @agy_cost_unavailable_note "agy/Antigravity reports no cost: it's a subscription metered by Antigravity quota percentage, not a per-call priced API"
 
+  # bd-96mn8i round 2, finding 4: `@no_usage_note` used to fire on *any* row
+  # without a `cost_usd`, including ones that parsed real token counts —
+  # upstream gemini's `stats` has no `"models"` breakdown, so
+  # `Gemini.Pricing.cost_usd/1` returns nil on a genuine success and the row
+  # landed with real tokens next to a note claiming no usage was found at
+  # all. This note is for that case: tokens are known, the dollar figure
+  # just isn't.
+  @tokens_no_cost_note "cost unavailable: tokens were parsed but the probe reported no priceable cost figure"
+
   @doc """
   Split a probe's captured output into `{usage_or_nil, lines_for_the_classifier}`.
 
@@ -133,6 +142,15 @@ defmodule Arbiter.Usage.Probe do
           # drop it. An error payload stays visible to the classifier.
           {fields, kept}
 
+        {:error_with_usage, fields} ->
+          # bd-96mn8i round 2, finding 2: an error result can still report
+          # real tokens spent before it failed (e.g. a quota-exhausted agy
+          # turn) — that is known spend, not unknown, and must not be
+          # recorded as NULL. The line itself is still diagnostic (it's what
+          # tells `StopReason.classify/2` the run failed), so it stays in
+          # `kept` exactly like a plain `:error`.
+          {fields, [line | kept]}
+
         :error ->
           {usage, [line | kept]}
       end
@@ -158,12 +176,7 @@ defmodule Arbiter.Usage.Probe do
     with {:ok, event} <- decode_json_object(line),
          true <- codex_terminal?(event) do
       fields = CodexStream.usage_fields(event, nil)
-
-      if Map.get(fields, :is_error, false) or not Map.has_key?(fields, :tokens_in) do
-        :error
-      else
-        {:ok, fields}
-      end
+      result_with_usage(fields)
     else
       _ -> :error
     end
@@ -181,9 +194,36 @@ defmodule Arbiter.Usage.Probe do
     with {:ok, event} <- decode_json_object(line),
          true <- gemini_terminal?(event) do
       fields = GeminiStream.usage_fields(event, nil)
-      if Map.get(fields, :is_error, false), do: :error, else: {:ok, fields}
+      result_with_usage(fields)
     else
       _ -> :error
+    end
+  end
+
+  # Shared by `codex_result/1` and `gemini_result/1` (bd-96mn8i round 2,
+  # finding 2). A successful line yields `{:ok, fields}`. A failed line yields
+  # `:error` (usage stays nil, the whole point of this ticket) UNLESS the
+  # provider still reported *nonzero* tokens on the way to failing — an agy
+  # quota-exhaustion result reports real input/output tokens alongside
+  # `status: "ERROR"`, and that spend is known, not unknown. Such a line
+  # yields `{:error_with_usage, fields}`: the tokens are captured, and the
+  # line still reaches the classifier as diagnostic output.
+  #
+  # Checking for *nonzero* usage rather than merely present usage matters: a
+  # genuinely token-free error (e.g. rejected before any call was made, all
+  # reported buckets literally `0`) must still record nil, not a literal
+  # zero — the exact zero-vs-unknown distinction this ticket exists to fix.
+  defp result_with_usage(fields) do
+    error? = Map.get(fields, :is_error, false)
+
+    nonzero_usage? =
+      (Map.get(fields, :tokens_in) || 0) > 0 or (Map.get(fields, :tokens_out) || 0) > 0
+
+    cond do
+      not is_number(Map.get(fields, :tokens_in)) -> :error
+      error? and nonzero_usage? -> {:error_with_usage, fields}
+      error? -> :error
+      true -> {:ok, fields}
     end
   end
 
@@ -262,7 +302,16 @@ defmodule Arbiter.Usage.Probe do
   # ---- internals ---------------------------------------------------------
 
   defp cost_note(usage) do
-    if Map.get(usage, :cost_usd), do: nil, else: @no_usage_note
+    cond do
+      Map.get(usage, :cost_usd) ->
+        nil
+
+      is_number(Map.get(usage, :tokens_in)) or is_number(Map.get(usage, :tokens_out)) ->
+        @tokens_no_cost_note
+
+      true ->
+        @no_usage_note
+    end
   end
 
   # A line is a probe result payload when it decodes to either:

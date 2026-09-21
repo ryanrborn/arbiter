@@ -116,6 +116,19 @@ defmodule Arbiter.Usage.Event do
         :role
       ]
     end
+
+    # bd-96mn8i round 2, finding 1: recovers codex's zero-token preflight
+    # rows from the on-disk rollout JSONL (`Arbiter.Usage.CodexSessionFile`)
+    # after the fact. Only the fields a backfill can honestly know are
+    # accepted — `occurred_at`/`source`/etc. stay whatever the live probe
+    # wrote them as.
+    update :backfill_usage do
+      # `raw` is a :map attribute — AshSqlite's atomic-update SQL builder
+      # can't pass it as a query param (mirrors `Arbiter.Loop.PendingWrite`'s
+      # map-carrying update actions).
+      require_atomic? false
+      accept [:tokens_in, :tokens_out, :cache_read_tokens, :cost_note, :raw]
+    end
   end
 
   attributes do

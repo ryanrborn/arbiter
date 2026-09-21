@@ -171,22 +171,39 @@ defmodule Arbiter.Usage do
   @synthetic_providers ~w(arbiter)
 
   @doc """
-  Providers whose `usage_events` rows are **wholly** zero-token over the
-  window — i.e. every row for that provider carries `tokens_in: 0/nil` and
-  `tokens_out: 0/nil`.
+  Providers whose `usage_events` rows are **wholly** zero-or-unknown-token
+  over the window — i.e. no row for that provider carries any reported
+  token count.
 
   A provider whose stream parser silently drops usage (bd-2fzwlc: this is
   exactly what happened to every Gemini/agy row before the fix) reads
   identically to "that provider is just cheap" unless something calls this
-  out. A provider with even one non-zero row is not flagged — this is a
-  blindness detector, not a low-usage alert.
+  out. A provider with even one row carrying real tokens is not flagged —
+  this is a blindness detector, not a low-usage alert.
+
+  Every flagged row is one of two shapes, counted separately (bd-96mn8i
+  round 2, finding 3):
+
+    * **literal zero** (`zero_rows`) — `tokens_in`/`tokens_out` are both the
+      number `0`. This is the actual "parser bug" signature: the provider's
+      stream reported a terminal event and the parser read nothing out of
+      it.
+    * **unknown** (`unknown_rows`) — `tokens_in`/`tokens_out` are both `nil`,
+      meaning no usage was recorded at all (e.g. a failed probe that never
+      reached a terminal event). This is an honest gap, not a parser bug,
+      and callers must word it differently — folding it into "zero" here is
+      exactly the bug this function exists to catch, one level up: after
+      bd-96mn8i's fix, a window of legitimately-failed probes would
+      otherwise re-raise "likely a stream parser silently dropping usage"
+      against data that is already correct.
 
   Accepts the same `:since` / `:workspace_id` options as `summarize/1`, plus
   `:until` (`%DateTime{}`, filters `occurred_at <= until`) so a historical
   window's flag reflects only the rows the window actually covers.
-  Returns `{:ok, [%{provider:, rows:}]}`, sorted by provider name.
+  Returns `{:ok, [%{provider:, rows:, zero_rows:, unknown_rows:}]}`, sorted
+  by provider name.
   """
-  @spec zero_token_providers(keyword()) :: {:ok, [%{provider: String.t(), rows: pos_integer()}]}
+  @spec zero_token_providers(keyword()) :: {:ok, [zero_token_report()]}
   def zero_token_providers(opts \\ []) do
     events =
       Event
@@ -197,14 +214,37 @@ defmodule Arbiter.Usage do
       events
       |> Enum.group_by(&(&1.provider || "(unknown)"))
       |> Enum.reject(fn {provider, _evs} -> provider in @synthetic_providers end)
-      |> Enum.filter(fn {_provider, evs} -> Enum.all?(evs, &zero_tokens?/1) end)
-      |> Enum.map(fn {provider, evs} -> %{provider: provider, rows: length(evs)} end)
+      |> Enum.filter(fn {_provider, evs} ->
+        Enum.all?(evs, &(zero_tokens?(&1) or unknown_usage?(&1)))
+      end)
+      |> Enum.map(fn {provider, evs} ->
+        %{
+          provider: provider,
+          rows: length(evs),
+          zero_rows: Enum.count(evs, &zero_tokens?/1),
+          unknown_rows: Enum.count(evs, &unknown_usage?/1)
+        }
+      end)
       |> Enum.sort_by(& &1.provider)
 
     {:ok, flagged}
   end
 
-  defp zero_tokens?(ev), do: (ev.tokens_in || 0) == 0 and (ev.tokens_out || 0) == 0
+  @typedoc "One flagged provider's row breakdown — see `zero_token_providers/1`."
+  @type zero_token_report :: %{
+          provider: String.t(),
+          rows: pos_integer(),
+          zero_rows: non_neg_integer(),
+          unknown_rows: non_neg_integer()
+        }
+
+  # A row that reports actual, known-zero usage — both fields present and
+  # literally `0`. `nil == 0` is false in Elixir, so this never matches an
+  # unknown row.
+  defp zero_tokens?(ev), do: ev.tokens_in == 0 and ev.tokens_out == 0
+
+  # A row that reports no usage at all — the honest "we don't know" case.
+  defp unknown_usage?(ev), do: is_nil(ev.tokens_in) and is_nil(ev.tokens_out)
 
   @doc """
   Percentile cost estimate for an issue — see `Arbiter.Usage.Estimate.for_issue/2`.

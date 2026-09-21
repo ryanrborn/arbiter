@@ -213,7 +213,11 @@ defmodule Arbiter.Usage.ProbeTest do
       assert rest == []
     end
 
-    test "keeps a quota-exhausted agy result visible to the classifier" do
+    # bd-96mn8i round 2, finding 2: a quota-exhausted agy result still
+    # reports real tokens spent before it failed — that is known spend, not
+    # unknown, so it must be captured even though the line stays visible to
+    # the classifier (it's a real error).
+    test "captures reported tokens from a quota-exhausted agy result while still flagging it as an error" do
       json =
         ~s({"event":"result","result":{"conversation_id":"conv-g2","status":"ERROR",) <>
           ~s("error":"Individual quota reached.","duration_seconds":170.6,) <>
@@ -221,7 +225,8 @@ defmodule Arbiter.Usage.ProbeTest do
           ~s("cache_read_tokens":219472,"total_tokens":73450}}})
 
       {usage, rest} = Probe.parse([json], "gemini")
-      assert usage == nil
+      assert usage.tokens_in == 70_318
+      assert usage.tokens_out == 3132
       assert rest == [json]
     end
   end
