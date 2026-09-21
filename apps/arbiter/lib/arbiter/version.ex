@@ -1,30 +1,31 @@
 defmodule Arbiter.Version do
   @moduledoc """
-  Compile-time version stamp for the Arbiter application.
+  Version and git metadata for the Arbiter application.
 
-  All fields are captured at compile time, so any deployed Arbiter instance
-  carries an exact record of what it was built from.
+  In release builds without git at runtime, all fields are captured at compile
+  time, so a deployed instance carries an exact record of what it was built from.
 
-  `.git/HEAD`, the branch ref it points to, and git tags are declared as
-  `@external_resource` so Mix recompiles this module — and re-captures the
-  version and SHA — whenever `git pull` moves the branch tip or updates tags.
+  In dev installs (where git is available), `app_version` and `git_sha` are
+  computed at runtime to ensure they always reflect the current state, even
+  after a `git pull` that adds new tags or commits without a full recompile.
   """
 
   @git_dir_root Path.expand("../../../../", __DIR__)
 
-  # Compute version from git tags, falling back to mix.exs value if git is unavailable
-  @app_version (case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
-                       cd: @git_dir_root,
-                       stderr_to_stdout: true
-                     ) do
-                  {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
-                  _ -> Mix.Project.config()[:version]
-                end)
+  # Compile-time version as fallback for release builds without git at runtime
+  @app_version_compiled (case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
+                              cd: @git_dir_root,
+                              stderr_to_stdout: true
+                            ) do
+                         {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+                         _ -> Mix.Project.config()[:version]
+                       end)
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
   # Without these @external_resource declarations Mix considers this file
-  # unchanged after a pull and skips recompilation, leaving @git_sha and
-  # @app_version frozen at pre-pull values.
+  # unchanged after a pull and skips recompilation, leaving @git_sha frozen
+  # at pre-pull values. (Note: @app_version_compiled is a fallback; the runtime
+  # app_version() function always reflects current git state.)
   #
   # `Path.join(project_root, ".git")` only resolves the real git-dir for a
   # plain clone. In a `git worktree` checkout (how every Arbiter worker
@@ -94,8 +95,26 @@ defmodule Arbiter.Version do
 
   @built_at DateTime.utc_now() |> DateTime.to_iso8601()
 
-  @doc "App version from mix.exs at compile time."
-  def app_version, do: @app_version
+  @doc """
+  App version from git tags.
+
+  When git is available at runtime, returns the current tag-based version. This ensures
+  dev installs always report the correct version even after a `git pull` that adds new
+  tags. In release builds without git at runtime, returns the compile-time version.
+  """
+  def app_version do
+    try do
+      case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
+             cd: @git_dir_root,
+             stderr_to_stdout: true
+           ) do
+        {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+        _ -> @app_version_compiled
+      end
+    rescue
+      _error -> @app_version_compiled
+    end
+  end
 
   @doc """
   Short git SHA.
