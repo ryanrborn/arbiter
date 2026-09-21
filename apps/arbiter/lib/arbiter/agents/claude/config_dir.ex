@@ -104,6 +104,9 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
       (tests that *do* exercise isolation point this at a tmp dir).
   """
 
+  alias Arbiter.Accounts
+  alias Arbiter.Accounts.Credentials
+  alias Arbiter.Accounts.MissingCredentialError
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Tasks.Workspace
@@ -146,6 +149,12 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   install-wide workspace token, so such a spawn is authenticated rather than
   left with neither credentials nor a token (bd-bw3466). See `oauth_token/1`
   for the precedence.
+
+  The **shape** of what this returns is fixed (§5 rows 16 and 20) — the pairs
+  a spawn receives are the same before and after P3. With
+  `:provider_accounts_enabled` on, the token pair's *value* is sourced from
+  the workspace's provider account instead of its `worker_env` blob; see
+  `oauth_token/1`.
   """
   @spec env(workspace_source()) :: [{String.t(), String.t()}]
   def env(workspace \\ nil) do
@@ -170,6 +179,36 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
   @doc """
   The worker OAuth token for this spawn, or `nil`.
+
+  ## With `:provider_accounts_enabled` on (P3, bd-aiodva)
+
+  The precedence chain below is replaced by a single join read
+  (`docs/provider-account-design.md` §5 row 15): the spawn's workspace →
+  its `workspace_provider_accounts` row → that account's **active**
+  `provider_credentials` row for `CLAUDE_CODE_OAUTH_TOKEN`
+  (`Arbiter.Accounts.Credentials`). The account is the answer; the workspace
+  blob is not consulted.
+
+  When the account has no credential for this workspace, step 1 of the chain
+  below is evaluated **as a check, not as a fallback**: if the workspace's own
+  `worker_env` still carries a token, the flip is about to take a credential
+  away from this spawn, so this raises
+  `Arbiter.Accounts.MissingCredentialError` rather than dispatching a worker
+  that authenticates as nobody (acceptance 3). Steps 2 and 3 are install-level
+  configuration that P3 does not move, so a workspace that never carried a
+  token of its own still falls through to them exactly as it did pre-P3, and
+  answers `nil` when they are empty too.
+
+  A spawn with **no workspace in hand** has no join row to read: it takes the
+  unambiguous install-wide *account* credential, and keeps the pre-P3 chain
+  underneath as its floor (§7.5 — steps 2–3 are migration inputs until P4
+  deletes them). It never raises: the fleet-wide watchdog and quota probes
+  run on this path and are not workspace configuration errors.
+
+  Flipping `:provider_accounts_enabled` back to `false` restores everything
+  below, verbatim — that is the whole of §7.5's Release N+1 rollback.
+
+  ## With the flag off (the default)
 
   Precedence — **most specific first**:
 
@@ -203,8 +242,57 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   """
   @spec oauth_token(workspace_source()) :: String.t() | nil
   def oauth_token(workspace \\ nil) do
+    if Accounts.enabled?() do
+      account_oauth_token(workspace)
+    else
+      legacy_oauth_token(workspace)
+    end
+  end
+
+  # The pre-P3 chain. Still the whole answer with the flag off, and under the
+  # flag it is what tells us whether an absent account row is a benign "this
+  # workspace has no credential" or an operator error about to cost a run.
+  # P4 (bd-cblemv) deletes steps 2 and 3; until then they stay.
+  defp legacy_oauth_token(workspace) do
     workspace_oauth_token(workspace) || server_oauth_token() || install_oauth_token()
   end
+
+  defp account_oauth_token(nil) do
+    case Credentials.install_credential(@oauth_token_var) do
+      {:ok, token} -> token
+      :none -> legacy_oauth_token(nil)
+    end
+  end
+
+  defp account_oauth_token(workspace) do
+    ws_id = workspace_id(workspace)
+
+    case Credentials.workspace_credential(ws_id, @oauth_token_var) do
+      {:ok, token} ->
+        token
+
+      :none ->
+        # The account has nothing. Only the workspace's *own* token (step 1)
+        # is what the flip moved, so only that makes this an error: losing it
+        # is a silent downgrade for this spawn specifically. Steps 2–3 are
+        # install-level configuration that P3 does not move — they stay the
+        # floor for a workspace that never carried a token of its own, until
+        # P4 (bd-cblemv) deletes them.
+        case workspace_oauth_token(workspace) do
+          nil ->
+            server_oauth_token() || install_oauth_token()
+
+          _token ->
+            raise MissingCredentialError,
+              workspace_id: ws_id,
+              env_vars: [@oauth_token_var]
+        end
+    end
+  end
+
+  defp workspace_id(%Workspace{id: id}), do: id
+  defp workspace_id(id) when is_binary(id) and id != "", do: id
+  defp workspace_id(_), do: nil
 
   defp server_oauth_token do
     case CredentialsRef.resolve("env:" <> @oauth_token_var) do

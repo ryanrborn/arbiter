@@ -24,13 +24,19 @@ defmodule Mix.Tasks.Arbiter.Accounts.Migrate do
   key considered exposed, and the rotation sweep then has to cover the new
   tables too.
 
-  ## This release is additive (§7.5's "Release N")
+  ## Turning the new tables on (§7.5's "Release N+1")
 
-  Nothing reads the new tables yet — `:provider_accounts_enabled` is `false`
-  and the read flip is P3. On a live install that means a worker spawned from
-  an affected workspace stops receiving that env var from the workspace blob.
-  If nothing else supplies it, run `mix arbiter.accounts.rollback` (the backup
-  row is written for exactly this) or wait for P3.
+  Moving a key out of the blob stops a worker spawned from that workspace
+  receiving it from the blob. Since P3 (bd-aiodva) the account row supplies it
+  instead, but only once `:provider_accounts_enabled` is `true` — it ships
+  `false`. So the order is: migrate every workspace that carries a provider
+  credential, then flip the flag.
+
+  With the flag on, a workspace whose blob still carries a credential that no
+  account supplies raises `Arbiter.Accounts.MissingCredentialError` at spawn
+  time rather than dispatching a worker with no credential. Both undos are
+  cheap: flip the flag back, or run `mix arbiter.accounts.rollback` (the
+  backup row is written for exactly this).
 
   ## Usage
 
@@ -158,10 +164,10 @@ defmodule Mix.Tasks.Arbiter.Accounts.Migrate do
   defp next_steps(result) do
     """
 
-    This is §7.5's Release N: additive. Nothing reads the new tables yet
-    (`:provider_accounts_enabled` is false), so any worker spawned from an
-    affected workspace no longer receives the moved key from its worker_env.
-    If that matters on this install, undo it with:
+    The moved key is no longer in the workspace's worker_env. The account row
+    supplies it to a spawn only with `:provider_accounts_enabled` set to true
+    (P3's read flip; it ships false) — so migrate every workspace that carries
+    a provider credential, then flip the flag. To undo this migration instead:
 
         mix arbiter.accounts.rollback --migration-id #{result.migration_id}\
     """

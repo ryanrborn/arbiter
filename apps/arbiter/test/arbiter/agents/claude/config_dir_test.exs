@@ -265,10 +265,24 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
       System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
+      # These pin the *pre-P3* precedence chain — the source `worker_env` is,
+      # rather than the provider-account read that replaces it (P3 /
+      # bd-aiodva). They are acceptance 2's regression coverage, so they pin
+      # the flag off explicitly instead of inheriting the matrix leg
+      # (`ARBITER_PROVIDER_ACCOUNTS=1`). The flipped side lives in
+      # `arbiter/accounts/read_flip_test.exs`.
+      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
+      Application.put_env(:arbiter, :provider_accounts_enabled, false)
+
       on_exit(fn ->
         case prev_token do
           nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
           v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+
+        case prev_flag do
+          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
+          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
         end
       end)
 
