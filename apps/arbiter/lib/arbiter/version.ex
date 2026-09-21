@@ -103,17 +103,15 @@ defmodule Arbiter.Version do
   tags. In release builds without git at runtime, returns the compile-time version.
   """
   def app_version do
-    try do
-      case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
-             cd: @git_dir_root,
-             stderr_to_stdout: true
-           ) do
-        {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
-        _ -> @app_version_compiled
-      end
-    rescue
-      _error -> @app_version_compiled
+    case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
+           cd: @git_dir_root,
+           stderr_to_stdout: true
+         ) do
+      {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+      _ -> @app_version_compiled
     end
+  rescue
+    _error -> @app_version_compiled
   end
 
   @doc """
@@ -124,17 +122,15 @@ defmodule Arbiter.Version do
   In release builds without git at runtime, returns the compile-time SHA.
   """
   def git_sha do
-    try do
-      case System.cmd("git", ["rev-parse", "--short", "HEAD"],
-             cd: @git_dir_root,
-             stderr_to_stdout: true
-           ) do
-        {sha, 0} -> String.trim(sha)
-        _ -> @git_sha
-      end
-    rescue
-      _error -> @git_sha
+    case System.cmd("git", ["rev-parse", "--short", "HEAD"],
+           cd: @git_dir_root,
+           stderr_to_stdout: true
+         ) do
+      {sha, 0} -> String.trim(sha)
+      _ -> @git_sha
     end
+  rescue
+    _error -> @git_sha
   end
 
   @doc "ISO-8601 UTC timestamp when this module was compiled."

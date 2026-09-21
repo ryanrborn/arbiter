@@ -91,6 +91,13 @@
   #     atom clause beside the `{:no_verdict, reason}` tuple one, and a
   #     `load_member_issues([])` clause. Both are cheap total-function
   #     hygiene on a private helper.
+  #   * arbiter_cli/version.ex — the same compile-time-constant shape as the
+  #     `@git_dirty` case noted above, but for `@git_available` (`dev_build?/0`).
+  #     Unlike `@git_dirty`, this one bakes to `true` in the CI build (git
+  #     present, no `RELEASE_VERSION`), so the warning fires every run rather
+  #     than only on a dirty dev machine, and needs a real filter instead of
+  #     staying implicitly quiet.
+  {"lib/arbiter_cli/version.ex", :pattern_match},
   {"lib/arbiter/agents/preflight.ex", :pattern_match},
   {"lib/arbiter/mcp/tools.ex", :pattern_match},
   {"lib/arbiter/mcp/tools/loop_pending.ex", :pattern_match},
@@ -115,11 +122,15 @@
   #     persisted task rows, where a NULL column is one migration away.
   #   * loop/analysis.ex, arbiter_cli/cmd/self_update.ex — the same shape on
   #     a report map and a version string.
+  #   * arbiter_cli/cmd/doctor/checks.ex — `if dev_install?() do`, downstream
+  #     of the same `ArbiterCli.Version.dev_build?/0` constant filtered above
+  #     (`arbiter_cli/version.ex`, group 2). Both entries share one root cause.
   {"lib/arbiter/loop/analysis.ex", :guard_fail},
   {"lib/arbiter/trackers/gitlab.ex", :guard_fail},
   {"lib/arbiter/worker.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :neg_guard_fail},
+  {"lib/arbiter_cli/cmd/doctor/checks.ex", :guard_fail},
   {"lib/arbiter_cli/cmd/self_update.ex", :guard_fail},
 
   # ── 4. MapSet opaqueness (`contract_with_opaque`, `call_without_opaque`) ──
