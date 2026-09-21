@@ -158,8 +158,12 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     providers = resp["data"]["quotas"] |> Enum.map(& &1["provider"]) |> Enum.sort()
     assert providers == ["claude", "codex"]
   end
+
   describe "P5: keyed by provider account (docs/provider-account-design.md §6)" do
-    test "three workspaces on one account report one account row, not three", %{conn: conn, ws: ws} do
+    test "three workspaces on one account report one account row, not three", %{
+      conn: conn,
+      ws: ws
+    } do
       account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "personal-max"})
 
       others =

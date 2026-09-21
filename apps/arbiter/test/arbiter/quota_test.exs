@@ -246,7 +246,9 @@ defmodule Arbiter.QuotaTest do
       {:ok, _} = Quota.capture(ws.id, @headers)
       {:ok, _} = Quota.capture(ws.id, @headers, provider: "codex")
 
-      providers = ws.id |> Quota.list_latest_for_workspace() |> Enum.map(& &1.provider) |> Enum.sort()
+      providers =
+        ws.id |> Quota.list_latest_for_workspace() |> Enum.map(& &1.provider) |> Enum.sort()
+
       assert providers == ["claude", "codex"]
     end
 
@@ -277,7 +279,8 @@ defmodule Arbiter.QuotaTest do
     # P5 acceptance 4: three workspaces on one account report one row, not
     # three (`docs/provider-account-design.md` §6).
     test "three workspaces on one account collapse to a single reported row" do
-      account = Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "shared"})
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "shared"})
 
       workspaces =
         for name <- ["default", "emricare", "vstim"] do
@@ -378,6 +381,40 @@ defmodule Arbiter.QuotaTest do
 
       assert_in_delta claude.cost_usd, 2.0, 0.0001
       assert_in_delta codex.cost_usd, 3.0, 0.0001
+    end
+
+    # §6: `recent spend (30d)` is the ACCOUNT total, with the per-workspace
+    # breakdown underneath it. Before P5 each workspace reported only its own
+    # spend against a budget it did not own alone.
+    test "cost_usd is the account total, and equals the per-workspace breakdown" do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "shared"})
+
+      [a, b] =
+        for {name, cost} <- [{"emricare", 1.25}, {"vstim", 3.75}] do
+          ws = workspace!(name)
+
+          Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+            workspace_id: ws.id,
+            provider: :claude,
+            provider_account_id: account.id
+          })
+
+          usage_event!(ws.id, "claude", cost)
+          ws
+        end
+
+      {:ok, _} = Quota.capture(a.id, @headers)
+
+      assert [view] = Quota.list_latest_for_workspace(b.id)
+      assert_in_delta view.cost_usd, 5.0, 0.0001
+
+      assert [%{name: "emricare", cost_usd: first}, %{name: "vstim", cost_usd: second}] =
+               view.workspaces
+
+      assert_in_delta first, 1.25, 0.0001
+      assert_in_delta second, 3.75, 0.0001
+      assert_in_delta first + second, view.cost_usd, 0.0001
     end
 
     test "cost_usd is nil for a provider with no ledger spend" do

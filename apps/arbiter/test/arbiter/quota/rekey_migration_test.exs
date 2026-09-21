@@ -47,7 +47,11 @@ defmodule Arbiter.Quota.RekeyMigrationTest do
         ws = uuid()
         insert_workspace(ws, name)
         link(ws, "claude", account)
-        insert_anthropic(ws, captured_at: "2026-09-20 06:2#{trunc(util * 10)}:00", utilization_5h: util)
+
+        insert_anthropic(ws,
+          captured_at: "2026-09-20 06:2#{trunc(util * 10)}:00",
+          utilization_5h: util
+        )
       end
 
       migrate!(migration)
@@ -70,7 +74,9 @@ defmodule Arbiter.Quota.RekeyMigrationTest do
       assert [[^account]] = query("SELECT provider_account_id FROM anthropic_quotas")
 
       assert [[^account]] =
-               query("SELECT provider_account_id FROM workspace_provider_accounts WHERE workspace_id = '#{ws}'")
+               query(
+                 "SELECT provider_account_id FROM workspace_provider_accounts WHERE workspace_id = '#{ws}'"
+               )
     end
 
     test "an install with no accounts at all mints one shared default per provider", %{
@@ -79,7 +85,12 @@ defmodule Arbiter.Quota.RekeyMigrationTest do
       for name <- ["a", "b"] do
         ws = uuid()
         insert_workspace(ws, name)
-        insert_anthropic(ws, captured_at: "2026-09-20 06:00:0#{byte_size(name)}", utilization_5h: 0.5)
+
+        insert_anthropic(ws,
+          captured_at: "2026-09-20 06:00:0#{byte_size(name)}",
+          utilization_5h: 0.5
+        )
+
         insert_codex(ws, captured_at: "2026-09-20 06:00:00")
       end
 

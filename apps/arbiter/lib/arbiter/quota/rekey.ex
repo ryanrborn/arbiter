@@ -92,8 +92,11 @@ defmodule Arbiter.Quota.Rekey do
     rows
     |> Enum.filter(&(not is_nil(Map.get(&1, key))))
     |> case do
-      [] -> first
-      candidates -> Enum.reduce(candidates, &if(compare_captured(&1, &2, key) == :gt, do: &1, else: &2))
+      [] ->
+        first
+
+      candidates ->
+        Enum.reduce(candidates, &if(compare_captured(&1, &2, key) == :gt, do: &1, else: &2))
     end
   end
 

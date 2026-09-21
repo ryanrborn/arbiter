@@ -325,7 +325,8 @@ defmodule Arbiter.Quota.GateWeeklyTest do
 
       record_quota!(workspace.id, %{utilization_7d: 0.5, status_7d: "allowed"})
 
-      assert %{gating_window: nil, gating_reason: nil} = Arbiter.Quota.serialize(quota_account_id!(workspace.id))
+      assert %{gating_window: nil, gating_reason: nil} =
+               Arbiter.Quota.serialize(quota_account_id!(workspace.id))
     end
   end
 

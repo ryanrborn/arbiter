@@ -148,7 +148,9 @@ defmodule Arbiter.Quota.CloudProbeTest do
       refute_receive {:oauth_usage_call, _}, 300
 
       for ws <- [alpha, beta, gamma] do
-        assert Arbiter.Quota.serialize(quota_account_id!(ws.id)).per_model_utilization == %{"sonnet" => 0.42}
+        assert Arbiter.Quota.serialize(quota_account_id!(ws.id)).per_model_utilization == %{
+                 "sonnet" => 0.42
+               }
       end
     end
 

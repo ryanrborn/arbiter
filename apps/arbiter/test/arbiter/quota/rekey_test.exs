@@ -126,7 +126,14 @@ defmodule Arbiter.Quota.RekeyTest do
 
     test "compares ISO-8601 strings, as the raw SQL read hands them back" do
       a = %{id: "a", captured_at: "2026-09-20 10:00:00", oauth_captured_at: nil, status_5h: "new"}
-      b = %{id: "b", captured_at: "2026-09-19 10:00:00", oauth_captured_at: "2026-09-21 10:00:00", status_5h: "old", oauth_utilization_5h: 0.5}
+
+      b = %{
+        id: "b",
+        captured_at: "2026-09-19 10:00:00",
+        oauth_captured_at: "2026-09-21 10:00:00",
+        status_5h: "old",
+        oauth_utilization_5h: 0.5
+      }
 
       collapsed = Rekey.collapse_anthropic([a, b])
 

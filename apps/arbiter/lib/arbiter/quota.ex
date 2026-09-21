@@ -205,7 +205,8 @@ defmodule Arbiter.Quota do
   `nil`. A pure read — see `Arbiter.Accounts.Resolver`.
   """
   @spec account_id(String.t() | nil, atom() | String.t() | nil) :: String.t() | nil
-  def account_id(workspace_id, provider), do: Resolver.account_id(workspace_id, provider_code(provider) || provider)
+  def account_id(workspace_id, provider),
+    do: Resolver.account_id(workspace_id, provider_code(provider) || provider)
 
   @doc """
   `account_id/2`, provisioning an account when the install has none — the
@@ -445,12 +446,10 @@ defmodule Arbiter.Quota do
   """
   @spec account_fields(String.t() | nil, String.t()) :: map()
   def account_fields(account_id, provider \\ @default_provider) do
-    workspaces = Resolver.workspaces(account_id)
-
     %{
       account: account_view(Resolver.get(account_id)),
       workspaces:
-        Enum.map(workspaces, fn ws ->
+        Enum.map(Resolver.workspaces(account_id), fn ws ->
           %{id: ws.id, name: ws.name, cost_usd: cost_for(provider, workspace_spend(ws.id))}
         end)
     }
@@ -896,12 +895,29 @@ defmodule Arbiter.Quota do
 
   # Each view carries its *own* account's spend and workspace breakdown — two
   # accounts in one list are two separate budgets and must not be summed.
+  #
+  # The headline `cost_usd` is the sum of the breakdown rather than a second
+  # pass over the ledger, so `arb quota`'s account total always equals the
+  # per-workspace line printed under it, and one view costs one ledger read
+  # per workspace instead of two.
   defp decorate_view(view) do
-    spend = provider_spend(view.provider_account_id)
+    fields = account_fields(view.provider_account_id, view.provider)
 
     view
-    |> Map.merge(account_fields(view.provider_account_id, view.provider))
-    |> Map.put(:cost_usd, cost_for(view.provider, spend))
+    |> Map.merge(fields)
+    |> Map.put(:cost_usd, total_cost(fields.workspaces))
+  end
+
+  # `nil` (not `0.0`) when no workspace on the account has attributable spend,
+  # matching `cost_for/2` — the UI shows "—" rather than a misleading "$0.00".
+  defp total_cost(workspaces) do
+    workspaces
+    |> Enum.map(& &1.cost_usd)
+    |> Enum.filter(&is_number/1)
+    |> case do
+      [] -> nil
+      costs -> costs |> Enum.sum() |> Float.round(6)
+    end
   end
 
   @doc """

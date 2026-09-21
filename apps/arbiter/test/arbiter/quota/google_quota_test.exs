@@ -86,7 +86,9 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
 
       assert CloudCode.refresh(ws.id, :gemini, opts(creds, project_id: "p"))
 
-      serialized = CloudCode.serialize_latest(quota_account_id!(ws.id, "gemini_cli"), "gemini_cli")
+      serialized =
+        CloudCode.serialize_latest(quota_account_id!(ws.id, "gemini_cli"), "gemini_cli")
+
       assert serialized["provider"] in ["gemini-cli", "gemini_cli"]
       assert [model] = serialized["models"]
       assert model["model_id"] == "gemini-2.5-pro"
@@ -154,7 +156,10 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       # message, not the stale good-row copy — only the numeric figures
       # (used_percent/reset_at, asserted above) are preserved.
       assert degraded_row.snapshot["message"] == degraded_row.message
-      assert CloudCode.serialize_latest(quota_account_id!(ws.id, "antigravity"), "antigravity")["message"] == degraded_row.message
+
+      assert CloudCode.serialize_latest(quota_account_id!(ws.id, "antigravity"), "antigravity")[
+               "message"
+             ] == degraded_row.message
     end
   end
 
@@ -176,7 +181,11 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       end)
 
       CloudCode.refresh(ws.id, :gemini, opts(creds, project_id: "p"))
-      view = quota_account_id!(ws.id, "gemini_cli") |> CloudCode.latest("gemini_cli") |> CloudCode.view()
+
+      view =
+        quota_account_id!(ws.id, "gemini_cli")
+        |> CloudCode.latest("gemini_cli")
+        |> CloudCode.view()
 
       assert view.provider == "gemini_cli"
       assert view.provider_account_id == quota_account_id!(ws.id, "gemini_cli")

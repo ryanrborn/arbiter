@@ -71,6 +71,7 @@ defmodule Arbiter.Accounts.ResolverTest do
       ws = workspace!("res-e")
 
       assert {:ok, id} = Resolver.ensure_account_id(ws.id, "claude")
+
       assert [%ProviderAccount{id: ^id, provider: :claude, slug: "default"}] =
                Ash.read!(ProviderAccount)
     end
@@ -97,7 +98,9 @@ defmodule Arbiter.Accounts.ResolverTest do
 
     test "never adopts a parked account" do
       ws = workspace!("res-i")
-      {:ok, parked} = Ash.create(ProviderAccount, %{provider: :claude, slug: "parked", enabled: false})
+
+      {:ok, parked} =
+        Ash.create(ProviderAccount, %{provider: :claude, slug: "parked", enabled: false})
 
       assert {:ok, id} = Resolver.ensure_account_id(ws.id, "claude")
       refute id == parked.id
