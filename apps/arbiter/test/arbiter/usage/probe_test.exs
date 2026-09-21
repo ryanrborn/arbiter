@@ -6,6 +6,7 @@ defmodule Arbiter.Usage.ProbeTest do
   """
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Agents.Claude
   alias Arbiter.Agents.Codex
   alias Arbiter.Agents.Gemini
@@ -378,6 +379,49 @@ defmodule Arbiter.Usage.ProbeTest do
       assert ev.provider == "gemini"
       assert ev.tokens_in == 500
       assert ev.tokens_out == 80
+    end
+
+    # P9 (bd-al9qqe) acceptance criterion 3, and §8's falsifiable seam
+    # statement with bd-adyhvn: a probe/preflight row has no meaningful
+    # workspace, but it always has an account — a probe is issued *as* a
+    # credential. `CredentialWatchdog` really does call `Preflight.check/2`
+    # with no workspace at all (`Preflight.check(adapter, [])`), so this is
+    # the live shape, not a hypothetical.
+    test "a preflight row with no workspace and no task still carries a provider_account_id" do
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "probe-seam"})
+      {usage, _rest} = Probe.parse([@result_json])
+
+      assert :ok = Probe.record(:preflight, usage, provider: "claude", exit_status: 0)
+
+      [ev] =
+        Event
+        |> Ash.Query.filter(
+          source == :preflight and provider == "claude" and is_nil(workspace_id)
+        )
+        |> Ash.read!()
+
+      assert ev.workspace_id == nil
+      assert ev.task_id == nil
+      assert ev.provider_account_id == account.id
+    end
+
+    # `source: probe` is the historical / RefreshProbe shape (bd-atyrrq
+    # deleted its live writer), but `record/3` treats it identically — the
+    # seam is about the shape of the row, not which atom names it.
+    test "a probe row with no workspace and no task still carries a provider_account_id" do
+      account = Ash.create!(ProviderAccount, %{provider: :codex, slug: "probe-seam-legacy"})
+      {usage, _rest} = Probe.parse([@result_json])
+
+      assert :ok = Probe.record(:probe, usage, provider: "codex", exit_status: 0)
+
+      [ev] =
+        Event
+        |> Ash.Query.filter(source == :probe and provider == "codex" and is_nil(workspace_id))
+        |> Ash.read!()
+
+      assert ev.workspace_id == nil
+      assert ev.task_id == nil
+      assert ev.provider_account_id == account.id
     end
   end
 end
