@@ -5388,7 +5388,7 @@ defmodule Arbiter.Worker do
          park_reason
        ) do
     rounds = Map.get(meta || %{}, :review_gate_rounds)
-    block = format_review_gate_note(verdict, findings, rounds, park_reason)
+    block = format_review_gate_note(verdict, findings, rounds, park_reason, task_id)
 
     with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
       notes =
@@ -5434,8 +5434,21 @@ defmodule Arbiter.Worker do
     :commit_gate_no_changes_after_non_file_fix
   ]
 
-  defp format_review_gate_note(:no_verdict, findings, rounds, park_reason)
-       when park_reason in @commit_gate_park_reasons do
+  # "findings resolved" is true ONLY for the non-file-fix park: that's the one
+  # case where the implementer actually addressed every finding (through a PR
+  # title/description/label edit, a comment) and the fix round just had no
+  # file diff to show for it. The other three reasons in
+  # `@commit_gate_park_reasons` are the idle-worker / uncommitted-work /
+  # approval-gap shapes the gate exists to catch — claiming their findings were
+  # resolved would be false, so they fall through to the generic clause below,
+  # which reports the last round's REAL verdict instead of a hardcoded one.
+  defp format_review_gate_note(
+         :no_verdict,
+         findings,
+         rounds,
+         :commit_gate_no_changes_after_non_file_fix = park_reason,
+         _task_id
+       ) do
     header =
       "ReviewGate verdict: REQUEST_CHANGES (findings resolved; parked pending re-review — " <>
         "#{Arbiter.Tasks.ReviewPark.subject_phrase(park_reason)})"
@@ -5448,7 +5461,28 @@ defmodule Arbiter.Worker do
     )
   end
 
-  defp format_review_gate_note(verdict, findings, rounds, _park_reason) do
+  defp format_review_gate_note(:no_verdict, findings, rounds, park_reason, task_id)
+       when park_reason in @commit_gate_park_reasons do
+    verdict_phrase =
+      case last_review_gate_verdict(task_id) do
+        :approve -> "APPROVE (a guard refused it)"
+        :request_changes -> "REQUEST_CHANGES"
+        _ -> "INCONCLUSIVE (no verdict)"
+      end
+
+    header =
+      "ReviewGate verdict: #{verdict_phrase} (parked pending human review — " <>
+        "#{Arbiter.Tasks.ReviewPark.subject_phrase(park_reason)})"
+
+    build_review_gate_note(
+      header,
+      "see the coordinator escalation mail for details",
+      findings,
+      rounds
+    )
+  end
+
+  defp format_review_gate_note(verdict, findings, rounds, _park_reason, _task_id) do
     {header, pointer} =
       case verdict do
         :approve ->
@@ -5464,6 +5498,29 @@ defmodule Arbiter.Worker do
 
     build_review_gate_note(header, pointer, findings, rounds)
   end
+
+  # Best-effort lookup of the most recent `:review` round's verdict for a
+  # commit-gate park note — the durable record of what the reviewer actually
+  # said, rather than assuming REQUEST_CHANGES for every park reason. Nil (and
+  # therefore the generic INCONCLUSIVE fallback above) on any DB hiccup or a
+  # task with no recorded review rounds.
+  defp last_review_gate_verdict(task_id) when is_binary(task_id) do
+    require Ash.Query
+
+    Arbiter.ReviewGate.Round
+    |> Ash.Query.filter(task_id == ^task_id and role == :review)
+    |> Ash.Query.sort(round: :desc, inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%{verdict: verdict} | _] -> verdict
+      [] -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp last_review_gate_verdict(_task_id), do: nil
 
   defp build_review_gate_note(header, pointer, findings, rounds) do
     stamp = DateTime.utc_now() |> DateTime.to_iso8601()
