@@ -14,9 +14,9 @@ defmodule Arbiter.Version do
 
   # Compute version from git tags, falling back to mix.exs value if git is unavailable
   @app_version (case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
-                         cd: @git_dir_root,
-                         stderr_to_stdout: true
-                       ) do
+                       cd: @git_dir_root,
+                       stderr_to_stdout: true
+                     ) do
                   {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
                   _ -> Mix.Project.config()[:version]
                 end)

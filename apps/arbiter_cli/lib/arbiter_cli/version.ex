@@ -12,7 +12,9 @@ defmodule ArbiterCli.Version do
 
   @release_version System.get_env("RELEASE_VERSION")
 
-  @git_version_result System.cmd("git", ["describe", "--tags", "--abbrev=0"], stderr_to_stdout: true)
+  @git_version_result System.cmd("git", ["describe", "--tags", "--abbrev=0"],
+                        stderr_to_stdout: true
+                      )
 
   @app_version (case @release_version do
                   v when is_binary(v) and byte_size(v) > 0 ->
@@ -27,8 +29,8 @@ defmodule ArbiterCli.Version do
 
   # True if the CLI was built from source (git was available at build time),
   # false if it's a release build or git was unavailable at build time.
-  @git_available (@release_version == nil and
-                    match?({_tag, 0}, @git_version_result))
+  @git_available @release_version == nil and
+                   match?({_tag, 0}, @git_version_result)
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
   @git_dir Path.expand("../../../../", __DIR__) |> Path.join(".git")

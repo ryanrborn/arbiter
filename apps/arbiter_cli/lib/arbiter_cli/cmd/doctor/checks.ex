@@ -174,7 +174,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       true ->
         hint =
           if dev_install?() do
-            "The server's compiled version is stale — restart the server (via `systemctl --user restart arbiter` or `pkill -f 'phx.server'` + rebuild)."
+            "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart arbiter`)."
           else
             "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
               "the #{server_vsn} release asset to match the server."
