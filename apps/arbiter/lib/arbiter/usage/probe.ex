@@ -75,6 +75,8 @@ defmodule Arbiter.Usage.Probe do
 
   require Logger
 
+  alias Arbiter.Agents.Codex.Stream, as: CodexStream
+  alias Arbiter.Agents.Gemini.Stream, as: GeminiStream
   alias Arbiter.Usage.Event
 
   @type usage :: %{
@@ -105,21 +107,99 @@ defmodule Arbiter.Usage.Probe do
   When one of them is the CLI's successful `result` object, its token counts
   are extracted and that line is removed from the returned list (see the
   moduledoc). Anything else passes through untouched.
+
+  `provider` selects which wire schema to look for (`"codex"`, `"gemini"`, or
+  `nil`/anything else for Claude's `{"type":"result"}` / agy's
+  `{"event":"result"}` shapes). Without this, `parse/1` only ever recognized
+  those two shapes — so a codex probe's `{"type":"turn.completed","usage":{…}}`
+  line was never matched at all (bd-96mn8i: confirmed live against installed
+  codex-cli 0.153.4, this is exactly what the CLI emits on success), and every
+  one of the 1,620 codex `usage_events` rows over 7 days landed with `tokens_in`
+  / `tokens_out` NULL. A gemini probe running the upstream (non-agy) `gemini`
+  binary hit a related but different bug: its `{"type":"result",...}` line
+  *was* matched, but the fallback clause read `event["usage"]` — upstream
+  gemini's token counts live under `event["stats"]` (see
+  `Arbiter.Agents.Gemini.Stream`'s documented schema) — so `usage` was always
+  computed from an empty map, i.e. all-nil, even on a genuine success.
   """
-  @spec parse([String.t()]) :: {usage() | nil, [String.t()]}
-  def parse(lines) when is_list(lines) do
+  @spec parse([String.t()], String.t() | nil) :: {usage() | nil, [String.t()]}
+  def parse(lines, provider \\ nil) when is_list(lines) do
+    decoder = decoder_for(provider)
+
     Enum.reduce(lines, {nil, []}, fn line, {usage, kept} ->
-      case decode_result(line) do
-        {:ok, event} ->
+      case decoder.(line) do
+        {:ok, fields} ->
           # A success payload is structured data, not diagnostics — extract and
           # drop it. An error payload stays visible to the classifier.
-          {from_result(event), kept}
+          {fields, kept}
 
         :error ->
           {usage, [line | kept]}
       end
     end)
     |> then(fn {usage, kept} -> {usage, Enum.reverse(kept)} end)
+  end
+
+  defp decoder_for("codex"), do: &codex_result/1
+  defp decoder_for("gemini"), do: &gemini_result/1
+  defp decoder_for(_provider), do: &claude_result/1
+
+  defp claude_result(line) do
+    case decode_result(line) do
+      {:ok, event} -> {:ok, from_result(event)}
+      :error -> :error
+    end
+  end
+
+  # Only codex's *terminal* events carry (or explicitly lack) usage —
+  # everything else (thread.started, item.*, …) is display-only and must pass
+  # through untouched, exactly like a non-JSON line.
+  defp codex_result(line) do
+    with {:ok, event} <- decode_json_object(line),
+         true <- codex_terminal?(event) do
+      fields = CodexStream.usage_fields(event, nil)
+
+      if Map.get(fields, :is_error, false) or not Map.has_key?(fields, :tokens_in) do
+        :error
+      else
+        {:ok, fields}
+      end
+    else
+      _ -> :error
+    end
+  end
+
+  defp codex_terminal?(%{"type" => type}) when type in ["turn.completed", "turn.failed"], do: true
+  defp codex_terminal?(_event), do: false
+
+  # Gemini's own stream parser already knows both shapes on the wire (upstream
+  # `{"type":"result",...,"stats":{...}}` and agy's
+  # `{"event":"result","result":{...,"usage":{...}}}`) and already flags
+  # `is_error` correctly for each — reuse it rather than re-deriving the same
+  # schema knowledge here and risking the two definitions drifting apart.
+  defp gemini_result(line) do
+    with {:ok, event} <- decode_json_object(line),
+         true <- gemini_terminal?(event) do
+      fields = GeminiStream.usage_fields(event, nil)
+      if Map.get(fields, :is_error, false), do: :error, else: {:ok, fields}
+    else
+      _ -> :error
+    end
+  end
+
+  defp gemini_terminal?(%{"type" => "result"}), do: true
+  defp gemini_terminal?(%{"event" => "result", "result" => result}), do: is_map(result)
+  defp gemini_terminal?(_event), do: false
+
+  defp decode_json_object(line) when is_binary(line) do
+    trimmed = String.trim(line)
+
+    with true <- String.starts_with?(trimmed, "{"),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(trimmed) do
+      {:ok, decoded}
+    else
+      _ -> :error
+    end
   end
 
   @doc """
