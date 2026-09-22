@@ -2034,7 +2034,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               <span class={[
                 "tabular-nums font-medium transition-colors duration-300",
                 if(spend_live?(@budget),
-                  do: "italic text-[var(--arb-live-ink)]",
+                  do: "italic text-[var(--arb-live)]",
                   else: "text-[var(--text-title)]"
                 )
               ]}>
@@ -2045,7 +2045,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               :if={spend_live?(@budget)}
               id="task-spend-live"
               title={live_spend_title()}
-              class="inline-flex items-center gap-1.5 px-[7px] py-[1px] rounded-[var(--radius-chip)] border border-dashed border-[var(--arb-live-edge)] bg-[var(--arb-live-wash)] text-[var(--arb-live-ink)] tabular-nums"
+              class="inline-flex items-center gap-1.5 px-[7px] py-[1px] rounded-[var(--radius-chip)] border border-dashed border-[var(--arb-live-edge)] bg-[var(--arb-live-wash)] text-[var(--arb-live)] tabular-nums"
             >
               <span
                 class="size-1.5 rounded-full bg-[var(--arb-live)] animate-pulse"
