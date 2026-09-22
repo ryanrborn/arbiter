@@ -143,6 +143,65 @@ defmodule Arbiter.Usage.LiveSpend do
     end)
   end
 
+  @doc """
+  `for_tasks/2` keyed by each worker snapshot's own `task_id` — a `#review`
+  row and its author's row both map to the *task's* figure, so every row of
+  `arb worker list` reports the number the issue page shows for that task.
+
+  `opts` are `for_tasks/2`'s; `:workers` defaults to `snaps` themselves, which
+  a caller that filtered the list (to one workspace, say) should override with
+  the unfiltered one — a project dir shared with a worker outside the filter
+  is still shared.
+  """
+  @spec by_worker_task([map()], keyword()) :: %{String.t() => t()}
+  def by_worker_task(snaps, opts \\ []) when is_list(snaps) do
+    pairs =
+      for %{task_id: id} <- snaps, is_binary(id) and id != "", do: {id, Estimate.fold_task_id(id)}
+
+    spends =
+      pairs
+      |> Enum.map(&elem(&1, 1))
+      |> for_tasks(Keyword.put_new(opts, :workers, snaps))
+
+    Map.new(pairs, fn {id, base} -> {id, Map.fetch!(spends, base)} end)
+  end
+
+  @doc """
+  The cost fields `worker_list` / `worker_show` and `GET /api/workers[/:id]`
+  carry, off one `t()` (or `nil` when the read failed — every field `nil`, so
+  a client prints nothing rather than a `$0.00` nobody measured).
+
+    * `cost_usd` — `total_usd`: settled + in flight, `nil` when nothing was
+      priced (render "n/a").
+    * `cost_settled_usd` / `cost_live_usd` — the two halves.
+    * `cost_live` — the figure includes an in-flight estimate.
+    * `cost_degraded` — a live session file could not be read; its share is
+      missing from `cost_usd`.
+    * `cost_unpriced` — some spend has no price; `cost_usd` is a floor, or nil.
+  """
+  @spec cost_fields(t() | nil) :: map()
+  def cost_fields(%{} = spend) do
+    %{
+      cost_usd: spend.total_usd,
+      cost_settled_usd: spend.settled_usd,
+      cost_live_usd: spend.live_usd,
+      cost_live: spend.live?,
+      cost_degraded: spend.degraded?,
+      cost_unpriced: spend.unpriced?
+    }
+  end
+
+  def cost_fields(nil) do
+    %{
+      cost_usd: nil,
+      cost_settled_usd: nil,
+      cost_live_usd: nil,
+      cost_live: nil,
+      cost_degraded: nil,
+      cost_unpriced: nil
+    }
+  end
+
   defp compose(task_id, settled, live) do
     unpriced? = settled.unpriced_rows > 0 or live.unpriced?
 

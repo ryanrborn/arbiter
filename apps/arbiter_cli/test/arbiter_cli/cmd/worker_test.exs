@@ -100,6 +100,38 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     end
   end
 
+  describe "worker show cost" do
+    test "prints the task's settled + in-flight worker spend" do
+      stub_get("/api/workers/bd-009", %{
+        "task_id" => "bd-009",
+        "status" => "running",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "cost_usd" => 3.75,
+        "cost_settled_usd" => 2.5,
+        "cost_live_usd" => 1.25,
+        "cost_live" => true
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-009"]) end)
+      assert out =~ "Spend:      ~$3.75 (incl. ~$1.25 in flight)"
+    end
+
+    test "an unpriced task prints n/a" do
+      stub_get("/api/workers/bd-010", %{
+        "task_id" => "bd-010",
+        "status" => "running",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "cost_usd" => nil,
+        "cost_unpriced" => true
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-010"]) end)
+      assert out =~ "Spend:      n/a"
+    end
+  end
+
   describe "worker runs" do
     test "lists historical runs newest-first with type, status, and model" do
       stub_get("/api/workers/history", %{
@@ -218,6 +250,48 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       [dead, live] = out |> String.split("\n") |> Enum.filter(&(&1 =~ "bd-00"))
       assert dead =~ "no agent"
       refute live =~ "no agent"
+    end
+
+    # bd-8vnuy3: the server now sends settled + in-flight spend. A live figure
+    # must read as an estimate, an unpriced one as n/a, never as $0.00.
+    test "renders live, settled, unpriced and degraded cost distinctly" do
+      row = %{
+        "status" => "running",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z"
+      }
+
+      stub_get("/api/workers", %{
+        "data" => [
+          Map.merge(row, %{
+            "task_id" => "bd-live",
+            "cost_usd" => 16.53,
+            "cost_live" => true,
+            "cost_live_usd" => 2.99
+          }),
+          Map.merge(row, %{"task_id" => "bd-settled", "cost_usd" => 13.54, "cost_live" => false}),
+          Map.merge(row, %{"task_id" => "bd-agy", "cost_usd" => nil, "cost_unpriced" => true}),
+          Map.merge(row, %{
+            "task_id" => "bd-torn",
+            "cost_usd" => 2.0,
+            "cost_live" => true,
+            "cost_live_usd" => 0.0,
+            "cost_degraded" => true
+          })
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["list"]) end)
+      [live, settled, agy, torn] = out |> String.split("\n") |> Enum.filter(&(&1 =~ "bd-"))
+
+      assert live =~ "cost=~$16.53 (incl. ~$2.99 in flight)"
+      assert settled =~ "cost=$13.54"
+      refute settled =~ "~"
+      assert agy =~ "cost=n/a"
+      refute agy =~ "$0.00"
+      assert torn =~ "cost=~$2.00"
+      assert torn =~ "live read incomplete"
     end
 
     test "(none) when no active workers" do

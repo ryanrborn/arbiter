@@ -229,6 +229,7 @@ defmodule ArbiterCli.Cmd.Worker do
     IO.puts("Repo:        #{snap["repo"]}")
     IO.puts("Started:    #{snap["started_at"]}")
     if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
+    if label = cost_label(snap), do: IO.puts("Spend:      #{label}")
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
     if snap["result"], do: IO.puts("Result:     #{snap["result"]}")
     if snap["failure_reason"], do: IO.puts("Failure:    #{snap["failure_reason"]}")
@@ -349,7 +350,7 @@ defmodule ArbiterCli.Cmd.Worker do
           else: "step=#{p["current_step"]}"
 
       model_part = if p["model"], do: "  model=#{p["model"]}", else: ""
-      cost_part = format_cost(p["cost_usd"])
+      cost_part = format_cost(p)
       phase_part = if p["phase"], do: "  phase=#{p["phase"]}", else: ""
 
       IO.puts(
@@ -368,9 +369,42 @@ defmodule ArbiterCli.Cmd.Worker do
   defp agent_note(%{"agent_live" => false}, :short), do: "  (no agent)"
   defp agent_note(_row, _style), do: ""
 
-  defp format_cost(nil), do: ""
-  defp format_cost(cost) when cost <= 0, do: ""
-  defp format_cost(cost) when is_number(cost), do: "  cost=$#{Float.round(cost / 1, 4)}"
+  defp format_cost(row) do
+    case cost_label(row) do
+      nil -> ""
+      label -> "  cost=#{label}"
+    end
+  end
+
+  # bd-8vnuy3: `cost_usd` is the task's settled + in-flight worker spend — the
+  # issue page's figure. An in-flight estimate reads `~`, never like a settled
+  # total; nothing priced (agy/antigravity) reads n/a, never $0.00. A plain
+  # zero with nothing to qualify it stays hidden, as it always was.
+  defp cost_label(%{"cost_usd" => nil, "cost_unpriced" => true}), do: "n/a"
+
+  defp cost_label(%{"cost_usd" => cost} = row) when is_number(cost) do
+    live? = row["cost_live"] == true
+    in_flight = row["cost_live_usd"]
+    flagged? = row["cost_degraded"] == true or row["cost_unpriced"] == true
+
+    if cost <= 0 and not flagged? do
+      nil
+    else
+      [
+        if(live?, do: "~#{dollars(cost)}", else: dollars(cost)),
+        live? and is_number(in_flight) and in_flight > 0 &&
+          " (incl. ~#{dollars(in_flight)} in flight)",
+        row["cost_unpriced"] == true && " + n/a unpriced",
+        row["cost_degraded"] == true && " (live read incomplete)"
+      ]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.join()
+    end
+  end
+
+  defp cost_label(_row), do: nil
+
+  defp dollars(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
 
   # The JSON API exposes a claude-driven worker's live activity as a map
   # (%{"label", "kind", "since"}) or null; render its label, falling back to a
