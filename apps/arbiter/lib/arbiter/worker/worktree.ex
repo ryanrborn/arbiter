@@ -612,6 +612,44 @@ defmodule Arbiter.Worker.Worktree do
   def cleanup(_), do: {:error, :invalid_path}
 
   @doc """
+  Delete the local branch `branch_name` in `repo_path` — but only when it
+  carries no commits beyond `base_ref` (e.g. `"origin/main"`), so the branch
+  is provably nothing but a pointer into history the base already has.
+
+  For reclaiming the branch a failed dispatch cut and never committed to
+  (bd-21bmdh); `cleanup/1` removes the directory, this removes the ref. Run it
+  after `cleanup/1`: git refuses to delete a branch a worktree still has
+  checked out. Returns `:ok` (deleted, or already absent),
+  `{:error, :has_commits}` when the branch holds work, or `{:error, reason}`.
+  An unresolvable `base_ref` reads as `:has_commits` — never delete on doubt.
+  """
+  @spec delete_branch(path(), String.t(), String.t()) :: :ok | {:error, term()}
+  def delete_branch(repo_path, branch_name, base_ref)
+      when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_ref) do
+    _ = run_git(["worktree", "prune"], cd: repo_path)
+
+    case run_git(["rev-parse", "--verify", "--quiet", "refs/heads/" <> branch_name],
+           cd: repo_path
+         ) do
+      {:error, _} ->
+        :ok
+
+      {:ok, _} ->
+        case run_git(["rev-list", "--count", base_ref <> ".." <> branch_name], cd: repo_path) do
+          {:ok, count} ->
+            if String.trim(count) == "0" do
+              with {:ok, _} <- run_git(["branch", "-D", branch_name], cd: repo_path), do: :ok
+            else
+              {:error, :has_commits}
+            end
+
+          {:error, _} ->
+            {:error, :has_commits}
+        end
+    end
+  end
+
+  @doc """
   Return the FULL 40-character HEAD SHA for the worktree at `path`, or `nil` on
   any error.
 

@@ -472,11 +472,39 @@ defmodule Arbiter.Board.Snapshot do
   here: the `dispatch/2` seam is the single choke point for the allow/overage decision,
   so the board must not show a `blocked — quota exhausted` hold that the
   dispatcher itself would not honor (reviewer round 1, finding 1).
+
+  An open `Arbiter.Agents.AuthHold` on the workspace's default agent provider
+  (bd-21bmdh — N consecutive workers died on auth) rides the same board-wide
+  hold, ahead of the quota window and regardless of `:continue` mode: the
+  dispatcher's auth guard refuses those dispatches unconditionally, so
+  `Arbiter.Board.Autopilot` must not keep promoting a card only to have it
+  refused. This is what stops a reopened auth-failed task from being
+  re-attempted every tick while credentials are dead.
   """
   @spec quota_hold(String.t() | nil) :: Scheduler.quota()
   def quota_hold(workspace_id \\ nil) do
     workspace_id = workspace_id || default_workspace_id()
+    auth_hold(workspace_id) || quota_window_hold(workspace_id)
+  end
 
+  # The board's read of the hold is `AuthHold.held/2`, which fails open: the
+  # dispatch guard's own fail-closed read is the backstop, and a board must
+  # not paint a hold that is not there.
+  defp auth_hold(ws_id) when is_binary(ws_id) do
+    with %Arbiter.Tasks.Workspace{} = workspace <- safe_workspace(ws_id),
+         adapter when is_atom(adapter) <- Arbiter.Agents.for_workspace(workspace),
+         %{provider: provider, deaths: deaths} <- Arbiter.Agents.AuthHold.held(adapter) do
+      {:hold, "#{provider} auth hold (#{deaths} consecutive auth deaths)"}
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp auth_hold(_ws_id), do: nil
+
+  defp quota_window_hold(workspace_id) do
     with ws_id when is_binary(ws_id) <- workspace_id,
          workspace <- safe_workspace(ws_id),
          false <- Arbiter.Quota.continue_mode?(workspace),

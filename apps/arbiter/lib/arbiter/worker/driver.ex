@@ -60,6 +60,7 @@ defmodule Arbiter.Worker.Driver do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Verification
   alias Arbiter.Worker
+  alias Arbiter.Worker.AuthDeath
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workflows.Machine
 
@@ -206,10 +207,19 @@ defmodule Arbiter.Worker.Driver do
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
-      %{status: :failed} ->
-        Logger.warning(
-          "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :in_progress"
-        )
+      %{status: :failed} = worker_state ->
+        # bd-21bmdh: an auth death reclaims its debris and returns the task to
+        # Ready (behind the provider's AuthHold). Every other failure keeps the
+        # task :in_progress exactly as before.
+        case AuthDeath.handle(state.task_id, state.worker_pid, worker_state, blocking_workers(state)) do
+          :not_auth ->
+            Logger.warning(
+              "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :in_progress"
+            )
+
+          {:auth, _outcome} ->
+            :ok
+        end
 
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}

@@ -1706,16 +1706,44 @@ defmodule Arbiter.Worker.Dispatch do
     workspace = load_workspace(task)
     adapter = preflight_adapter(task, workspace, opts)
 
+    # bd-21bmdh: an open `AuthHold` (N consecutive auth deaths on this
+    # provider) refuses first. Its read is fail-closed — an unreadable hold
+    # refuses too — and it is pure bookkeeping, so it never blocks.
+    #
     # bd-5wchp1: if the CredentialWatchdog already knows this adapter's creds are
     # expired, refuse immediately — a plain state lookup, no process spawn. The
     # guard is skipped when the watchdog isn't running (returns false by default).
-    if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
-      reason = known_expired_stop_reason()
-      escalate_preflight_failure(preflight_snapshot(task, opts), reason)
-      {:error, {:auth_check_failed, reason}}
-    else
-      :ok
+    cond do
+      Arbiter.Agents.AuthHold.open?(adapter) ->
+        refuse_known_expired(task, opts, auth_hold_stop_reason(adapter))
+
+      Arbiter.Agents.CredentialWatchdog.expired?(adapter) ->
+        refuse_known_expired(task, opts, known_expired_stop_reason())
+
+      true ->
+        :ok
     end
+  end
+
+  defp refuse_known_expired(task, opts, %StopReason{} = reason) do
+    escalate_preflight_failure(preflight_snapshot(task, opts), reason)
+    {:error, {:auth_check_failed, reason}}
+  end
+
+  defp auth_hold_stop_reason(adapter) do
+    provider = adapter |> Module.split() |> List.last()
+
+    %StopReason{
+      category: :auth_expired,
+      summary:
+        "#{provider} dispatch is held: consecutive workers died on auth (AuthHold open)",
+      remediation:
+        "Re-authenticate the #{provider} CLI. The hold clears when the free credential " <>
+          "check or the CredentialWatchdog probe next passes; to clear it by hand, " <>
+          "`arb breaker reset --auth-hold <provider>`. Reopened tasks then dispatch again.",
+      exit_status: nil,
+      signal: nil
+    }
   end
 
   defp known_expired_stop_reason do
