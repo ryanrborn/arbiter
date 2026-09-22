@@ -94,7 +94,12 @@ defmodule Arbiter.Worker.NotesGateTest do
   # ERROR event (bd-25ivqe: a `:strict` policy auto-denying a `run_command`
   # call — here, the worker's own `arb inbox` bootstrap call) and then exits
   # cleanly without ever printing `arb done`, exactly as it would if every
-  # subsequent retry kept getting denied too.
+  # subsequent retry kept getting denied too. `tool_info.error` is the object
+  # shape (`%{"type" => ..., "message" => ...}`) confirmed live against the
+  # installed agy (1.2.8); an earlier version of this fixture guessed a bare
+  # string, which is why the original fix passed this exact test yet still
+  # failed to attribute a real denial (`permission_denial?/1` only matches
+  # `is_binary`, so an unwrapped map object always fell through to `false`).
   defp exit_agy_denied_without_done(pid, tag) do
     cwd = tmp_dir!(tag)
 
@@ -109,7 +114,10 @@ defmodule Arbiter.Worker.NotesGateTest do
           "tool_info" => %{
             "name" => "run_command",
             "parameters" => %{"CommandLine" => "arb inbox bd-ci0y74"},
-            "error" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+            "error" => %{
+              "type" => "TOOL_ERROR",
+              "message" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+            }
           }
         }
       })

@@ -83,7 +83,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       settings =
         Jason.decode!(File.read!(Path.join(home, ".gemini/antigravity-cli/settings.json")))
 
-      assert settings["toolPermission"] == "strict"
+      assert settings["toolPermission"] == "proceed-in-sandbox"
       assert settings["allowNonWorkspaceAccess"] == false
       assert settings["permissions"]["deny"] != []
     end
@@ -177,7 +177,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       assert Jason.decode!(File.read!(path))["toolPermission"] == "always-proceed"
 
       assert {:ok, ^home} = ConfigDir.ensure(worktree: wt, security: strict())
-      assert Jason.decode!(File.read!(path))["toolPermission"] == "strict"
+      assert Jason.decode!(File.read!(path))["toolPermission"] == "proceed-in-sandbox"
     end
 
     test "returns :disabled when worker config isolation is switched off", %{worktree: wt} do
