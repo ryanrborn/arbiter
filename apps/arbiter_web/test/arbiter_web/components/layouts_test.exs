@@ -126,7 +126,8 @@ defmodule ArbiterWeb.LayoutsTest do
   end
 
   describe "app/1 — status bar" do
-    defp status_bar(html), do: html |> LazyHTML.from_fragment() |> LazyHTML.query("#app-status-bar")
+    defp status_bar(html),
+      do: html |> LazyHTML.from_fragment() |> LazyHTML.query("#app-status-bar")
 
     defp classes(node), do: node |> LazyHTML.attribute("class") |> hd() |> String.split()
 
@@ -187,7 +188,11 @@ defmodule ArbiterWeb.LayoutsTest do
 
     test "sits below the dock's expanded window and the coordinator drawer" do
       html = render_app()
-      [z] = Regex.run(~r/\bz-(\d+)\b/, rail(html) |> LazyHTML.attribute("class") |> hd(), capture: :all_but_first)
+
+      [z] =
+        Regex.run(~r/\bz-(\d+)\b/, rail(html) |> LazyHTML.attribute("class") |> hd(),
+          capture: :all_but_first
+        )
 
       # The dock root is `z-30`; the drawer's backdrop is `z-40`, the drawer `z-50`.
       assert String.to_integer(z) < 30

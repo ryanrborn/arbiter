@@ -358,6 +358,14 @@ html[data-dock-size="side"] {
     color var(--dur-hover) var(--arb-ease-out);
 }
 
+/* The pin stays on the icon column in every state. Expanded markup puts it at
+   the far end of the row, which would move it out from under a pointer that
+   has just hovered the rail open to reach it. */
+.nav-rail > nav > div:first-child {
+  justify-content: flex-start;
+  padding-inline: 12px;
+}
+
 .nav-rail [phx-click="toggle-nav-pin"] > span {
   transition: transform var(--dur-hover) var(--arb-ease-out);
 }
@@ -407,34 +415,27 @@ html:not([data-nav-rail="pinned"]) .nav-rail [phx-click="toggle-nav-pin"] > span
     transition-delay: 0ms;
   }
 
-  html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) {
-    /* The pin row centres its button on the icon column. */
-    & > nav > div:first-child {
-      justify-content: flex-start;
-      padding-inline: 12px;
-    }
+  /* Collapsed: not pinned, not hovered, no keyboard focus inside.
+     Clipped already; faded so no half-label peeks past the icon column.
+     Opacity rather than display, so it stays the accessible name. */
+  html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) a > .truncate {
+    opacity: 0;
+  }
 
-    /* Clipped already; faded so no half-label peeks past the icon column.
-       Opacity rather than display, so it stays the accessible name. */
-    & a > .truncate {
-      opacity: 0;
-    }
+  /* The badge rides the icon corner, as in the collapsed component. */
+  html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) a > [data-role="nav-badge"] {
+    position: absolute;
+    top: 2px;
+    left: 28px;
+    margin-left: 0;
+  }
 
-    /* The badge rides the icon corner, as in the collapsed component. */
-    & a > [data-role="nav-badge"] {
-      position: absolute;
-      top: 2px;
-      left: 28px;
-      margin-left: 0;
-    }
-
-    /* Headers keep their height, so rows never jump when the rail widens,
-       and read as the hairline group separators instead. */
-    & [data-role="nav-group-header"] {
-      color: transparent;
-      background: linear-gradient(var(--border-default), var(--border-default)) no-repeat 12px
-        60% / calc(100% - 24px) 1px;
-    }
+  /* Headers keep their height, so rows never jump when the rail widens,
+     and read as the hairline group separators instead. */
+  html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) [data-role="nav-group-header"] {
+    color: transparent;
+    background: linear-gradient(var(--border-default), var(--border-default)) no-repeat 12px
+      60% / calc(100% - 24px) 1px;
   }
 }
 
