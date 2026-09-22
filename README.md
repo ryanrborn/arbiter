@@ -72,7 +72,7 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `task_show`, `task_create`, `task_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off issue dispatch:
 
 - **Skills** — `skill_list`/`skill_get`/`skill_create`/`skill_update`/`skill_delete` for managing reusable skill content.
-- **Graph/Conductor** — `graph_create`, `graph_add_directive`, `graph_add_edge`, `graph_start`, `graph_status`, `graph_pause`, `graph_resume` for auto-dispatch chains of issues wired together by dependency edges, distinct from dispatching a single issue.
+- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire issues together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. Chains of issues run by declaring the edges, not by building a separate graph object.
 - **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not task-linked.
 
 See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
@@ -125,7 +125,7 @@ Visit the dashboard's **Workspace** page and configure:
 - **Repos** (projects to work in)
 - Worker/agent settings — model tier map, per-thinking-level args, provider overrides, and credentials (`agent.config.*`)
 - Security policy (`agent.security.*`)
-- Rate-limit throttling (`quota.*`) and Conductor concurrency (`conductor.max_concurrent`)
+- Rate-limit throttling (`quota.*`) and per-workspace worker concurrency (`conductor.max_concurrent` — the key name is historical)
 - Optionally a **tracker** (Jira, GitHub, Linear) and merge strategy
 
 Or edit `config/dev.exs` directly and restart the server, or use `arb config set`.

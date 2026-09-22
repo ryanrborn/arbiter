@@ -266,7 +266,9 @@ defmodule Arbiter.Tasks.DependencyTest do
       b: b
     } do
       # A conflicts_with B: both should remain ready — conflicts_with expresses
-      # "don't run concurrently" (Conductor concern), not "B must close first".
+      # "don't run concurrently" (a dispatch-time concern, enforced by the
+      # board scheduler via `Arbiter.Tasks.EdgeGate`), not "B must close
+      # first".
       {:ok, _} =
         Ash.create(Dependency, %{
           from_issue_id: a.id,
@@ -282,7 +284,8 @@ defmodule Arbiter.Tasks.DependencyTest do
     test ":conflicts_with symmetric: both directions can be queried independently", %{a: a, b: b} do
       # Store only one directed edge (A → B). Both sides remain ready — neither
       # direction gates readiness. Symmetry is a semantic property documented in
-      # the moduledoc; the Conductor will query both directions when checking.
+      # the moduledoc; `Arbiter.Tasks.EdgeGate` folds both directions when it
+      # checks at dispatch time.
       {:ok, dep} =
         Ash.create(Dependency, %{
           from_issue_id: a.id,

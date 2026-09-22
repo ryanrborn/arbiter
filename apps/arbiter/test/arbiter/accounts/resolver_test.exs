@@ -155,4 +155,81 @@ defmodule Arbiter.Accounts.ResolverTest do
       assert Resolver.get(nil) == nil
     end
   end
+
+  describe "account_id_for_probe/1" do
+    test "adopts the provider's sole enabled account, no workspace involved" do
+      account = account!(:claude, "probe-personal")
+
+      assert Resolver.account_id_for_probe("claude") == account.id
+      assert Ash.read!(WorkspaceProviderAccount) == []
+    end
+
+    test "mints (once) a shared default account when the provider has none" do
+      id_a = Resolver.account_id_for_probe("claude")
+      id_b = Resolver.account_id_for_probe("claude")
+
+      assert id_a == id_b
+      assert [%ProviderAccount{slug: "default"}] = Ash.read!(ProviderAccount)
+    end
+
+    test "falls back to default when the provider's accounts are ambiguous" do
+      account!(:claude, "probe-work")
+      account!(:claude, "probe-personal-2")
+
+      id = Resolver.account_id_for_probe("claude")
+      minted = Enum.find(Ash.read!(ProviderAccount), &(&1.id == id))
+      assert minted.slug == "default"
+    end
+
+    test "is nil for an unknown provider" do
+      assert Resolver.account_id_for_probe("nope") == nil
+      assert Resolver.account_id_for_probe(nil) == nil
+    end
+  end
+
+  describe "credential_id/1" do
+    alias Arbiter.Accounts.ProviderCredential
+
+    defp credential!(account, env_var, extra \\ %{}) do
+      Ash.create!(
+        ProviderCredential,
+        Map.merge(
+          %{
+            provider_account_id: account.id,
+            kind: :oauth_token,
+            env_var: env_var,
+            secret: "sekrit-#{System.unique_integer([:positive])}",
+            fingerprint: "fp-#{System.unique_integer([:positive])}",
+            active: true
+          },
+          extra
+        )
+      )
+    end
+
+    test "the account's sole active credential" do
+      account = account!(:claude, "cred-solo")
+      credential = credential!(account, "CLAUDE_CODE_OAUTH_TOKEN")
+
+      assert Resolver.credential_id(account.id) == credential.id
+    end
+
+    test "nil when the account has no active credential" do
+      account = account!(:claude, "cred-none")
+      assert Resolver.credential_id(account.id) == nil
+    end
+
+    test "nil when the account has more than one active credential (ambiguous)" do
+      account = account!(:claude, "cred-multi")
+      credential!(account, "CLAUDE_CODE_OAUTH_TOKEN")
+      credential!(account, "ANTHROPIC_API_KEY", %{kind: :api_key})
+
+      assert Resolver.credential_id(account.id) == nil
+    end
+
+    test "nil for an unknown or nil account id" do
+      assert Resolver.credential_id(Ash.UUID.generate()) == nil
+      assert Resolver.credential_id(nil) == nil
+    end
+  end
 end

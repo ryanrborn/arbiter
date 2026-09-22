@@ -5,7 +5,6 @@ defmodule Arbiter.Application do
 
   use Application
 
-  alias Arbiter.Workflows.ConductorReconciler
   alias Arbiter.Workflows.DispatchQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.MergeQueueSupervisor
@@ -184,11 +183,6 @@ defmodule Arbiter.Application do
       # intents drain.
       {Task.Supervisor, name: Arbiter.Quota.CloudProbeSupervisor},
       Arbiter.Quota.CloudProbe,
-      # One Conductor per running Graph, started on demand by
-      # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a
-      # Conductor once kicked off). The Registry keys them by graph_id.
-      {Registry, keys: :unique, name: Arbiter.Workflows.ConductorRegistry},
-      Arbiter.Workflows.ConductorSupervisor,
       # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
       # install opts in with `config :arbiter, :board_autopilot, enabled: true`
       # — auto-dispatch spends money, so an upgrade must not discover it by
@@ -227,10 +221,6 @@ defmodule Arbiter.Application do
   #   * reconcile_open_prs: find :in_progress tasks with a pr_ref but no live
   #     worker — the server was killed between `arb done` and the Watchdog being
   #     established. Escalates each to the coordinator. bd-crqku8.
-  #   * conductor_reconcile: restart a Conductor for each graph whose run_state
-  #     is :running but has no live Conductor — crash-safe boot recovery (C6,
-  #     bd-81iaxo). Runs after the worker-run reconcile sweep so orphaned runs
-  #     are already marked :failed before the drain re-reads member statuses.
   #   * session_adoption: reconcile the `sessions` table against the coordinator
   #     sessions systemd and tmux still have running (bd-bpt0ag, RFC §4.6). This
   #     is the ONLY thing that reconnects Arbiter to a session after a restart —
@@ -262,15 +252,6 @@ defmodule Arbiter.Application do
            Arbiter.Workers.Reconciler.reconcile_resumable_tasks(primary?: primary?)
          end},
         id: :reconcile_boot_task,
-        restart: :temporary
-      ),
-      Supervisor.child_spec(
-        {Task,
-         fn ->
-           primary? = Arbiter.SingleInstance.primary?()
-           ConductorReconciler.reconcile_running_graphs(primary?: primary?)
-         end},
-        id: :conductor_reconcile_boot_task,
         restart: :temporary
       ),
       Supervisor.child_spec(

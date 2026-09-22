@@ -67,7 +67,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     4. the hardcoded defaults below.
 
   These three are **re-resolved at the top of every poll cycle**, not frozen
-  into GenServer state at `init/1` — mirroring how `Arbiter.Workflows.Conductor`
+  into GenServer state at `init/1` — mirroring how `Arbiter.Board.Snapshot`
   consults `Arbiter.Settings.conductor_system_max_concurrent/0` inline. So
   dropping an adapter from the probe list (e.g. `codex`, whose probe is a real
   billed round-trip against the ChatGPT backend) takes effect on the next tick

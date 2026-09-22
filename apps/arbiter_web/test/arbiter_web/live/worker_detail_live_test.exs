@@ -39,6 +39,27 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ "No worker registered"
     end
 
+    test "does not default an unknown provider to claude", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-no-provider", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ "Unknown provider"
+      refute html =~ ~s(aria-label="Claude")
+    end
+
+    test "shows the provider's display name and logo when meta has one", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-codex", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo")
+      :ok = Worker.report(pid, :provider, "codex")
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ "Codex"
+      assert html =~ ~s(aria-label="Codex")
+    end
+
     test "updates live when the worker receives new output", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-live", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")

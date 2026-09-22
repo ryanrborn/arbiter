@@ -97,6 +97,51 @@ defmodule Arbiter.Quota.OAuthUsageTest do
     end
   end
 
+  describe "fetch/1 — 429 cooldown keyed by :provider_account_id (P6, §5 row 12)" do
+    setup do
+      on_exit(fn ->
+        OAuthUsage.reset_account_cooldown!("account-1")
+        OAuthUsage.reset_account_cooldown!("account-2")
+      end)
+
+      :ok
+    end
+
+    test "two different tokens on the same account share one cooldown window" do
+      Req.Test.stub(OAuthUsage.HTTP, fn conn -> Plug.Conn.send_resp(conn, 429, "") end)
+
+      assert {:error, :rate_limited} =
+               OAuthUsage.fetch(token: "credential-a", provider_account_id: "account-1")
+
+      # A stub that would blow up if called again — the second credential's
+      # request must never reach the network while the account is cooling
+      # down, proving the two credentials share one cooldown key.
+      Req.Test.stub(OAuthUsage.HTTP, fn _conn -> flunk("should not call the network again") end)
+
+      assert {:error, {:backoff, 429}} =
+               OAuthUsage.fetch(token: "credential-b", provider_account_id: "account-1")
+    end
+
+    test "two distinct accounts do not share a cooldown, even with the same token" do
+      Req.Test.stub(OAuthUsage.HTTP, fn conn -> Plug.Conn.send_resp(conn, 429, "") end)
+
+      assert {:error, :rate_limited} =
+               OAuthUsage.fetch(token: "shared-token", provider_account_id: "account-1")
+
+      test_pid = self()
+
+      Req.Test.stub(OAuthUsage.HTTP, fn conn ->
+        send(test_pid, :network_call)
+        Req.Test.json(conn, %{})
+      end)
+
+      assert {:ok, _usage} =
+               OAuthUsage.fetch(token: "shared-token", provider_account_id: "account-2")
+
+      assert_received :network_call
+    end
+  end
+
   describe "fetch/1 — resets_at, representative_claim, overage_status, status synthesis" do
     # A recorded shape of the real /api/oauth/usage body (2026-09-12), with no
     # token values — see bd-3uwku6. `resets_at` timestamps are placeholders,

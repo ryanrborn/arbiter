@@ -76,8 +76,8 @@ defmodule Arbiter.Tasks.Issue do
   # are the reviewable, PR-producing types those guards actually score.
   @gated_issue_types ~w(bug feature chore)a
 
-  # An epic is a rollup of children, never a unit a worker (or a graph) can
-  # be handed directly. `Arbiter.Board.Snapshot` reads this same list rather
+  # An epic is a rollup of children, never a unit a worker can be handed
+  # directly. `Arbiter.Board.Snapshot` reads this same list rather
   # than redeclaring it — see `non_dispatchable_types/0`.
   @non_dispatchable_types ~w(epic)a
 
@@ -1194,9 +1194,8 @@ defmodule Arbiter.Tasks.Issue do
   def gated_type?(issue_type), do: issue_type in @gated_issue_types
 
   @doc """
-  Issue types that are never dispatchable — to a worker directly, or as a
-  graph directive. Currently just `epic`: a rollup of children, not a unit of
-  work in its own right. The canonical list; `Arbiter.Board.Snapshot` reads it
+  Issue types that are never dispatchable to a worker. Currently just `epic`:
+  a rollup of children, not a unit of work in its own right. The canonical list; `Arbiter.Board.Snapshot` reads it
   instead of keeping its own copy.
   """
   def non_dispatchable_types, do: @non_dispatchable_types
@@ -1248,33 +1247,30 @@ defmodule Arbiter.Tasks.Issue do
        join their `to_issue` and check status.
     3. Reject open issues that have at least one unclosed gating target.
 
-  At our scale (~thousands of issues) this is fine. If the graph grows, push the
-  filter into Postgres with a `not exists` subquery as a read action.
+  At our scale (~thousands of issues) this is fine. If the edge set grows, push
+  the filter into Postgres with a `not exists` subquery as a read action.
 
   > #### Not the board's Ready column {: .info}
   >
   > This answers "whose dependencies are satisfied", which is a narrower
   > question than the board's Ready column asks. Since bd-b5wyjd that column
   > also requires `refined == true`; this helper deliberately does not, because
-  > its callers (`Arbiter.Workflows.Conductor`'s graph admission, the
-  > `task_ready` MCP tool, `GET /api/issues?ready=true`) are asking about the
-  > dependency graph, not about the refinement queue. A graph member that is
-  > unrefined is still dispatchable *by its graph* — the graph is the human
-  > decision that promotion would otherwise be.
+  > its callers (the `task_ready` MCP tool and `GET /api/issues?ready=true`)
+  > are asking about the dependency edges, not about the refinement queue.
   >
-  > If those two ever need to agree, the change belongs here rather than in
-  > `Arbiter.Board.Snapshot`, and it is a behaviour change for three public
+  > bd-a14qd1 revisited this when the board scheduler became the only
+  > dispatcher, and deliberately left it alone: neither caller dispatches
+  > anything, and both are documented as dependency-readiness reads. If the
+  > two ever need to agree, the change belongs here rather than in
+  > `Arbiter.Board.Snapshot`, and it is a behaviour change for two public
   > surfaces, not a filter tweak.
   >
   > `refined` is the only thing this helper still declines to check. Issue
   > *type* is different: an epic is a rollup of children, never a unit of work
-  > any caller — board, Autopilot, or a graph's own admission — can hand to a
-  > worker. `Arbiter.Tasks.Graph`'s members are "directives", i.e. individually
-  > dispatchable work, so there is no legitimate graph that wants an epic
-  > admitted as a member either. So since bd-cnfwtr this helper excludes
-  > `Issue.non_dispatchable_types/0` (currently just `epic`) up front, and all
-  > four callers (`Arbiter.Workflows.Conductor`, `task_ready`,
-  > `GET /api/issues?ready=true`, `graph_status`) inherit that exclusion.
+  > any caller — board or Autopilot — can hand to a worker. So since bd-cnfwtr
+  > this helper excludes `Issue.non_dispatchable_types/0` (currently just
+  > `epic`) up front, and both callers (`task_ready` and
+  > `GET /api/issues?ready=true`) inherit that exclusion.
   """
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new

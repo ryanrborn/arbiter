@@ -288,6 +288,9 @@ defmodule Arbiter.Loop.Corpus do
       workspace_id: Map.get(info, :workspace_id),
       step: :other,
       model: "loop-analysis-pass",
+      # "arbiter" is a synthetic provider (this pass, not a metered CLI), so
+      # it has no provider account to resolve — provider_account_id is
+      # deliberately absent here, unlike the real dispatch writers.
       provider: "arbiter",
       cost_usd: Map.get(info, :cost_usd, 0.0),
       # #1463: the pass's own draw on the quota windows it now measures. Stage 1

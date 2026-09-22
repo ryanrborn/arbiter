@@ -58,8 +58,8 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_overview` | worker, coordinator | `Ash.get(Workspace, id)` → grouped config summary |
   | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
-  | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (conductor + credential watchdog) |
-  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (conductor + credential watchdog) |
+  | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (concurrency ceiling + credential watchdog) |
+  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog) |
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
   | `skill_update` | coordinator | `Arbiter.Skills.update_skill/2` |
   | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
@@ -70,7 +70,6 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_pending_apply` | coordinator | `Arbiter.Loop.apply_pending/2` (dispatches to the existing domain API) |
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
-  | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
   | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/1` (bd-8jixav) |
   | `ci_rerun` | worker, coordinator | `Arbiter.Worker.Watchdog.rerun_ci/2` → `Merger.rerun_ci/2` (bd-5mzzww) |
@@ -130,7 +129,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
+  @workspace_tools ~w(task_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
 
   @raw_tools [
     %{
@@ -176,7 +175,11 @@ defmodule Arbiter.MCP.Catalog do
     %{
       name: "task_ready",
       tiers: [:coordinator],
-      description: "List ready (open, unblocked) tasks in the workspace.",
+      description:
+        "List ready (open, unblocked) tasks in the workspace — open tasks with no " <>
+          "unsatisfied gating edge. This is a dependency-readiness read and deliberately " <>
+          "ignores `refined`, so it is NOT the board's Ready column: it can list a Backlog " <>
+          "task the board scheduler will not dispatch. Use `task_list` for the board view.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.task_ready/2
     },
@@ -348,9 +351,8 @@ defmodule Arbiter.MCP.Catalog do
           "`tracker_type`, …. The task is always created in the coordinator's own workspace. " <>
           "Created tasks land in the board's Backlog (`refined: false`), not its Ready queue, " <>
           "and stay there until a human promotes them from the task detail page. " <>
-          "Graph-driven dispatch (`task_ready`, workflow admission) ignores `refined`, so a " <>
-          "task that is part of a workflow graph still runs; a standalone task filed here " <>
-          "waits for that promotion. bd-7mbrlg: filing a `bug`/`feature`/`chore` with no " <>
+          "The board scheduler (Autopilot) is the only dispatcher, and it promotes from " <>
+          "Ready only, so a task filed here waits for that promotion. bd-7mbrlg: filing a `bug`/`feature`/`chore` with no " <>
           "`acceptance` returns a non-blocking `warnings` entry in the response — the task " <>
           "still gets created, but `task_promote` will later refuse it without ACs or a waiver.",
       input_schema: %{
@@ -633,8 +635,8 @@ defmodule Arbiter.MCP.Catalog do
           "depends_on, relates_to, discovered_from, parent_of, conflicts_with. Use `parent_of` " <>
           "(from = parent, to = child) to attach a child to a parent task — that is how " <>
           "grouping/epics work; the parent then rolls up child progress and can auto-close. " <>
-          "`conflicts_with` is a symmetric mutex honoured by BOTH schedulers — the board's " <>
-          "Autopilot and the graph Conductor will not co-dispatch the pair, in either edge " <>
+          "`conflicts_with` is a symmetric mutex enforced by the board scheduler " <>
+          "(Autopilot), which will not co-dispatch the pair, in either edge " <>
           "direction, while one of them is in flight (running, in review, awaiting review or " <>
           "in a fix pass). The held card reads `blocked — conflicts with <id> (<state>)` and " <>
           "goes once the counterpart merges, closes or is parked. " <>
@@ -1544,7 +1546,8 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @both,
       description:
         "Read an install-wide runtime setting (not workspace-scoped): " <>
-          "`conductor_system_max_concurrent` (the Conductor's system-wide concurrency ceiling), " <>
+          "`conductor_system_max_concurrent` (the system-wide concurrency ceiling the board " <>
+          "scheduler dispatches under), " <>
           "`credential_watchdog_adapters`, `credential_watchdog_interval_ms`, " <>
           "`credential_watchdog_recovery_interval_ms`. " <>
           "Omit `key` to get the full settings map. Returns `{key, value, settings}`.",
@@ -1573,7 +1576,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Set an install-wide runtime setting; `null` always clears the override and falls back " <>
           "to the app-env/hardcoded default. `conductor_system_max_concurrent` (positive " <>
-          "integer) takes effect on the next Conductor drain cycle across every running graph. " <>
+          "integer) takes effect on the board scheduler's next tick. " <>
           ~s[`credential_watchdog_adapters` (list of agent types — "claude", "gemini", ] <>
           "\"codex\"; `[]` probes nothing), `credential_watchdog_interval_ms` and " <>
           "`credential_watchdog_recovery_interval_ms` (positive integers) take effect on the " <>
@@ -1931,174 +1934,6 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.usage_summarize/2
     },
 
-    # ---- C7: graph CRUD + lifecycle -----------------------------------------
-    %{
-      name: "graph_create",
-      tiers: @coordinator,
-      description:
-        "Create a Graph in the workspace. `name` is required; optional `description`. " <>
-          "A Graph is an execution unit: a named set of directives run together.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "name" => %{"type" => "string", "description" => "Graph name (required)."},
-          "description" => %{"type" => "string", "description" => "Markdown summary (optional)."}
-        },
-        "required" => ["name"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_create/2
-    },
-    %{
-      name: "graph_add_directive",
-      tiers: @coordinator,
-      description:
-        "Add a directive (Issue) to a Graph as a member. " <>
-          "Directives must be in the same workspace as the graph. " <>
-          "In a workspace with more than one configured repo, pass `repo` so the " <>
-          "Conductor can auto-dispatch this directive when it becomes ready — " <>
-          "without it, dispatch falls back to the workspace's `default_repo` config " <>
-          "(if set via workspace_config_set) or else fails with `ambiguous_repo` and " <>
-          "the directive stays `ready` forever.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."},
-          "issue_id" => %{
-            "type" => "string",
-            "description" => "Directive (task) id (required)."
-          },
-          "repo" => %{
-            "type" => "string",
-            "description" =>
-              "Repo this directive dispatches into (optional). Required for auto-dispatch " <>
-                "to succeed in a workspace with more than one configured repo; auto-resolves " <>
-                "when the workspace has exactly one."
-          }
-        },
-        "required" => ["graph_id", "issue_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_add_directive/2
-    },
-    %{
-      name: "graph_remove_directive",
-      tiers: @coordinator,
-      description:
-        "Remove a directive (Issue) from a Graph. Idempotent — returns `removed: 0` " <>
-          "when the directive is not a member.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."},
-          "issue_id" => %{"type" => "string", "description" => "Directive (task) id (required)."}
-        },
-        "required" => ["graph_id", "issue_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_remove_directive/2
-    },
-    %{
-      name: "graph_add_edge",
-      tiers: @coordinator,
-      description:
-        "Add a dependency edge between two directives in a Graph. " <>
-          "`type` must be one of `depends_on`, `blocks`, or `conflicts_with`. " <>
-          "`depends_on` and `blocks` gate execution order; `conflicts_with` prevents " <>
-          "co-dispatch (symmetric mutex, non-gating — honoured by both the Conductor and " <>
-          "the board's Autopilot). Both directives must be in the graph's workspace.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."},
-          "from_issue_id" => %{
-            "type" => "string",
-            "description" => "The dependent directive (required)."
-          },
-          "to_issue_id" => %{
-            "type" => "string",
-            "description" => "The dependency target (required)."
-          },
-          "type" => %{
-            "type" => "string",
-            "enum" => ["depends_on", "blocks", "conflicts_with"],
-            "description" => "Edge type (required)."
-          },
-          "notes" => %{"type" => "string", "description" => "Markdown context (optional)."}
-        },
-        "required" => ["graph_id", "from_issue_id", "to_issue_id", "type"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_add_edge/2
-    },
-    %{
-      name: "graph_start",
-      tiers: @coordinator,
-      description:
-        "Start a Graph: validate acyclicity, transition `:draft → :running`, and start " <>
-          "the Conductor which dispatches ready directives. Rejects cyclic graphs with the " <>
-          "named cycle. The graph must be in `:draft` state.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
-        },
-        "required" => ["graph_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_start/2
-    },
-    %{
-      name: "graph_pause",
-      tiers: @coordinator,
-      description:
-        "Pause a running Graph: transition `:running → :paused` and stop the Conductor. " <>
-          "Workers already dispatched continue to completion; no new dispatches occur " <>
-          "while paused. Resume with `graph_resume`.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
-        },
-        "required" => ["graph_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_pause/2
-    },
-    %{
-      name: "graph_resume",
-      tiers: @coordinator,
-      description:
-        "Resume a paused Graph: transition `:paused → :running` and restart the Conductor " <>
-          "to continue dispatching ready directives. The graph must be in `:paused` state.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
-        },
-        "required" => ["graph_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_resume/2
-    },
-    %{
-      name: "graph_status",
-      tiers: @coordinator,
-      description:
-        "Return the run_state and running/ready/blocked/paused/failed/closed breakdown " <>
-          "of a Graph's member directives. `paused` and `failed` counts come from the " <>
-          "live Conductor (C5 failure handling) and are 0 when no Conductor is running.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
-        },
-        "required" => ["graph_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.graph_status/2
-    },
-
     # ---- board scheduler (autopilot) pause/resume --------------------------
     %{
       name: "scheduler_pause",
@@ -2182,29 +2017,6 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.breaker_reset/2
-    },
-
-    # ---- C5: queue resume ---------------------------------------------------
-    %{
-      name: "queue_resume",
-      tiers: @coordinator,
-      description:
-        "Resume a paused graph branch by re-dispatching the failed task that blocked it " <>
-          "(C5 of #482). Searches all running Conductors for one that has `task_id` in its " <>
-          "failed set and re-dispatches it, unblocking the downstream branch. " <>
-          "Use after receiving a conductor failure escalation in the coordinator inbox.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "task_id" => %{
-            "type" => "string",
-            "description" => "The failed task ID to re-dispatch (required)."
-          }
-        },
-        "required" => ["task_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.queue_resume/2
     },
     %{
       name: "queue_retry_auto_resolve",

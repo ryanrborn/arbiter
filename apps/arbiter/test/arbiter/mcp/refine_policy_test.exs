@@ -56,7 +56,7 @@ defmodule Arbiter.MCP.RefinePolicyTest do
   describe "the shape of the permission set" do
     test "the read surface a refinement actually needs is allowed" do
       for tool <- ~w(task_show task_list task_ready workspace_show workspace_config_get
-                     workspace_config_overview graph_status repo_list repo_show
+                     workspace_config_overview repo_list repo_show
                      skill_list skill_get) do
         assert RefinePolicy.allow?(tool), "expected #{tool} to be allowed for a refine session"
       end
@@ -73,8 +73,6 @@ defmodule Arbiter.MCP.RefinePolicyTest do
                      worker_dispatch worker_resume worker_review worker_stop worker_list
                      worker_show worker_runs worker_log worker_prompt
                      scheduler_pause scheduler_resume scheduler_status
-                     graph_create graph_add_directive graph_remove_directive graph_add_edge
-                     graph_start graph_pause graph_resume
                      workspace_config_set workspace_config_unset
                      installation_config_get installation_config_set
                      skill_create skill_update skill_delete
@@ -105,7 +103,7 @@ defmodule Arbiter.MCP.RefinePolicyTest do
             {"task_close", %{"id" => "bd-x"}},
             {"workspace_config_set", %{"key" => "a", "value" => "b"}},
             {"scheduler_pause", %{}},
-            {"graph_add_edge", %{"graph_id" => "g"}},
+            {"queue_restart_watchdog", %{"task_id" => "bd-x"}},
             {"worker_stop", %{"task_id" => "bd-x"}},
             {"message_send", %{"to" => "coordinator", "body" => "hi"}},
             {"review_greenlight", %{"task_id" => "bd-x"}},
