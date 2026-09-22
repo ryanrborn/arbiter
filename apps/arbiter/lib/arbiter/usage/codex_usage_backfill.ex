@@ -59,13 +59,34 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
   # recognize it before this fix). Give each skip branch a note that says
   # what's actually true instead, so every codex row converges on an honest
   # cause rather than 1,182 of them keeping a disproven one forever.
+  #
+  # bd-96mn8i round 9 finding 1: that "the parser dropped it" story is only
+  # true for a row whose probe actually completed (`exit_status == 0`) and
+  # therefore printed a result object for the pre-fix parser to fail to
+  # parse. A probe that exited non-zero, or timed out (`exit_status` nil —
+  # see `Preflight.check/2`'s `:timeout` path), never reported a result
+  # object at all: there was nothing for the parser to drop. Against the
+  # live ledger this split is most of the affected codex rows (1,082 of
+  # 1,620 failed non-zero), so the note must say which happened.
   @no_rollout_note "usage unrecoverable (bd-96mn8i backfill): pre-fix Probe.parse/1 bug lost " <>
                      "this probe's tokens, and no on-disk rollout JSONL was found within the " <>
                      "backfill's match window to recover them from — stays unknown, not zero."
 
+  @no_rollout_note_failed_probe "usage unknown (bd-96mn8i backfill): this probe exited " <>
+                                  "non-zero or timed out and reported no result object, so " <>
+                                  "there were no tokens for the pre-fix parser to lose; no " <>
+                                  "on-disk rollout JSONL was found within the backfill's match " <>
+                                  "window either — stays unknown, not zero."
+
   @no_token_count_note "usage unrecoverable (bd-96mn8i backfill): pre-fix Probe.parse/1 bug lost " <>
                          "this probe's tokens; the matching on-disk rollout JSONL was found but " <>
                          "carries no token_count line either — stays unknown, not zero."
+
+  @no_token_count_note_failed_probe "usage unknown (bd-96mn8i backfill): this probe exited " <>
+                                      "non-zero or timed out and reported no result object, so " <>
+                                      "there were no tokens for the pre-fix parser to lose; the " <>
+                                      "matching on-disk rollout JSONL was found but carries no " <>
+                                      "token_count line either — stays unknown, not zero."
 
   @type report :: %{
           scanned: non_neg_integer(),
@@ -131,7 +152,7 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
            find_opts
          ) do
       :not_found ->
-        if apply?, do: note_only(row, @no_rollout_note)
+        if apply?, do: note_only(row, no_rollout_note_for(row))
         bump(acc, :no_rollout_file)
 
       {:ok, path} ->
@@ -142,7 +163,7 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
   defp handle_file(row, path, apply?, acc) do
     case CodexSessionFile.read_totals(path) do
       {:ok, %{tokens_in: nil}} ->
-        if apply?, do: note_only(row, @no_token_count_note)
+        if apply?, do: note_only(row, no_token_count_note_for(row))
         bump(acc, :no_token_count)
 
       {:ok, totals} ->
@@ -152,6 +173,22 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
         Logger.debug("CodexUsageBackfill: unreadable rollout #{path}: #{inspect(reason)}")
         bump(acc, :unreadable)
     end
+  end
+
+  # A probe with `exit_status == 0` completed and printed a result object —
+  # the pre-fix parser had something to drop. Any other status (non-zero, or
+  # nil for a timed-out probe that never reached `exit_status`) means the CLI
+  # never reported usage in the first place, so the "parser dropped it" note
+  # would be false.
+  defp failed_probe?(%{exit_status: 0}), do: false
+  defp failed_probe?(_row), do: true
+
+  defp no_rollout_note_for(row) do
+    if failed_probe?(row), do: @no_rollout_note_failed_probe, else: @no_rollout_note
+  end
+
+  defp no_token_count_note_for(row) do
+    if failed_probe?(row), do: @no_token_count_note_failed_probe, else: @no_token_count_note
   end
 
   defp apply_backfill(row, totals) do

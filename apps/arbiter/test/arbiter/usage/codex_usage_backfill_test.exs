@@ -150,6 +150,7 @@ defmodule Arbiter.Usage.CodexUsageBackfillTest do
       ev =
         create_event!(%{
           occurred_at: DateTime.utc_now(),
+          exit_status: 0,
           tokens_in: nil,
           tokens_out: nil,
           cost_note:
@@ -164,7 +165,8 @@ defmodule Arbiter.Usage.CodexUsageBackfillTest do
       # bd-96mn8i round 5 finding 2: the disproven pre-fix note ("CLI
       # reported nothing") must not survive an --apply pass on a row this
       # backfill couldn't recover — it gets a note admitting the real cause
-      # (unrecoverable, not "nothing to recover").
+      # (unrecoverable, not "nothing to recover"). This row completed
+      # (`exit_status: 0`), so the "parser dropped it" story holds.
       reloaded = Ash.get!(Event, ev.id)
       assert reloaded.tokens_in == nil
       assert reloaded.cost_note =~ "unrecoverable"
@@ -230,6 +232,48 @@ defmodule Arbiter.Usage.CodexUsageBackfillTest do
       assert reloaded.cost_note == worker_note
     end
 
+    test "a row from a failed (non-zero exit) probe gets a 'never reported' note, not a 'parser dropped it' note" do
+      dir = tmp_sessions_dir()
+
+      ev =
+        create_event!(%{
+          occurred_at: DateTime.utc_now(),
+          exit_status: 1,
+          tokens_in: nil,
+          tokens_out: nil,
+          cost_note:
+            "no structured usage in probe output (the CLI returned no parseable result object)"
+        })
+
+      report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
+      assert report.no_rollout_file == 1
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.tokens_in == nil
+      assert reloaded.cost_note =~ "usage unknown"
+      assert reloaded.cost_note =~ "exited non-zero or timed out"
+      refute reloaded.cost_note =~ "pre-fix Probe.parse/1 bug lost"
+    end
+
+    test "a row from a probe with no recorded exit_status (timeout) also gets the 'never reported' note" do
+      dir = tmp_sessions_dir()
+
+      ev =
+        create_event!(%{
+          occurred_at: DateTime.utc_now(),
+          exit_status: nil,
+          tokens_in: nil,
+          tokens_out: nil
+        })
+
+      report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
+      assert report.no_rollout_file == 1
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.cost_note =~ "usage unknown"
+      refute reloaded.cost_note =~ "pre-fix Probe.parse/1 bug lost"
+    end
+
     test "a matched rollout with no token_count line is counted separately and gets an honest note" do
       dir = tmp_sessions_dir()
       occurred_at = ~U[2026-09-17 00:04:36.349Z]
@@ -247,6 +291,7 @@ defmodule Arbiter.Usage.CodexUsageBackfillTest do
         create_event!(%{
           occurred_at: occurred_at,
           duration_ms: 4505,
+          exit_status: 0,
           tokens_in: nil,
           tokens_out: nil,
           cost_note:

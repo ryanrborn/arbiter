@@ -39,6 +39,7 @@ defmodule Arbiter.Usage.GeminiUsageNoteTest do
     test "--apply rewrites the cost_note without touching token columns" do
       ev =
         create_event!(%{
+          exit_status: 0,
           tokens_in: nil,
           tokens_out: nil,
           cost_note:
@@ -55,6 +56,41 @@ defmodule Arbiter.Usage.GeminiUsageNoteTest do
       assert reloaded.tokens_out == nil
       assert reloaded.cost_note =~ "unrecoverable"
       refute reloaded.cost_note =~ "--output-format json"
+    end
+
+    test "a row from a failed (non-zero exit) probe gets a 'never reported' note, not a 'decoder misparsed it' note" do
+      ev =
+        create_event!(%{
+          exit_status: 1,
+          tokens_in: nil,
+          tokens_out: nil,
+          cost_note:
+            "no structured usage in probe output (CLI returned no `--output-format json` result object)"
+        })
+
+      report = GeminiUsageNote.backfill(apply?: true)
+      assert report.noted == 1
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.cost_note =~ "usage unknown"
+      assert reloaded.cost_note =~ "exited non-zero or timed out"
+      refute reloaded.cost_note =~ "didn't recognize gemini's"
+    end
+
+    test "a row from a probe with no recorded exit_status (timeout) also gets the 'never reported' note" do
+      ev =
+        create_event!(%{
+          exit_status: nil,
+          tokens_in: nil,
+          tokens_out: nil
+        })
+
+      report = GeminiUsageNote.backfill(apply?: true)
+      assert report.noted == 1
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.cost_note =~ "usage unknown"
+      refute reloaded.cost_note =~ "didn't recognize gemini's"
     end
 
     test "a row already carrying tokens is never touched" do

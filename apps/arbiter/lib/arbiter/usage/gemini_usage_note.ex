@@ -25,6 +25,16 @@ defmodule Arbiter.Usage.GeminiUsageNote do
   is_nil(tokens_in)` rows are touched — `source: :task` gemini rows already
   read tokens correctly (round 2 finding 2's live-DB check: 35 of 48
   `source: :task` rows non-zero) and are never in scope here.
+
+  bd-96mn8i round 9 finding 1: the "parser didn't recognize the shape" story
+  is only true for a row whose probe actually completed (`exit_status == 0`)
+  and therefore printed a `stats` payload for the pre-fix decoder to fail on.
+  A probe that exited non-zero, or timed out (`exit_status` nil), never
+  reported a result object at all — nothing for the decoder to misparse.
+  Against the live ledger this is the tiny minority for gemini (1,243 of
+  1,257 affected rows have `exit_status == 0`, so the "shape" story holds for
+  almost all of them), but the note still has to say which happened per row
+  rather than assert the majority case unconditionally.
   """
 
   require Ash.Query
@@ -36,6 +46,12 @@ defmodule Arbiter.Usage.GeminiUsageNote do
           "recognize gemini's `stats` shape, so the live probe wrote no tokens for this row " <>
           "and no on-disk gemini session file exists to recover them from afterward — stays " <>
           "unknown, not zero."
+
+  @note_failed_probe "usage unknown (bd-96mn8i backfill): this probe exited non-zero or timed " <>
+                       "out and reported no result object, so there were no tokens for the " <>
+                       "pre-fix decoder to misparse in the first place; no on-disk gemini " <>
+                       "session file exists to recover them from either — stays unknown, not " <>
+                       "zero."
 
   @type report :: %{
           scanned: non_neg_integer(),
@@ -77,7 +93,7 @@ defmodule Arbiter.Usage.GeminiUsageNote do
   defp process_row(row, true, acc) do
     acc = bump(acc, :scanned)
 
-    case Ash.update(row, %{cost_note: @note}, action: :backfill_usage) do
+    case Ash.update(row, %{cost_note: note_for(row)}, action: :backfill_usage) do
       {:ok, _row} ->
         bump(acc, :noted)
 
@@ -86,6 +102,12 @@ defmodule Arbiter.Usage.GeminiUsageNote do
         bump(acc, :failed)
     end
   end
+
+  # See the round 9 finding 1 moduledoc note: the "decoder didn't recognize
+  # the shape" story only holds for a probe that actually completed and
+  # printed a result object.
+  defp note_for(%{exit_status: 0}), do: @note
+  defp note_for(_row), do: @note_failed_probe
 
   defp bump(acc, key), do: Map.update!(acc, key, &(&1 + 1))
 
