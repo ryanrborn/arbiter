@@ -693,13 +693,41 @@ defmodule Arbiter.Quota do
   @spec capture_oauth_usage(String.t() | nil, keyword()) ::
           {:ok, AnthropicQuota.t()} | {:error, term()}
   def capture_oauth_usage(account_id, opts \\ []) do
-    provider = Keyword.get(opts, :provider, @default_provider)
-
-    with {:ok, id} <- fetch_account_id(account_id),
-         {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(account_oauth_fetch_opts(id, opts)) do
-      record_oauth_usage(id, provider, usage)
+    case capture_oauth_usage_tagged(account_id, opts) do
+      {:error, {_stage, reason}} -> {:error, reason}
+      other -> other
     end
   end
+
+  # Same fetch-then-write as `capture_oauth_usage/2`, but keeps the failure
+  # tagged with which stage produced it (`:fetch` vs `:write`) instead of
+  # collapsing both to a bare `{:error, reason}`. `write_once_per_account/4`
+  # needs that distinction: a per-account *fetch* failure (a 401, a transport
+  # error, an unresolvable account) must count toward `CloudProbe`'s
+  # consecutive-failure/401 streaks even when other accounts in the same
+  # cycle succeed, while a *write* failure (fetch succeeded, only the DB
+  # write failed) must not be conflated with it. See the HIGH finding on
+  # bd-3j92yv: before this, both stages surfaced as the same bare error and
+  # `CloudProbe.note_oauth_result/3` reset the streak on any cycle where at
+  # least one account succeeded, silently killing 401/failure detection for
+  # any multi-account install.
+  defp capture_oauth_usage_tagged(account_id, opts) do
+    provider = Keyword.get(opts, :provider, @default_provider)
+
+    case fetch_account_id(account_id) do
+      {:error, reason} ->
+        {:error, {:fetch, reason}}
+
+      {:ok, id} ->
+        case Arbiter.Quota.OAuthUsage.fetch(account_oauth_fetch_opts(id, opts)) do
+          {:error, reason} -> {:error, {:fetch, reason}}
+          {:ok, usage} -> tag_write_error(record_oauth_usage(id, provider, usage))
+        end
+    end
+  end
+
+  defp tag_write_error({:error, reason}), do: {:error, {:write, reason}}
+  defp tag_write_error(ok), do: ok
 
   # Resolves the token to authenticate `/api/oauth/usage` with (see the
   # moduledoc on `capture_oauth_usage/2`). An explicit `:token` already in
@@ -712,11 +740,25 @@ defmodule Arbiter.Quota do
     if Keyword.has_key?(opts, :token) do
       opts
     else
-      opts = Keyword.put(opts, :provider_account_id, account_id)
-
       case Credentials.account_oauth_usage_token(account_id) do
-        {:ok, token} -> Keyword.put(opts, :token, token)
-        :none -> opts
+        # Only tag the fetch with `:provider_account_id` — and so only key
+        # its 429 cooldown on the account — when a per-account credential
+        # was actually resolved. When it wasn't (`:none`: pre-migration or
+        # partially-migrated install), `OAuthUsage.fetch/1` falls back to
+        # the operator's on-disk `.credentials.json`, the same real token
+        # every credential-less account shares; tagging the account here
+        # regardless (as before) gave every such account its own cooldown
+        # key for that one shared token, so a 429 on one no longer
+        # suppressed the others — exactly the multiplication this option
+        # exists to eliminate. Leaving `opts` untouched here keeps the
+        # pre-P6 token-keyed cooldown for that shared-fallback case.
+        {:ok, token} ->
+          opts
+          |> Keyword.put(:provider_account_id, account_id)
+          |> Keyword.put(:token, token)
+
+        :none ->
+          opts
       end
     end
   end
@@ -759,15 +801,23 @@ defmodule Arbiter.Quota do
 
   Returns `{:ok, results}` with one entry per input workspace, in the same
   order, so a caller can tell which workspace's account failed — workspaces
-  sharing an account share that account's result. When every workspace in
-  the group resolves to the *same* failure (typically: one account, or every
-  account failing identically, e.g. a transport error), the failure is
-  surfaced as a bare `{:error, reason}` instead, matching this function's
-  pre-P6 contract for the single-account case every existing caller relies
-  on.
+  sharing an account share that account's result. Each failure is tagged
+  with the stage it came from, `{:error, {:fetch, reason}}` (the account's
+  own `/api/oauth/usage` fetch failed — a 401, a transport error, an
+  unresolvable workspace/account) or `{:error, {:write, reason}}` (the fetch
+  succeeded, only the DB write failed), so a caller like `CloudProbe` can
+  tell "this account's credential/upstream is broken" apart from "the fetch
+  was fine, persistence hiccuped" instead of conflating the two (bd-3j92yv).
+  When every workspace in the group resolves to the *same* failure
+  (typically: one account, or every account failing identically), the
+  failure is surfaced as a bare, still-tagged `{:error, {stage, reason}}`
+  instead of the `{:ok, results}` wrapper, matching this function's pre-P6
+  contract shape (minus the tag) for the single-account case every existing
+  caller relies on.
   """
   @spec capture_oauth_usage_for_group([String.t()], keyword()) ::
-          {:ok, [{:ok, AnthropicQuota.t()} | {:error, term()}]} | {:error, term()}
+          {:ok, [{:ok, AnthropicQuota.t()} | {:error, {:fetch | :write, term()}}]}
+          | {:error, {:fetch | :write, term()}}
   def capture_oauth_usage_for_group(workspace_ids, opts \\ []) when is_list(workspace_ids) do
     provider = Keyword.get(opts, :provider, @default_provider)
 
@@ -790,11 +840,11 @@ defmodule Arbiter.Quota do
           {result, seen}
 
         :error ->
-          result = capture_oauth_usage(account_id, Keyword.put(opts, :provider, provider))
+          result = capture_oauth_usage_tagged(account_id, Keyword.put(opts, :provider, provider))
           {result, Map.put(seen, account_id, result)}
       end
     else
-      error -> {error, seen}
+      {:error, reason} -> {{:error, {:fetch, reason}}, seen}
     end
   end
 

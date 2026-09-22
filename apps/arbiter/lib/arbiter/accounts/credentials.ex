@@ -93,22 +93,45 @@ defmodule Arbiter.Accounts.Credentials do
 
   `:none` when the account has no active credential of that kind yet — a
   pre-migration install, or an account minted by `Resolver.ensure_account_id/2`
-  with no credential attached. The caller falls back to
-  `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
-  `.credentials.json` on disk) in that case, unchanged from pre-P6 behavior.
+  with no credential attached — **or when the account itself is parked**
+  (`enabled: false`, §3.1): this function is polled every `CloudProbe` cycle
+  independent of any workspace, so it has to enforce the module's own
+  enabled-only invariant (see the moduledoc) itself rather than relying on a
+  workspace-side filter like `account_ids/1` upstream of it. The caller falls
+  back to `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
+  `.credentials.json` on disk) in either case, unchanged from pre-P6
+  behavior.
+
+  When an account has more than one active `:cli_credentials_file` row —
+  the insert-new-then-retire-old window §3.2 documents mid-rotation — the
+  most recently created one wins, so a rotation in progress authenticates
+  with the incoming credential rather than an arbitrary pick that could land
+  on the outgoing one or flap between the two across polls.
   """
   @spec account_oauth_usage_token(String.t() | nil) :: {:ok, String.t()} | :none
   def account_oauth_usage_token(account_id) when is_binary(account_id) and account_id != "" do
-    [account_id]
-    |> active_credentials()
-    |> Enum.find(&(&1.kind == :cli_credentials_file))
-    |> case do
-      nil -> :none
-      credential -> pair(credential) |> extract_secret()
+    if enabled_account?(account_id) do
+      [account_id]
+      |> active_credentials()
+      |> Enum.filter(&(&1.kind == :cli_credentials_file))
+      |> Enum.max_by(& &1.created_at, DateTime, fn -> nil end)
+      |> case do
+        nil -> :none
+        credential -> pair(credential) |> extract_secret()
+      end
+    else
+      :none
     end
   end
 
   def account_oauth_usage_token(_), do: :none
+
+  defp enabled_account?(account_id) do
+    case Ash.get(ProviderAccount, account_id) do
+      {:ok, %ProviderAccount{enabled: true}} -> true
+      _ -> false
+    end
+  end
 
   defp extract_secret([{_env_var, secret}]), do: {:ok, secret}
   defp extract_secret([]), do: :none

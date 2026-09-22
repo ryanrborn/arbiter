@@ -296,6 +296,14 @@ defmodule Arbiter.Quota.CloudProbe do
       for {workspace_id, {:error, reason}} <- Enum.zip(workspace_ids, results),
           do: {workspace_id, reason}
 
+    # `Quota.write_once_per_account/4` tags each per-account failure with
+    # the stage it came from: `{:fetch, reason}` when that account's own
+    # `/api/oauth/usage` call itself failed (401, transport error,
+    # unresolvable account), `{:write, reason}` when the fetch succeeded and
+    # only the DB write failed.
+    fetch_failed = Enum.filter(failed, fn {_ws, reason} -> match?({:fetch, _}, reason) end)
+    write_failed = Enum.filter(failed, fn {_ws, reason} -> match?({:write, _}, reason) end)
+
     cond do
       failed == [] ->
         if state.oauth_consecutive_401s > 0 do
@@ -304,40 +312,69 @@ defmodule Arbiter.Quota.CloudProbe do
 
         %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
 
-      failed != [] and length(failed) == length(results) ->
-        # Every per-workspace write failed even though the fetch itself
+      fetch_failed != [] ->
+        # At least one account's own fetch failed this cycle, even though
+        # other accounts succeeded. A mixed cycle like this must not look
+        # like a clean one — pre-P6, the fetch ran once for the whole
+        # group, so any fetch error was necessarily a whole-cycle failure;
+        # post-P6 each account fetches independently, so this is the exact
+        # case the HIGH finding on bd-3j92yv covers: a broken account's 401s
+        # must keep tripping `CredentialWatchdog`/the escalation mailbox
+        # even while a healthy sibling account keeps polling fine. Prefer a
+        # 401 among the failures so the streak that matters most doesn't
+        # get starved by an unrelated transport error on another account.
+        {_ws, reason} =
+          Enum.find(fetch_failed, fn {_ws, {:fetch, r}} -> match?({:http_error, 401}, r) end) ||
+            hd(fetch_failed)
+
+        Logger.warning(
+          "Arbiter.Quota.CloudProbe: oauth usage fetch failed for #{length(fetch_failed)} account(s) this cycle: #{inspect(fetch_failed)}"
+        )
+
+        note_oauth_result(state, workspace_ids, {:error, reason})
+
+      length(write_failed) == length(results) ->
+        # Every per-workspace write failed even though every fetch
         # succeeded (e.g. the DB was locked) — this is the ticket's exact
         # symptom ("polls every 5 min and writes nothing") wearing a
         # different cause, so it must count as a failed cycle rather than
         # reset the counter.
         Logger.warning(
-          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but every write failed: #{inspect(failed)}"
+          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but every write failed: #{inspect(write_failed)}"
         )
 
-        note_oauth_result(state, workspace_ids, {:error, {:all_writes_failed, failed}})
+        note_oauth_result(state, workspace_ids, {:error, {:all_writes_failed, write_failed}})
 
       true ->
         Logger.warning(
-          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(failed)}"
+          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(write_failed)}"
         )
 
         %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
     end
   end
 
-  defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason} = error) do
+  defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason}) do
     failures = state.oauth_consecutive_failures + 1
 
     if failures == @oauth_failure_escalation_threshold do
       escalate_oauth_failure(workspace_ids, failures, reason)
     end
 
-    state = note_oauth_401(state, workspace_ids, error)
+    # `reason` may still carry a `Quota.write_once_per_account/4` stage tag
+    # here — this clause also handles the bare `{:error, reason}` a whole-
+    # cycle failure collapses to (`Quota.capture_oauth_usage_for_group/2`'s
+    # uniform-failure shortcut), which keeps the tag. Unwrap it so 401
+    # detection doesn't care whether it arrived tagged or not.
+    state = note_oauth_401(state, workspace_ids, {:error, unwrap_stage(reason)})
 
     %{state | oauth_consecutive_failures: failures}
   end
 
   defp note_oauth_result(%State{} = state, _workspace_ids, _other), do: state
+
+  defp unwrap_stage({stage, reason}) when stage in [:fetch, :write], do: reason
+  defp unwrap_stage(reason), do: reason
 
   defp escalate_oauth_failure([ws_id | _], failures, reason) when is_binary(ws_id) do
     safe_escalate(fn ->

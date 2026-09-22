@@ -608,6 +608,103 @@ defmodule Arbiter.Quota.CloudProbeTest do
       assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
     end
 
+    # Regression for the HIGH finding on bd-3j92yv: pre-P6 there was one
+    # fetch for the whole fleet, so any fetch error was necessarily a
+    # whole-cycle failure. Post-P6 each account fetches independently, so a
+    # naive "any success this cycle resets the streak" (as `collapse_uniform
+    # _failure/1` + the old uniform-`length/1` check produced) would let a
+    # healthy sibling account silently erase a genuinely broken account's
+    # 401 streak forever — this proves the fix keeps counting it.
+    test "one account 401ing every cycle still trips the watchdog even while a sibling account succeeds",
+         context do
+      alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+
+      Req.Test.set_req_test_to_shared(context)
+
+      account_broken = Ash.create!(ProviderAccount, %{provider: :claude, slug: "cp-401-broken"})
+      account_ok = Ash.create!(ProviderAccount, %{provider: :claude, slug: "cp-401-ok"})
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_broken.id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "cp-401-fp-broken",
+        secret: "cp-401-token-broken"
+      })
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_ok.id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "cp-401-fp-ok",
+        secret: "cp-401-token-ok"
+      })
+
+      ws_broken = workspace_with_token!("cp-401-ws-broken", "irrelevant")
+      ws_ok = workspace_with_token!("cp-401-ws-ok", "irrelevant")
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws_broken.id,
+        provider: :claude,
+        provider_account_id: account_broken.id
+      })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws_ok.id,
+        provider: :claude,
+        provider_account_id: account_ok.id
+      })
+
+      watchdog = start_watchdog()
+
+      on_exit(fn ->
+        Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_broken.id)
+        Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_ok.id)
+      end)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        token =
+          conn
+          |> Plug.Conn.get_req_header("authorization")
+          |> List.first()
+          |> String.replace_prefix("Bearer ", "")
+
+        if token == "cp-401-token-broken" do
+          Plug.Conn.send_resp(conn, 401, "")
+        else
+          Req.Test.json(conn, %{"five_hour" => %{"utilization" => 1}})
+        end
+      end)
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [],
+          credential_watchdog: watchdog
+        )
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
+      end)
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
+      end)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      # The healthy sibling account kept polling successfully the whole time.
+      assert Arbiter.Quota.serialize(account_ok.id).oauth_utilization_5h == 0.01
+    end
+
     test "a success resets the 401 streak", context do
       Req.Test.set_req_test_to_shared(context)
       _ws = workspace_with_token!("solo", "401-token")

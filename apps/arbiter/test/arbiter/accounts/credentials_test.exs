@@ -71,4 +71,36 @@ defmodule Arbiter.Accounts.CredentialsTest do
     assert Credentials.account_oauth_usage_token(nil) == :none
     assert Credentials.account_oauth_usage_token("") == :none
   end
+
+  # Reviewer finding 3 on bd-3j92yv: this function bypassed the module's own
+  # enabled-only invariant (see the moduledoc) — a parked account's
+  # credential must supply nothing here, same as it does everywhere else in
+  # this module, or a poll keeps authenticating with a grant the operator
+  # explicitly took out of service.
+  test ":none for a parked (disabled) account, even with an active credential" do
+    account = account!("cred-parked")
+    {:ok, account} = Ash.update(account, %{enabled: false}, action: :update)
+
+    Ash.create!(ProviderCredential, %{
+      provider_account_id: account.id,
+      kind: :cli_credentials_file,
+      env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+      fingerprint: "fp-parked",
+      secret: "parked-token"
+    })
+
+    assert Credentials.account_oauth_usage_token(account.id) == :none
+  end
+
+  # Reviewer finding 4 on bd-3j92yv floated a "two active cli_credentials_file
+  # rows on one account" mid-rotation window. `provider_credentials_unique_
+  # active_index` (a partial unique index on `(provider_account_id, kind)
+  # where active = true`, `provider_credential.ex:38-44`) makes that state
+  # unreachable today: a second `:create` with `active: true` for a kind the
+  # account already has an active row for raises `has already been taken`
+  # (confirmed by literally attempting it here — see the PR discussion for
+  # bd-3j92yv). `account_oauth_usage_token/1` still picks the newest active
+  # row by `created_at` (see the moduledoc) as cheap, harmless
+  # future-proofing in case a later `:rotate` action changes that invariant,
+  # but there is no reachable state today for a regression test to exercise.
 end

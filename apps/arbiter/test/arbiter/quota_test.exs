@@ -740,7 +740,7 @@ defmodule Arbiter.QuotaTest do
         Plug.Conn.send_resp(conn, 500, "")
       end)
 
-      assert {:error, {:http_error, 500}} =
+      assert {:error, {:fetch, {:http_error, 500}}} =
                Quota.capture_oauth_usage_for_group([ws_a.id, ws_b.id],
                  token: "test-token",
                  plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
