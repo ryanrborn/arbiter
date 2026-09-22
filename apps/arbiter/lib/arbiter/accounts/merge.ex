@@ -173,6 +173,14 @@ defmodule Arbiter.Accounts.Merge do
   # `Arbiter.Quota.Rekey` rules, delete, reinsert. Raw SQL (not the Ash
   # actions) because the merged row must land under a fixed id we control and
   # the two accounts' rows must be read together atomically.
+  #
+  # `table`, `columns` and `provider` are interpolated as identifiers/literals
+  # but are not input: the three `collapse_quota/2` clauses above are the only
+  # callers, and each passes a literal table name, a module-attribute column
+  # list (`@codex_columns`/`@cloud_code_columns`/inline), and a `provider`
+  # pattern-matched off a closed set of atoms. `String.to_atom/1` below runs
+  # over that same fixed, compile-time-bounded column list, not user input.
+  # sobelow_skip ["SQL.Query", "DOS.StringToAtom"]
   defp collapse_table(table, columns, collapse_fun, from_id, into_id, provider) do
     cols = ["id", "provider_account_id", "provider"] ++ Enum.map(columns, &to_string/1)
     col_list = Enum.join(cols, ", ")
