@@ -99,9 +99,17 @@ defmodule Arbiter.MCP.Tools do
          claude: Arbiter.Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id),
          codex: codex,
          codex_message: Arbiter.Quota.codex_absence_message(codex),
+         # bd-1fpjgx: read directly off `CredentialWatchdog`'s held state —
+         # the same free 401-streak / agy-exit signal `CloudProbe` feeds it
+         # for Claude (bd-1pmf9h) is now wired for these two adapters too, so
+         # this reports live regardless of whether a quota row has landed yet.
+         codex_credentials_expired:
+           Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
          gemini: Arbiter.Quota.CloudCode.serialize_latest(accounts["gemini_cli"], "gemini_cli"),
          antigravity:
-           Arbiter.Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity")
+           Arbiter.Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
+         gemini_credentials_expired:
+           Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
        }}
     end
   end

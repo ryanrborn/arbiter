@@ -103,6 +103,7 @@ defmodule Arbiter.Quota.CodexTest do
       result = Codex.fetch(ws.id, credentials: creds())
 
       assert result.message == nil
+      assert result.auth_expired == false
       assert result.codex.plan == "plus"
       assert result.codex.session.used == 42.5
       assert result.codex.session.remaining == 57.5
@@ -155,7 +156,25 @@ defmodule Arbiter.Quota.CodexTest do
 
       assert result.codex == nil
       assert result.message =~ "401"
+      assert result.auth_expired == true
       assert Codex.latest(quota_account_id!(ws.id, "codex")) == nil
+    end
+
+    # bd-1fpjgx: `auth_expired` must be a dedicated flag, not something parsed
+    # back out of the message text — any non-401, non-200 status produces the
+    # same "temporarily unavailable (N)" message shape.
+    test "a non-401 error status is not treated as an expiry signal" do
+      ws = workspace!()
+
+      Req.Test.stub(@stub_name, fn conn ->
+        Plug.Conn.send_resp(conn, 500, "")
+      end)
+
+      result = Codex.fetch(ws.id, credentials: creds())
+
+      assert result.codex == nil
+      assert result.message =~ "500"
+      assert result.auth_expired == false
     end
   end
 

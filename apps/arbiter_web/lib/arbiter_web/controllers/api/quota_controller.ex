@@ -72,8 +72,16 @@ defmodule ArbiterWeb.Api.QuotaController do
           workspaces: headline[:workspaces],
           codex: codex,
           codex_message: Quota.codex_absence_message(codex),
+          # bd-1fpjgx: mirrors `claude`'s `credentials_expired` field, sourced
+          # the same way — live off `CredentialWatchdog`'s held state, not the
+          # persisted snapshot, so it reflects the free 401-streak / agy-exit
+          # signal `CloudProbe` now feeds it for these adapters too.
+          codex_credentials_expired:
+            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
           gemini: Quota.CloudCode.serialize_latest(accounts["gemini_cli"], "gemini_cli"),
-          antigravity: Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity")
+          antigravity: Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
+          gemini_credentials_expired:
+            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
         )
 
       {:error, message} ->

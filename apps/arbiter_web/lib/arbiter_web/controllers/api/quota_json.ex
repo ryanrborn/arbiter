@@ -17,8 +17,10 @@ defmodule ArbiterWeb.Api.QuotaJSON do
         quotas: quotas,
         codex: Map.get(assigns, :codex),
         codex_message: Map.get(assigns, :codex_message),
+        codex_credentials_expired: Map.get(assigns, :codex_credentials_expired, false),
         gemini: Map.get(assigns, :gemini),
-        antigravity: Map.get(assigns, :antigravity)
+        antigravity: Map.get(assigns, :antigravity),
+        gemini_credentials_expired: Map.get(assigns, :gemini_credentials_expired, false)
       }
     }
   end

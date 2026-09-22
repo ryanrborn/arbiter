@@ -845,6 +845,42 @@ defmodule Arbiter.MCP.ToolsTest do
       assert claude.utilization_5h == 0.42
       assert claude.representative_claim == "five_hour"
     end
+
+    # bd-1fpjgx: `credentials_expired` (already reported for Claude, see
+    # `serialize_quota/1`) is now reported for Codex and Gemini/Antigravity
+    # too — read live off `CredentialWatchdog`, not the persisted snapshot,
+    # so it's present even before any quota row has landed.
+    test "reports credentials_expired false for codex/gemini with no watchdog state", ctx do
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex_credentials_expired == false
+      assert result.gemini_credentials_expired == false
+    end
+
+    test "reports credentials_expired true for codex/gemini once CredentialWatchdog marks them",
+         ctx do
+      alias Arbiter.Agents.CredentialWatchdog
+      alias Arbiter.Worker.StopReason
+
+      on_exit(fn -> CredentialWatchdog.reset() end)
+
+      reason = %StopReason{
+        category: :auth_expired,
+        summary: "test",
+        remediation: nil,
+        exit_status: nil,
+        signal: nil
+      }
+
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Codex, reason)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Gemini, reason)
+      # Synchronize on the GenServer's own mailbox so the casts above are
+      # guaranteed processed before quota_get reads `expired?/1`.
+      _ = CredentialWatchdog.expired?(Arbiter.Agents.Claude)
+
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex_credentials_expired == true
+      assert result.gemini_credentials_expired == true
+    end
   end
 
   describe "task_update_progress/2" do

@@ -252,6 +252,50 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "Codex CLI not authenticated for this workspace"
     end
 
+    # bd-1fpjgx: generalises the Claude-only "CREDENTIALS EXPIRED" line to
+    # Codex and Gemini/Antigravity.
+    test "shows a CREDENTIALS EXPIRED line for codex when codex_credentials_expired is true" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "codex" => @codex,
+          "codex_credentials_expired" => true
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "CREDENTIALS EXPIRED"
+      assert out =~ "codex login"
+    end
+
+    test "does not show a CREDENTIALS EXPIRED line for codex when false" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => nil, "codex" => @codex}
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "CREDENTIALS EXPIRED"
+    end
+
+    test "shows a CREDENTIALS EXPIRED line for gemini/antigravity when gemini_credentials_expired is true" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "gemini" => %{"provider" => "gemini-cli", "plan" => "Free", "models" => []},
+          "gemini_credentials_expired" => true
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Gemini CLI quota"
+      assert out =~ "CREDENTIALS EXPIRED"
+    end
+
     test "shows recent per-provider spend from the quotas list (bd-ajh7bd)" do
       stub_get("/api/quota", %{
         "data" => %{
