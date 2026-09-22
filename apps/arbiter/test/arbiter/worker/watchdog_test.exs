@@ -2506,9 +2506,21 @@ defmodule Arbiter.Worker.WatchdogTest do
 
       StubMerger.queue_get("!rs6", [
         # Poll 1: approved at sha-a but CI is red -> dispatch the fix pass.
-        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
+        %{
+          status: :open,
+          approved: true,
+          head_sha: "sha-a",
+          block_reason: :ci_failed,
+          base_ref: "main"
+        },
         # Poll 2: the fix pass is still running; the head has NOT moved yet.
-        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
+        %{
+          status: :open,
+          approved: true,
+          head_sha: "sha-a",
+          block_reason: :ci_failed,
+          base_ref: "main"
+        },
         # Poll 3+: the fix commit landed and CI is green.
         %{status: :open, approved: true, head_sha: "sha-b", base_ref: "main"}
       ])
@@ -2536,8 +2548,20 @@ defmodule Arbiter.Worker.WatchdogTest do
       StubMerger.set_diff("!rs6b", "sha-b", @fixpass_authored_diff)
 
       StubMerger.queue_get("!rs6b", [
-        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
-        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
+        %{
+          status: :open,
+          approved: true,
+          head_sha: "sha-a",
+          block_reason: :ci_failed,
+          base_ref: "main"
+        },
+        %{
+          status: :open,
+          approved: true,
+          head_sha: "sha-a",
+          block_reason: :ci_failed,
+          base_ref: "main"
+        },
         %{status: :open, approved: true, head_sha: "sha-b", base_ref: "main"}
       ])
 

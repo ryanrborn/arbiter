@@ -220,7 +220,8 @@ defmodule Arbiter.Workflows.MergeQueuePostApprovalPushTest do
     %{task: task, name: name, item: item, entry: entry}
   end
 
-  defp coverage_for(mr_ref, head), do: Enum.filter(Coverage.for_mr(mr_ref), &(&1.head_sha == head))
+  defp coverage_for(mr_ref, head),
+    do: Enum.filter(Coverage.for_mr(mr_ref), &(&1.head_sha == head))
 
   test "a resolution that authored content is refused, and nothing records its head as reviewed",
        %{workspace: ws} do

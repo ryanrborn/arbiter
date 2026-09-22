@@ -220,8 +220,20 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
   # pass's commit B lands and CI goes green → the merge is attempted at B.
   defp fix_pass_timeline(mr_ref, approved, pushed) do
     StubMerger.queue_get(mr_ref, [
-      %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :ci_failed},
-      %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :ci_failed},
+      %{
+        status: :open,
+        approved: true,
+        head_sha: approved,
+        base_ref: "main",
+        block_reason: :ci_failed
+      },
+      %{
+        status: :open,
+        approved: true,
+        head_sha: approved,
+        base_ref: "main",
+        block_reason: :ci_failed
+      },
       %{status: :open, approved: true, head_sha: pushed, base_ref: "main"}
     ])
   end
@@ -245,7 +257,8 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
     end
   end
 
-  defp coverage_for(mr_ref, head), do: Enum.filter(Coverage.for_mr(mr_ref), &(&1.head_sha == head))
+  defp coverage_for(mr_ref, head),
+    do: Enum.filter(Coverage.for_mr(mr_ref), &(&1.head_sha == head))
 
   defp shadow_results do
     Arbiter.Events.Record
@@ -280,7 +293,10 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
 
         assert StubFixPassDispatcher.call_count() == 1
-        assert StubMerger.merge_count(mr_ref) == 0, "a post-approval fix-pass commit merged unreviewed"
+
+        assert StubMerger.merge_count(mr_ref) == 0,
+               "a post-approval fix-pass commit merged unreviewed"
+
         assert [%{task_id: task_id, mr_ref: ^mr_ref}] = StubAutoResumeDispatcher.resumes()
         assert task_id == task.id
 
@@ -364,7 +380,13 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       StubMerger.set_diff(mr_ref, pushed, authored)
 
       StubMerger.queue_get(mr_ref, [
-        %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :conflict},
+        %{
+          status: :open,
+          approved: true,
+          head_sha: approved,
+          base_ref: "main",
+          block_reason: :conflict
+        },
         %{status: :open, approved: true, head_sha: pushed, base_ref: "main"}
       ])
 
@@ -398,8 +420,20 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       StubMerger.set_diff(mr_ref, merged, authored)
 
       StubMerger.queue_get(mr_ref, [
-        %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :ci_failed},
-        %{status: :open, approved: true, head_sha: pushed, base_ref: "main", block_reason: :behind_base},
+        %{
+          status: :open,
+          approved: true,
+          head_sha: approved,
+          base_ref: "main",
+          block_reason: :ci_failed
+        },
+        %{
+          status: :open,
+          approved: true,
+          head_sha: pushed,
+          base_ref: "main",
+          block_reason: :behind_base
+        },
         %{status: :open, approved: true, head_sha: merged, base_ref: "main"}
       ])
 
@@ -427,9 +461,21 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
 
       StubMerger.queue_get(mr_ref, [
         # update-branch issued: the latch is suspended at the approved head.
-        %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :behind_base},
+        %{
+          status: :open,
+          approved: true,
+          head_sha: approved,
+          base_ref: "main",
+          block_reason: :behind_base
+        },
         # CI goes red before the update lands: the fix pass is dispatched.
-        %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :ci_failed},
+        %{
+          status: :open,
+          approved: true,
+          head_sha: approved,
+          base_ref: "main",
+          block_reason: :ci_failed
+        },
         # The fix pass's commit is the first new head the Watchdog sees.
         %{status: :open, approved: true, head_sha: pushed, base_ref: "main"}
       ])

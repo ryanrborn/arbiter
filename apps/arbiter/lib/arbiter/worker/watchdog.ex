@@ -3399,7 +3399,10 @@ defmodule Arbiter.Worker.Watchdog do
   defp record_content_equal_coverage(%{mr_base_ref: base} = state, head) do
     with {:ok, coverage} <- safe_coverage(state),
          {:ok, diff} <- safe_get_diff(state, base, head) do
-      record_mechanical(state, Coverage.mechanical_for_diff(coverage, head, base, diff, :watchdog))
+      record_mechanical(
+        state,
+        Coverage.mechanical_for_diff(coverage, head, base, diff, :watchdog)
+      )
     end
 
     :ok

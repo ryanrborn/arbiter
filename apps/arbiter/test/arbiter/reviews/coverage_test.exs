@@ -181,8 +181,12 @@ defmodule Arbiter.Reviews.CoverageTest do
 
       {:ok, _} =
         Coverage.record(
-          base_attrs(%{head_sha: @other_sha, kind: :mechanical, derived_from: older.id,
-            covered_at: DateTime.add(older.covered_at, 60, :second)})
+          base_attrs(%{
+            head_sha: @other_sha,
+            kind: :mechanical,
+            derived_from: older.id,
+            covered_at: DateTime.add(older.covered_at, 60, :second)
+          })
         )
 
       {:ok, _} = Coverage.record(base_attrs(%{kind: :operator, source: :cli}))
