@@ -126,4 +126,74 @@ defmodule Arbiter.Reviews.CoverageTest do
       refute MapSet.member?(action_types, :destroy)
     end
   end
+
+  # P7 (bd-60r6wp / #1738, §4.5).
+  describe "mechanical_for_diff/5" do
+    @diff """
+    diff --git a/lib/a.ex b/lib/a.ex
+    --- a/lib/a.ex
+    +++ b/lib/a.ex
+    @@ -1,1 +1,2 @@
+     x
+    +y
+    """
+
+    @moved """
+    diff --git a/lib/a.ex b/lib/a.ex
+    --- a/lib/a.ex
+    +++ b/lib/a.ex
+    @@ -40,1 +40,2 @@
+     x
+    +y
+    """
+
+    test "derives a :mechanical row from the entry the head's diff fingerprints to" do
+      fingerprint = Arbiter.Mergers.NetDiff.fingerprint(@diff)
+      {:ok, parent} = Coverage.record(base_attrs(%{net_diff_id: fingerprint}))
+
+      attrs = Coverage.mechanical_for_diff([parent], @other_sha, "main", @moved, :watchdog)
+
+      assert %{kind: :mechanical, head_sha: @other_sha, derived_from: derived, source: :watchdog} =
+               attrs
+
+      assert derived == parent.id
+      assert attrs.net_diff_id == fingerprint
+      assert {:ok, %{kind: :mechanical}} = Coverage.record(attrs)
+    end
+
+    test "nil when the content differs, the head is already covered, or nothing fingerprints" do
+      {:ok, parent} =
+        Coverage.record(base_attrs(%{net_diff_id: Arbiter.Mergers.NetDiff.fingerprint(@diff)}))
+
+      authored = @moved <> "+z\n"
+
+      assert Coverage.mechanical_for_diff([parent], @other_sha, "main", authored) == nil
+      assert Coverage.mechanical_for_diff([parent], @head_sha, "main", @moved) == nil
+      assert Coverage.mechanical_for_diff([parent], @other_sha, "main", "") == nil
+      assert Coverage.mechanical_for_diff([parent], @other_sha, nil, @moved) == nil
+      assert Coverage.mechanical_for_diff([], @other_sha, "main", @moved) == nil
+    end
+  end
+
+  describe "covered_heads/1" do
+    test "newest first, deduplicated across kinds" do
+      {:ok, older} = Coverage.record(base_attrs())
+
+      {:ok, _} =
+        Coverage.record(
+          base_attrs(%{
+            head_sha: @other_sha,
+            kind: :mechanical,
+            derived_from: older.id,
+            covered_at: DateTime.add(older.covered_at, 60, :second)
+          })
+        )
+
+      {:ok, _} = Coverage.record(base_attrs(%{kind: :operator, source: :cli}))
+
+      assert Coverage.covered_heads("ryanrborn/arbiter#1631") == [@other_sha, @head_sha]
+      assert Coverage.covered_heads("nobody#1") == []
+      assert Coverage.covered_heads(nil) == []
+    end
+  end
 end
