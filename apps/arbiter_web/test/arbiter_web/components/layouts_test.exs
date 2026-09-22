@@ -72,7 +72,7 @@ defmodule ArbiterWeb.LayoutsTest do
       assert headers == ["Work", "Fleet", "Analysis", "Config"]
     end
 
-    test "the top_nav bar is gone" do
+    test "the old top-nav bar is gone" do
       html = render_app()
 
       refute html =~ ~s(id="top-nav")
