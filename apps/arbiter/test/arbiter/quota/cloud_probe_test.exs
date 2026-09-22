@@ -8,6 +8,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
   """
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Quota.CloudProbe
   alias Arbiter.Tasks.Workspace
@@ -1055,6 +1056,111 @@ defmodule Arbiter.Quota.CloudProbeTest do
       wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 2 end)
 
       assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+    end
+  end
+
+  # bd-21bmdh: a hold opened by N consecutive worker auth deaths marks the
+  # watchdog, but CloudProbe's own 401 streak for that provider is 0 — the
+  # free check never failed. A passing free check must still clear it: that is
+  # one of the hold's documented reset paths.
+  describe "probe/1 passing free check clears an open AuthHold (bd-21bmdh)" do
+    setup do
+      Application.put_env(:arbiter, :oauth_usage_http_stub, true)
+      on_exit(fn -> Application.put_env(:arbiter, :oauth_usage_http_stub, true) end)
+
+      {:ok, watchdog} =
+        start_supervised(%{
+          id: make_ref(),
+          start: {CredentialWatchdog, :start_link, [[name: nil, enabled: false]]}
+        })
+
+      {:ok, hold} =
+        start_supervised(%{
+          id: make_ref(),
+          start: {AuthHold, :start_link, [[name: nil, credential_watchdog: watchdog]]}
+        })
+
+      :ok = CredentialWatchdog.set_auth_hold(hold, watchdog)
+      {:ok, watchdog: watchdog, hold: hold}
+    end
+
+    defp open_hold!(adapter, hold, watchdog) do
+      reason = %Arbiter.Worker.StopReason{
+        category: :auth_expired,
+        summary: "401",
+        remediation: nil,
+        exit_status: 1,
+        signal: nil
+      }
+
+      :counted = AuthHold.record_death(adapter, reason, hold)
+      :opened = AuthHold.record_death(adapter, reason, hold)
+      wait_until(fn -> CredentialWatchdog.expired?(adapter, watchdog) end)
+    end
+
+    defp probe_with(watchdog, hold, extra \\ []) do
+      start_probe(
+        Keyword.merge(
+          [
+            enabled: true,
+            interval_ms: 3_600_000,
+            refresh_fun: fn _ws_id -> :ok end,
+            credential_watchdog: watchdog,
+            auth_hold: hold
+          ],
+          extra
+        )
+      )
+    end
+
+    test "Claude: a successful usage poll clears the hold", %{watchdog: w, hold: h} = context do
+      Req.Test.set_req_test_to_shared(context)
+      _ws = workspace_with_token!("hold-solo", "hold-token")
+      open_hold!(Arbiter.Agents.Claude, h, w)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Req.Test.json(conn, %{"five_hour" => %{"utilization" => 1}})
+      end)
+
+      pid = probe_with(w, h, oauth_opts: [token: "hold-token"])
+      CloudProbe.probe(pid)
+
+      wait_until(fn -> not AuthHold.open?(Arbiter.Agents.Claude, h) end)
+      wait_until(fn -> not CredentialWatchdog.expired?(Arbiter.Agents.Claude, w) end)
+    end
+
+    test "Codex: a real window reading clears the hold", %{watchdog: w, hold: h} do
+      open_hold!(Arbiter.Agents.Codex, h, w)
+      pid = probe_with(w, h)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, %{codex: %{plan: "plus"}, message: nil, auth_expired: false}})
+
+      wait_until(fn -> not AuthHold.open?(Arbiter.Agents.Codex, h) end)
+      wait_until(fn -> not CredentialWatchdog.expired?(Arbiter.Agents.Codex, w) end)
+    end
+
+    test "Gemini: a healthy agy row clears the hold", %{watchdog: w, hold: h} do
+      open_hold!(Arbiter.Agents.Gemini, h, w)
+      pid = probe_with(w, h)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_healthy_result()})
+
+      wait_until(fn -> not AuthHold.open?(Arbiter.Agents.Gemini, h) end)
+    end
+
+    test "a neutral outcome does not clear it", %{watchdog: w, hold: h} do
+      open_hold!(Arbiter.Agents.Gemini, h, w)
+      pid = probe_with(w, h)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_not_installed_result()})
+      _ = CloudProbe.state(pid)
+      _ = :sys.get_state(w)
+      _ = :sys.get_state(h)
+
+      assert AuthHold.open?(Arbiter.Agents.Gemini, h)
     end
   end
 

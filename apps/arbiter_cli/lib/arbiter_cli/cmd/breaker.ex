@@ -8,6 +8,9 @@ defmodule ArbiterCli.Cmd.Breaker do
       arb breaker reset <signature>     — close one tripped breaker
       arb breaker reset --all [--workspace W] [--kind K]
                                         — close every breaker in a scope
+      arb breaker reset --auth-hold <provider>
+                                        — clear a provider's auth hold
+                                          (claude / codex / gemini)
 
   A breaker trips when the same signature — workspace + kind + normalised
   subject — fires more than K times inside its window. While open, the action
@@ -17,6 +20,11 @@ defmodule ArbiterCli.Cmd.Breaker do
   `list` always prints the call-site registry, even on a freshly-restarted
   server where nothing has tripped yet, so "what is gated?" has an answer
   independent of runtime state.
+
+  An **auth hold** (bd-21bmdh) is the dispatch hold a provider gets after N
+  consecutive workers died on auth. It clears itself when the free credential
+  check or the CredentialWatchdog probe next passes; `list` shows every open
+  hold, and `reset --auth-hold` clears one by hand.
 
   Fix the underlying condition BEFORE resetting: a breaker whose cause is still
   live simply trips again, and in the meantime the flood resumes.
@@ -65,6 +73,9 @@ defmodule ArbiterCli.Cmd.Breaker do
   defp reset(args, mode) do
     body =
       cond do
+        provider = flag_value(args, "--auth-hold") ->
+          %{provider: provider}
+
         "--all" in args ->
           %{all: true}
           |> put_opt(args, "--workspace", :workspace)
@@ -82,10 +93,11 @@ defmodule ArbiterCli.Cmd.Breaker do
 
     case Client.post("/api/breakers/reset", body) do
       {:ok, resp} ->
-        if mode == :json do
-          IO.puts(Jason.encode!(resp))
-        else
-          IO.puts("Closed #{resp["reset"]} circuit breaker(s).")
+        cond do
+          mode == :json -> IO.puts(Jason.encode!(resp))
+          resp["auth_hold"] && resp["reset"] == 0 -> IO.puts("No #{resp["auth_hold"]} auth hold was open.")
+          resp["auth_hold"] -> IO.puts("Cleared the #{resp["auth_hold"]} auth hold.")
+          true -> IO.puts("Closed #{resp["reset"]} circuit breaker(s).")
         end
 
       error ->
@@ -118,6 +130,8 @@ defmodule ArbiterCli.Cmd.Breaker do
       end)
     end
 
+    print_auth_holds(body["auth_holds"] || [])
+
     IO.puts("")
     IO.puts("REGISTERED CALL SITES")
 
@@ -125,6 +139,25 @@ defmodule ArbiterCli.Cmd.Breaker do
       IO.puts(
         "  #{s["kind"]}  (K=#{s["limit"]} / #{div(s["window_ms"], 60_000)}m)  #{s["module"]}"
       )
+    end)
+  end
+
+  defp print_auth_holds([]), do: :ok
+
+  defp print_auth_holds(holds) do
+    IO.puts("")
+    IO.puts("AUTH HOLDS (dispatch refused per provider after consecutive auth deaths)")
+
+    Enum.each(holds, fn h ->
+      state =
+        cond do
+          h["open"] -> "OPEN"
+          h["probation"] -> "probation"
+          true -> "counting"
+        end
+
+      IO.puts("  [#{state}] #{h["provider"]}  #{h["deaths"]}/#{h["threshold"]} auth deaths")
+      if h["open"], do: IO.puts("      arb breaker reset --auth-hold #{h["provider"]}")
     end)
   end
 

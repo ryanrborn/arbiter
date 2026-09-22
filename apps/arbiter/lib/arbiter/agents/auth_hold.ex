@@ -202,6 +202,35 @@ defmodule Arbiter.Agents.AuthHold do
     GenServer.call(server, {:reset, adapter_or_all}, 5_000)
   end
 
+  @doc """
+  Resolve an operator-typed provider name (`"claude"`, `"codex"`, `"gemini"`)
+  to its adapter. The set is closed (`Arbiter.Agents.adapters/0`), so no atom
+  is ever minted from input.
+  """
+  @spec resolve_provider(term()) :: {:ok, module()} | :error
+  def resolve_provider(name) when is_binary(name) do
+    case Enum.find(Arbiter.Agents.adapters(), fn {type, _} -> Atom.to_string(type) == name end) do
+      {_type, adapter} -> {:ok, adapter}
+      nil -> :error
+    end
+  end
+
+  def resolve_provider(_), do: :error
+
+  @doc "A `list/1` entry as the JSON the operator surfaces return."
+  @spec serialize(map()) :: map()
+  def serialize(entry) do
+    %{
+      provider: entry.provider,
+      open: entry.open?,
+      probation: entry.probation?,
+      deaths: entry.deaths,
+      threshold: entry.threshold,
+      opened_at: entry.opened_at && DateTime.to_iso8601(entry.opened_at),
+      summary: entry.reason && Map.get(entry.reason, :summary)
+    }
+  end
+
   @doc "Consecutive auth deaths that open a hold (opts › app env › #{@default_threshold})."
   @spec threshold(keyword()) :: pos_integer()
   def threshold(opts \\ []), do: config(:threshold, opts, @default_threshold)
