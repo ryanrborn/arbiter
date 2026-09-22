@@ -212,7 +212,9 @@ defmodule Arbiter.Workers.ReconcilerTest do
   # `Worker.record_usage_event/3` — a worker run whose live session exit was
   # missed must not land a ledger row with real dollars and a NULL account.
   test "the backfilled Usage.Event carries the workspace's linked provider_account_id" do
-    {:ok, ws} = Ash.create(Workspace, %{name: "recon-account-#{System.unique_integer([:positive])}"})
+    {:ok, ws} =
+      Ash.create(Workspace, %{name: "recon-account-#{System.unique_integer([:positive])}"})
+
     account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "recon-account"})
 
     Ash.create!(WorkspaceProviderAccount, %{
