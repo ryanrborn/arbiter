@@ -59,6 +59,9 @@ defmodule Arbiter.Application do
       Arbiter.CircuitBreaker,
       Arbiter.GitHub.Limiter,
       Arbiter.Agents.ProviderPool,
+      # bd-21bmdh: the auth-shaped dispatch hold. Pure bookkeeping (no probes,
+      # no I/O), so the dispatch guard's fail-closed read of it never blocks.
+      Arbiter.Agents.AuthHold,
       Arbiter.Agents.CredentialWatchdog,
       {Registry, keys: :unique, name: Arbiter.Worker.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},

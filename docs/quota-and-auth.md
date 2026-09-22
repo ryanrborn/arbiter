@@ -41,26 +41,71 @@ skipped whenever `start_claude: false` (no real agent about to spawn).
 Without *something* refusing dispatch once a credential is known-dead, a
 single expired token burns the queue at the fleet's normal dispatch rate:
 each failed worker frees its slot, the next Ready card promotes, and it
-fails again — each pass still leaving a worktree, a branch, a failed run and
-an escalation behind it (`cleanup_worktree` defaults to `false`).
+fails again — each pass leaving a failed run and an escalation behind it.
 
-`CredentialWatchdog` is what stops that:
+Since bd-21bmdh that bound is an explicit **auth hold**
+(`Arbiter.Agents.AuthHold`), and a single auth death is a *retry* rather than
+a stranded task:
 
 1. `Arbiter.Worker.fail_stopped/2` classifies a dying worker's stop reason. If
-   it comes back `:auth_expired`, it calls
-   `Arbiter.Agents.CredentialWatchdog.mark_expired/2` immediately — no waiting
-   on a periodic probe.
-2. Every subsequent dispatch or resume for that adapter reads
-   `CredentialWatchdog.expired?/1` before spawning anything. A known-expired
-   adapter is refused instantly, before the task transitions, before a
-   worktree is provisioned, before a worker registers.
-3. The refusal escalates to the coordinator (once — behind
+   it comes back `:auth_expired`, it records the death on the provider's
+   `AuthHold` streak and escalates the stopped worker as before.
+2. `Arbiter.Worker.AuthDeath` (called by the Driver) then **returns the task
+   to Ready**: it removes the worktree and branch if the worker never
+   committed (a dirty worktree or one with commits is kept), stops the
+   `:failed` worker process (its `worker_runs` row stays `:failed`), and sets
+   the task back to `:open`. Not for review-only engagements or resume /
+   fix-round workers, and not once a task has died on auth
+   `max_task_reopens` times (default 3) — those keep the old
+   stay-`:in_progress` behaviour. Every other failure shape is unchanged.
+3. **N consecutive auth deaths on a provider (default 2) open the hold.**
+   "Consecutive" means no worker completed on that provider in between. The
+   hold marks `CredentialWatchdog` expired for the adapter, which escalates
+   once to every workspace and flips `credentials_expired` on the quota
+   surfaces.
+4. While the hold is open:
+   - `Arbiter.Worker.Dispatch`'s guard refuses every agent dispatch and
+     resume for the provider — before the task transitions, before a
+     worktree is provisioned, before a worker registers. The guard's read is
+     **fail-closed**: an unreadable hold refuses too.
+   - The board shows `blocked — <provider> auth hold (N consecutive auth
+     deaths)` as its board-wide hold (`Arbiter.Board.Snapshot.quota_hold/1`)
+     for a workspace whose default provider is held, so
+     `Arbiter.Board.Autopilot` does not even attempt the dispatch. The
+     reopened tasks sit in Ready.
+5. The refusal escalates to the coordinator (once — behind
    `Arbiter.CircuitBreaker`, not once per retry) with a re-authenticate
    remediation.
 
-None of this requires a live probe. It is pure state: a map of adapter →
-`:ok | {:expired, reason}`, held in the `CredentialWatchdog` GenServer and
-served for free to every dispatch.
+None of this requires a live probe. It is pure state held in the `AuthHold`
+and `CredentialWatchdog` GenServers and served for free to every dispatch.
+
+### Resetting the hold
+
+Only a positive signal clears an open hold:
+
+- **A free credential check passing.** `Arbiter.Quota.CloudProbe`'s usage
+  polls (Claude `/api/oauth/usage`, Codex's usage GET, agy `/usage`) call
+  `CredentialWatchdog.mark_recovered/2` + `AuthHold.recovered/2` on a
+  passing check whenever the provider's hold is open.
+- **The watchdog's recovery signal.** Any `CredentialWatchdog` recovery
+  (its periodic probe passing, or `mark_recovered/2`) forwards to
+  `AuthHold.recovered/2`.
+- **An operator.** `arb breaker reset --auth-hold claude` (or MCP
+  `breaker_reset` with `provider`, or `POST /api/breakers/reset` with
+  `provider`). `arb breaker list` / `breaker_list` show every hold under
+  `auth_holds`.
+
+An automatic recovery leaves the provider on *probation*: the next auth
+death re-opens the hold immediately rather than after another N. The free
+checks read the operator's host credentials, which are not always the ones a
+worker spawns with, so "free check passes" and "workers still die" can both
+be true; probation bounds that case to one death per recovery signal, and
+`max_task_reopens` bounds it per task. A completed worker on the provider
+ends probation; an operator reset is a full reset.
+
+Configuration: `config :arbiter, :auth_hold, threshold: 2, max_task_reopens: 3`.
+State is in-memory; a restart clears it, costing at most N more fast deaths.
 
 ## The periodic probe is now optional, and "off" is a supported posture
 
@@ -175,7 +220,8 @@ Two follow-ups were filed instead of folded in:
   same organic detection Claude gets from the usage-poll 401 tracking.
 - Whether an auth-shaped pre-flight hold (mirroring the existing
   `:quota_exhausted` hold in `Arbiter.Worker.PreflightHold`) is worth
-  reintroducing now that pre-flight itself is gone.
+  reintroducing now that pre-flight itself is gone. (Done in bd-21bmdh as
+  `Arbiter.Agents.AuthHold` — see "What bounds a wave" above.)
 
 A quota-exhausted live-probe signal (the other thing the old pre-flight probe
 used to produce, consumed by `Arbiter.Worker.PreflightHold`,
