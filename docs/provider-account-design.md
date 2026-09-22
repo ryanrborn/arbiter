@@ -364,8 +364,16 @@ account_headroom(a, ws) =
 
 ```
 arb account set personal-max --max-concurrent 4
-arb workspace set-account vstim claude personal-max --share 2
+arb account attach vstim claude personal-max --share 2
 ```
+
+> **As shipped (P8, bd-1k6pgv).** The share's write surface is P11's
+> `arb account attach`, not a second workspace-side verb — P11 already owned
+> the `workspace_provider_accounts` row, and two commands writing one column
+> is how a config surface starts disagreeing with itself. P8 added
+> `arb account set <ref> --max-concurrent N|none` and the semantics below;
+> the ceiling and the share are read by
+> `Arbiter.Accounts.Concurrency.account_headroom/2`.
 
 `share` is a **cap, not a reservation**. Shares may sum to more than the ceiling
 — that is the useful configuration, because it lets a quiet workspace's slots be
@@ -774,7 +782,7 @@ Each phase is sized to be one child ticket.
 | **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) (**shipped**, bd-3yokey) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
 | **P6** | Build account iteration in the probes: `CloudProbe` fetches `/api/oauth/usage` once per account (bd-4fbpto deleted bd-5xuneh's per-token grouping; this is new code, not a re-key of it — §9); `OAuthUsage` cooldown keyed by account | P5 | P2 | D2 |
 | **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` | P5 | **P1** | D3 |
-| **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in | P7 | P2 | D3 |
+| **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in (**shipped**, bd-1k6pgv) | P7 | P2 | D3 |
 | **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill | bd-adyhvn, P2 | P2 | D2 |
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces | P9, P5 | P3 | D2 |
 | **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
