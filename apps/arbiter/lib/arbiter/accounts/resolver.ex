@@ -85,6 +85,22 @@ defmodule Arbiter.Accounts.Resolver do
     end
   end
 
+  @doc """
+  This workspace's `share` of the account it is metered under for `provider`
+  (`docs/provider-account-design.md` §4.3) — a **cap on its use of the account
+  ceiling, not a reservation**. `nil` when unset, or when there is no link.
+  """
+  @spec share(String.t() | nil, atom() | String.t() | nil) :: integer() | nil
+  def share(workspace_id, provider) do
+    with code when not is_nil(code) <- provider_atom(provider),
+         ws_id when is_binary(ws_id) <- uuid(workspace_id),
+         %WorkspaceProviderAccount{share: share} <- link(ws_id, code) do
+      share
+    else
+      _ -> nil
+    end
+  end
+
   @doc "`account_id/2`, loaded as the account row."
   @spec account(String.t() | nil, atom() | String.t() | nil) :: ProviderAccount.t() | nil
   def account(workspace_id, provider), do: workspace_id |> account_id(provider) |> get()

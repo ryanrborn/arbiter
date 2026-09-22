@@ -896,6 +896,18 @@ defmodule Arbiter.Worker do
 
     state = record_run_started(state)
 
+    # P8 (`docs/provider-account-design.md` §4.2): stamp this worker's dispatch
+    # context onto its own registry entry so the account concurrency ceiling
+    # has one authoritative, registry-derived count to read
+    # (`Arbiter.Accounts.Concurrency.live_count/1`). Recorded here, from inside
+    # the registered process, because the entry dies with the process — no
+    # path has to remember to decrement anything.
+    PRegistry.put_dispatch(
+      state.registry_key,
+      effective_workspace_id(state),
+      provider(meta)
+    )
+
     broadcast_lifecycle(:started, state)
 
     {:ok, state}
