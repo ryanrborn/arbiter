@@ -80,6 +80,14 @@ defmodule Arbiter.Reviews.CoverageShadow do
   itself: it computed the decision it is acting on, so it persists the row
   directly (`Coverage.record/1`) rather than through here, and hands
   `observe/1` the answer it already has.
+
+  P7 (bd-60r6wp / #1738) adds the one flag-off writer, and it is not this
+  module either: when the legacy guard's own content check (the Watchdog's
+  `base_merge_only?/3`, the queue's mirror of it) authorises a merge on a
+  proven-equal net diff, the merge path records the `:mechanical` row that
+  proof implies (`Coverage.mechanical_for_diff/5`). That row is written on the
+  strength of a decision that *is* being acted on, which is the line this
+  section draws.
   """
 
   require Ash.Query
@@ -119,6 +127,9 @@ defmodule Arbiter.Reviews.CoverageShadow do
   # acceptance criterion is the coordinator's call, not this module's, so the
   # operator sees it in `:blocking` and decides. P5 removes the grace latch that
   # produces the `unknown` half, after which the class stops occurring at all.
+  # P7 (bd-60r6wp / #1738) stops the old guard stamping these heads, so the
+  # class no longer occurs on new observations; the entry stays for the rows
+  # recorded before it deployed.
   @deferred_transitions %{
     "covered->uncovered" => "post-approval fix_pass (§4.5, P7)"
   }

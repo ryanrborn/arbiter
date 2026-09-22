@@ -34,11 +34,20 @@ defmodule Arbiter.Worker.Watchdog do
   forge's own atomic precondition. A refusal is a normal merge failure: the
   lane stays parked and the coordinator is paged.
 
-  The latch is deliberately *suspended* whenever the fleet advances the branch
-  itself (update-branch, CI fix pass, conflict resolution) — see
-  `clear_reviewed_latch/1`. Those pushes land asynchronously, several polls
-  after they are issued, so the suspension has to survive until the head
-  actually moves rather than being a one-shot nil the next poll re-latches.
+  The latch is deliberately *suspended* when the fleet advances the branch with
+  an update-branch — a base merge, which carries no content of its own — see
+  `clear_reviewed_latch/1`. That push lands asynchronously, several polls
+  after it is issued, so the suspension has to survive until the head actually
+  moves rather than being a one-shot nil the next poll re-latches.
+
+  A CI fix pass or a conflict resolution is different: it AUTHORS content after
+  the approval, so since P7 (bd-60r6wp / #1738, design §4.5) it keeps the
+  approved baseline pinned instead (`note_authored_push/1`). Its head is then
+  judged on content: an unchanged net diff merges on a `:mechanical` coverage
+  row, anything else goes back to a review round the ReviewGate scopes to the
+  delta since the covered commit. Before P7 the suspension re-latched onto the
+  fix-pass head, which is how #1702, #1723 and #1725 merged commits no review
+  had seen.
   `Arbiter.Mergers.ReviewedSha` records the rest of the reasoning, including
   why "no baseline" merges unguarded rather than refusing.
 
@@ -877,6 +886,16 @@ defmodule Arbiter.Worker.Watchdog do
         # once ReviewPatrol has advanced the task past it, which is what a
         # genuine re-review looks like.
         cleared_recorded_sha: nil,
+        # P7 (bd-60r6wp / #1738). Set once this Watchdog has dispatched a pass
+        # that AUTHORS content on the branch — a CI fix pass or a conflict
+        # resolver (`note_authored_push/1`). Those pushes no longer suspend the
+        # latch: the approved baseline stays pinned so the new head is judged
+        # on content (§4.5). The flag keeps a later update-branch suspension
+        # (`clear_reviewed_latch/1`) from discarding that pinned baseline too,
+        # which would otherwise re-latch onto the merge commit carrying the
+        # still-unreviewed fix. Never cleared: a review round covering the new
+        # head is a fresh worker with a fresh Watchdog.
+        authored_push_pending: false,
         last_head_sha: nil,
         # bd-ch9pmk / #1614. `local_head_sha` is the branch head this worker
         # holds locally — the commit it pushed to origin immediately before
@@ -1063,6 +1082,16 @@ defmodule Arbiter.Worker.Watchdog do
         #                            exact path — CI-red → fix_pass → defer —
         #                            that makes deferrals happen at all.
         resume_attempts_seen: 0,
+        #   resume_reason          — P7 (bd-60r6wp / #1738). Why this episode is
+        #                            resuming: nil for the poll-ceiling timeout
+        #                            (the original trigger), or
+        #                            `{:unreviewed_head, reviewed, head}` when
+        #                            `resolve_stale_reviewed_head/3` is handing
+        #                            an uncovered head to a review round. Only
+        #                            the log line and the resumed worker's
+        #                            briefing read it; the budget, the deferral
+        #                            and the terminals are shared.
+        resume_reason: nil,
         # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
         # a notification fires once when the count first hits the threshold, then
         # is suppressed until the counter resets and re-hits the threshold.
@@ -2019,8 +2048,9 @@ defmodule Arbiter.Worker.Watchdog do
       _ = dispatch_fix_pass(state, checks)
       _ = result
 
-      # The fix pass pushes commits; see `clear_reviewed_latch/1`.
-      state = clear_reviewed_latch(state)
+      # The fix pass AUTHORS commits after the approval; see
+      # `note_authored_push/1` for why that no longer suspends the latch.
+      state = note_authored_push(state)
       reschedule(%{state | last_block_reason: :ci_failed, auto_resolve_attempts: attempts})
     end
   end
@@ -2302,10 +2332,10 @@ defmodule Arbiter.Worker.Watchdog do
             "task=#{state.task_id} mr=#{state.mr_ref}"
         )
 
-        # The resolver rebases + force-pushes, moving the branch head; see
-        # `clear_reviewed_latch/1`.
+        # The resolver rebases + force-pushes, and resolving a conflict writes
+        # content; see `note_authored_push/1`.
         %{
-          clear_reviewed_latch(state)
+          note_authored_push(state)
           | conflict_attempts: attempt,
             conflict_resolving: is_pid(pid),
             conflict_resolver_pid: if(is_pid(pid), do: pid, else: nil),
@@ -2612,27 +2642,64 @@ defmodule Arbiter.Worker.Watchdog do
   # re-attach to) is not self-healing, so it falls back to the escalation path
   # rather than dropping the task on the floor.
   defp auto_resume(state, attempt) do
-    args = %{
-      task_id: state.task_id,
-      attempt: attempt,
-      workspace_id: workspace_id(state),
-      mr_ref: state.mr_ref
-    }
+    args =
+      %{
+        task_id: state.task_id,
+        attempt: attempt,
+        workspace_id: workspace_id(state),
+        mr_ref: state.mr_ref
+      }
+      |> put_resume_briefing(state.resume_reason)
 
     case safe_resume(state, args) do
       {:ok, _} ->
-        Logger.warning(
-          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} timed out at " <>
-            ":awaiting_review; auto-resumed (attempt #{attempt}/#{state.max_auto_resumes}" <>
-            deferral_suffix(state) <> ")"
-        )
-
+        log_resumed(state, attempt)
         {:stop, state}
 
       {:error, reason} ->
         handle_resume_error(state, attempt, reason)
     end
   end
+
+  defp log_resumed(%{resume_reason: {:unreviewed_head, reviewed, head}} = state, attempt) do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{head} advanced " <>
+        "past the reviewed commit #{reviewed} with authored content; dispatched a " <>
+        "review round on the new head (attempt #{attempt}/#{state.max_auto_resumes}" <>
+        deferral_suffix(state) <> ") instead of retrying the merge"
+    )
+  end
+
+  defp log_resumed(state, attempt) do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} timed out at " <>
+        ":awaiting_review; auto-resumed (attempt #{attempt}/#{state.max_auto_resumes}" <>
+        deferral_suffix(state) <> ")"
+    )
+  end
+
+  # P7 (bd-60r6wp / #1738). A resume that exists only to get an uncovered head
+  # reviewed must not read as "continue the task": the work is done and was
+  # approved, and a fresh agent briefed only from git would reasonably go
+  # looking for more to do. The briefing says what happened and asks for
+  # nothing but the hand-back to the ReviewGate, which scopes its round to the
+  # delta since the covered commit.
+  defp put_resume_briefing(args, {:unreviewed_head, reviewed, head}) do
+    Map.put(args, :briefing, """
+    REVIEW ROUND ONLY — do not change any code.
+
+    This task's work was already reviewed and APPROVED at commit #{reviewed}. After that
+    approval the branch advanced to #{head} with new content (for example a CI fix pass),
+    and no review has covered that content yet, so the merge was refused.
+
+    Your only job: confirm the branch is committed and pushed (`git status`, `git log
+    --oneline -3`), make NO further changes, and print `arb done`. The ReviewGate then
+    reviews just the commits since #{reviewed}.
+
+    """)
+  end
+
+  defp put_resume_briefing(args, _reason), do: args
 
   # bd-di4t6d. Two very different failures used to share one exit:
   #
@@ -3330,6 +3397,26 @@ defmodule Arbiter.Worker.Watchdog do
   defp restore_poll_ceiling(%{coverage_park_poll: poll} = state),
     do: %{state | max_polls: state.base_max_polls, poll_count: poll, coverage_park_poll: nil}
 
+  # P7 (bd-60r6wp / #1738, §4.5 / AC2). The legacy guard just authorised a
+  # merge on `base_merge_only?/3`'s content-equality proof — a clean rebase or
+  # base merge of the approved change, including one the fleet pushed itself.
+  # Record the `:mechanical` row that proof implies, so the merged head is
+  # covered on the same terms rule 3 would have covered it. With the flag on,
+  # `coverage_merge_decision/4` has usually written it already and this is a
+  # no-op (`mechanical_for_diff/5` answers nil for a covered head; `record/1`
+  # is idempotent regardless). Best-effort: the merge decision is already made.
+  defp record_content_equal_coverage(%{mr_base_ref: base} = state, head) do
+    with {:ok, coverage} <- safe_coverage(state),
+         {:ok, diff} <- safe_get_diff(state, base, head) do
+      record_mechanical(
+        state,
+        Coverage.mechanical_for_diff(coverage, head, base, diff, :watchdog)
+      )
+    end
+
+    :ok
+  end
+
   defp record_mechanical(_state, nil), do: :ok
 
   defp record_mechanical(state, attrs) do
@@ -3528,6 +3615,7 @@ defmodule Arbiter.Worker.Watchdog do
             "still covers it; merging pinned to #{live}"
         )
 
+        record_content_equal_coverage(state, live)
         {:merge, live, %{state | reviewed_sha: live}}
 
       true ->
@@ -3632,49 +3720,42 @@ defmodule Arbiter.Worker.Watchdog do
   #
   #   * route the PR back to review. The auto-resume dispatcher re-attaches a
   #     fresh worker to the preserved worktree, which runs `route_completion`
-  #     and re-enters the ReviewGate on the NEW head. (The gate reviews the
-  #     PR's current diff; there is no delta-scoped review round to ask for
-  #     today, so the round covers the whole PR.) That worker gets its own
-  #     Watchdog, so this one stops.
+  #     and re-enters the ReviewGate on the NEW head. P7 (bd-60r6wp / #1738,
+  #     §4.5): the gate scopes that round to the delta since the last covered
+  #     commit when one is an ancestor of the head — the post-approval fix-pass
+  #     shape — rather than re-reviewing the whole PR, and its APPROVE writes
+  #     the `:reviewed` row that lets the next Watchdog merge the new head.
+  #     That worker gets its own Watchdog, so this one stops.
   #   * page the coordinator ONCE and stop, when there is no path back to
   #     review (budget spent or auto-resume disabled) or the resume itself
   #     could not run. Never the old behaviour of re-paging every
   #     `escalation_cadence/1` polls forever.
+  #
+  # P7 also routes the resume through `auto_resume/2`, the path the poll-ceiling
+  # timeout already takes, rather than a private copy of it. The head this
+  # reaches is now routinely a fix pass's own commit, and that pass can still
+  # hold the task's registry family when CI goes green on it — the bd-985tkl
+  # shape. A refusal naming it DEFERS (bounded, re-fired by the pass's `:DOWN`,
+  # parked + paged once at the bound) instead of paging `:resume_failed` and
+  # stopping with the approved PR stranded.
   defp resolve_stale_reviewed_head(state, reviewed, head) do
     snap = snapshot(state)
-    attempts = awaiting_review_resume_attempts(snap)
+    attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
 
     if state.max_auto_resumes > 0 and attempts < state.max_auto_resumes do
       # `Dispatch.resume/2` requires the prior worker to be terminal before it
       # re-attaches, exactly as on the awaiting-review-timeout path.
       safe(fn -> Worker.fail(state.worker_pid, {:unreviewed_head, head}) end)
 
-      args = %{
-        task_id: state.task_id,
-        attempt: attempts + 1,
-        workspace_id: workspace_id(state),
-        mr_ref: state.mr_ref
+      state = %{
+        state
+        | resume_attempts_seen: attempts,
+          resume_reason: {:unreviewed_head, reviewed, head}
       }
 
-      case safe_resume(state, args) do
-        {:ok, _} ->
-          Logger.warning(
-            "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{head} advanced " <>
-              "past the reviewed commit #{reviewed} with authored content; dispatched a " <>
-              "review round on the new head (attempt #{attempts + 1}/#{state.max_auto_resumes}) " <>
-              "instead of retrying the merge"
-          )
-
-          {:stop, :normal, state}
-
-        {:error, reason} ->
-          Logger.warning(
-            "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not dispatch a " <>
-              "review round for unreviewed head #{head}: #{inspect_short(reason)}"
-          )
-
-          escalate_auto_resume_give_up(state, snap, attempts, {:resume_failed, reason})
-          {:stop, :normal, state}
+      case auto_resume(state, attempts + 1) do
+        {:defer, state} -> {:noreply, schedule_resume_retry(state)}
+        {:stop, state} -> {:stop, :normal, state}
       end
     else
       escalate_auto_resume_give_up(
@@ -3818,14 +3899,20 @@ defmodule Arbiter.Worker.Watchdog do
   defp latch_suspended?(%{latch_suspended_at_head: :unknown}, _head), do: false
   defp latch_suspended?(%{latch_suspended_at_head: at}, head), do: head == at
 
-  # Release the baseline when the FLEET is the one advancing the branch — an
-  # update-branch rebase, a CI fix pass, a conflict resolution. Those pushes are
-  # this Watchdog's own doing and are already governed by their own bounded-
-  # attempt + escalation machinery (#354 Phase 2a/2b); treating them as a stale
-  # baseline would deadlock every auto-heal lane at a coordinator page instead
-  # of letting it converge. The guard is deliberately scoped to advances the
-  # fleet did NOT initiate — a human or another process pushing to the branch
-  # between the review verdict and the merge, which is the incident shape.
+  # Release the baseline when the FLEET advances the branch with an
+  # update-branch — a merge from the base, which carries no content of its own.
+  # That push is this Watchdog's own doing and is already governed by its own
+  # bounded-attempt + escalation machinery (#354 Phase 2a); treating it as a
+  # stale baseline would deadlock every auto-heal lane at a coordinator page
+  # instead of letting it converge.
+  #
+  # P7 (bd-60r6wp / #1738, §4.5) narrowed this from "every fleet push" to that
+  # one. A CI fix pass or a conflict resolution AUTHORS content after the
+  # approval, and suspending-then-re-latching onto its head is exactly how the
+  # old path stamped #1702, #1723 and #1725's fix-pass commits as reviewed —
+  # those go through `note_authored_push/1` instead. For the same reason this
+  # is a no-op once such a push is pending: an update-branch landing on top of
+  # an unreviewed fix-pass commit must not re-latch onto the merge carrying it.
   #
   # This is a SUSPENSION, not a one-shot clear. The fleet's pushes land
   # asynchronously — a fix pass or a resolver run takes many polls — so simply
@@ -3835,6 +3922,8 @@ defmodule Arbiter.Worker.Watchdog do
   # we record the head the branch sat at, and hold the latch off until the head
   # moves off it — the first observable proof that the fleet's commit landed —
   # at which point the latch re-pins to the NEW head and the guard binds again.
+  defp clear_reviewed_latch(%{authored_push_pending: true} = state), do: state
+
   defp clear_reviewed_latch(state) do
     %{
       state
@@ -3845,6 +3934,33 @@ defmodule Arbiter.Worker.Watchdog do
         latch_suspended_at_head: state.last_head_sha || :unknown
     }
   end
+
+  # P7 (bd-60r6wp / #1738, §4.5). The fleet is about to AUTHOR content on an
+  # approved branch — a CI fix pass, or a conflict resolution. Unlike an
+  # update-branch this push is not content-preserving by construction, so the
+  # approved baseline stays exactly where it is: when the new head lands, the
+  # ordinary stale-head route judges it on content. A net diff equal to the
+  # approved one merges on a `:mechanical` coverage row
+  # (`resolve_against_live_head/3`); anything else goes back to review, scoped
+  # by the ReviewGate to the delta since the covered commit
+  # (`resolve_stale_reviewed_head/3`). Nothing on this path records the new
+  # head as reviewed, which is what the old suspension did.
+  #
+  # The deadlock the suspension existed to prevent cannot recur: the stale-head
+  # route is terminal for this Watchdog (merge, or hand off to a review round),
+  # never a retry against the pinned baseline.
+  #
+  # If an update-branch suspension is still open when the authored pass is
+  # dispatched, it ends here, pinned to the head the branch sits at: that head
+  # is the approved one or an update-branch merge of it (the only push that
+  # still suspends), so it carries the approved content. Leaving it open would
+  # let the authored commit be the first head the suspension lifts on — and be
+  # latched as the baseline, the exact stamp this function exists to stop.
+  defp note_authored_push(%{latch_suspended_at_head: at} = state) when not is_nil(at) do
+    note_authored_push(%{state | latch_suspended_at_head: nil, reviewed_sha: state.last_head_sha})
+  end
+
+  defp note_authored_push(state), do: %{state | authored_push_pending: true}
 
   # The baseline the fleet's own push has just invalidated. Preserved across a
   # second clear that arrives while already suspended (when there is nothing
