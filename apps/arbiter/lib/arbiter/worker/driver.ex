@@ -211,7 +211,12 @@ defmodule Arbiter.Worker.Driver do
         # bd-21bmdh: an auth death reclaims its debris and returns the task to
         # Ready (behind the provider's AuthHold). Every other failure keeps the
         # task :in_progress exactly as before.
-        case AuthDeath.handle(state.task_id, state.worker_pid, worker_state, blocking_workers(state)) do
+        case AuthDeath.handle(
+               state.task_id,
+               state.worker_pid,
+               worker_state,
+               blocking_workers(state)
+             ) do
           :not_auth ->
             Logger.warning(
               "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :in_progress"

@@ -244,6 +244,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
   defp ready_task!(ws, title) do
     {:ok, task} =
       Ash.create(Issue, %{title: title, workspace_id: ws.id, acceptance: "It works."})
+
     {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
     task
   end

@@ -1134,7 +1134,11 @@ defmodule Arbiter.Quota.CloudProbeTest do
       pid = probe_with(w, h)
 
       CloudProbe.probe(pid)
-      send(pid, {:codex_refresh_result, %{codex: %{plan: "plus"}, message: nil, auth_expired: false}})
+
+      send(
+        pid,
+        {:codex_refresh_result, %{codex: %{plan: "plus"}, message: nil, auth_expired: false}}
+      )
 
       wait_until(fn -> not AuthHold.open?(Arbiter.Agents.Codex, h) end)
       wait_until(fn -> not CredentialWatchdog.expired?(Arbiter.Agents.Codex, w) end)

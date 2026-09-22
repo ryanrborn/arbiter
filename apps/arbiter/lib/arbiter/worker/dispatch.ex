@@ -1736,8 +1736,7 @@ defmodule Arbiter.Worker.Dispatch do
 
     %StopReason{
       category: :auth_expired,
-      summary:
-        "#{provider} dispatch is held: consecutive workers died on auth (AuthHold open)",
+      summary: "#{provider} dispatch is held: consecutive workers died on auth (AuthHold open)",
       remediation:
         "Re-authenticate the #{provider} CLI. The hold clears when the free credential " <>
           "check or the CredentialWatchdog probe next passes; to clear it by hand, " <>
