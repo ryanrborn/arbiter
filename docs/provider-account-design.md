@@ -632,27 +632,32 @@ false. Two decisions the rows above do not spell out:
   cheap.
 * **Install-level sources are not what P3 moved.** `oauth_token/1`'s steps 2
   and 3 (the server process env, and the unambiguous install-wide value) are
-  install configuration, not workspace configuration, so a workspace that
-  never carried a token of its own still falls through to them, and a spawn
-  with no workspace in hand — the fleet-wide watchdog and quota probes — takes
-  the unambiguous install-wide *account* credential with those steps beneath
-  it as a floor. The flip release deletes them (see "What P4 actually
-  shipped" below); P3 does not.
+  install configuration, not workspace configuration, so on the *flag-off*
+  path a workspace that never carried a token of its own still falls through
+  to them, and a workspace-less spawn — the fleet-wide watchdog and quota
+  probes — takes the unambiguous install-wide token with those steps beneath
+  it as a floor. P4 removed that floor from the *flag-on* path (see "What P4
+  actually shipped" below); it survives only while `:provider_accounts_enabled`
+  is `false`. P3 did not touch either path.
 
 **What P4 actually shipped (bd-cblemv).** The `worker_env` removal described
 as "Release N+2 — destructive" above was already delivered by P2
 (bd-77j2if; see "What P2 actually shipped" above) — there was no additional
-`worker_env` deletion left for P4 to do. What P4 found still outstanding was
-`ConfigDir.oauth_token/1`'s server-env and install-wide-unambiguous
-fallbacks (steps 2 and 3, just above). The operator ruled on PR #1947 that
-these fallbacks must stay in place while `:provider_accounts_enabled`
-defaults `false`, since the flag-off legacy chain still depends on them for
-workspaces and workspace-less spawns that have never been migrated —
-deleting them here would break that path, not just tidy it. Their deletion
-is deferred to a new **P13 ("flip") phase** (§10), which also removes the
+`worker_env` deletion left for P4 to do. What P4 shipped in `config_dir.ex`
+was removing the server-env and install-wide-unambiguous fallbacks (steps 2
+and 3, just above) *as a fallback under the flag-on path*: `account_oauth_token/1`
+answers `nil` directly instead of falling through to `legacy_oauth_token/1`
+(`config_dir.ex:270`, `:289`), and `oauth_token_pairs/1` now emits an explicit
+`{"CLAUDE_CODE_OAUTH_TOKEN", false}` unset pair so `Port.open`'s ambient
+inheritance can't leak a server token into a spawn decided to carry none. The
+operator ruled on PR #1947 that these same two fallbacks must stay in place
+on the **flag-off** path, since the legacy chain still depends on them there
+for workspaces and workspace-less spawns that have never been migrated —
+deleting them there would break that path, not just tidy it
+(`config_dir.ex:263-265`, kept verbatim). Deleting the flag-off chain is
+deferred to a new **P13 ("flip") phase** (§10), which also removes the
 `:provider_accounts_enabled` flag and hard-codes the account join as the
-only path. P4 itself shipped no code deletion in `config_dir.ex`; its
-diff is test and doc corrections only.
+only path.
 
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
@@ -803,7 +808,7 @@ Each phase is sized to be one child ticket.
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces | P9, P5 | P3 | D2 |
 | **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |
-| **P13** | "Flip" phase: delete `ConfigDir.oauth_token/1`'s server-env and install-wide-unambiguous fallbacks; remove `:provider_accounts_enabled` and hard-code the account join as the only path (deferred from P4, bd-cblemv, per operator ruling on #1947 — see §7.5) | P4 | P2 | D2 |
+| **P13** | "Flip" phase: delete `ConfigDir.oauth_token/1`'s flag-off legacy chain (the server-env and install-wide-unambiguous fallbacks kept verbatim at `config_dir.ex:263-265`; the flag-on floor was already removed in P4); remove `:provider_accounts_enabled` and hard-code the account join as the only path (deferred from P4, bd-cblemv, per operator ruling on #1947 — see §7.5) | P4 | P2 | D2 |
 
 P5 and P7 are P1 because they are the correctness fixes — the gate is only sound
 once the budget, the cap and the quota live on the same object.
