@@ -856,13 +856,14 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {MergeQueue, :merge_guarded, 2},
+        {MergeQueue, :legacy_merge_decision, 3},
         {MergeQueue, :apply_legacy_decision, 3},
         {MergeQueue, :apply_coverage_decision, 4}
       ],
       anchors: [":stale_reviewed_sha", "coverage_enabled?"],
       summary:
         "the queue's merge refusal: `decide/3` under `merge.coverage_enabled`, else the " <>
-          "reviewed-SHA guard — with none of W2–W6's recovery either way"
+          "reviewed-SHA guard plus W5's content check (P7) — none of W2–W4/W6's recovery"
     },
     %{
       id: :coverage_unknown_wait,

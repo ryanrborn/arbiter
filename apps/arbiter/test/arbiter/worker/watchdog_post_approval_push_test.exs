@@ -413,6 +413,38 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
     end
   end
 
+  describe "a fix pass dispatched while an update-branch suspension is still open" do
+    test "ends the suspension on the approved content, so the fix-pass head is not the one latched" do
+      ws = workspace(false)
+      mr_ref = "!p7susp"
+      approved = sha("approved-susp")
+      pushed = sha("fixpass-susp")
+      {_label, authored} = hd(@shapes)
+
+      {pid, task, _entry} = approved_task(ws, mr_ref, approved)
+      StubMerger.set_diff(mr_ref, approved, @approved_diff)
+      StubMerger.set_diff(mr_ref, pushed, authored)
+
+      StubMerger.queue_get(mr_ref, [
+        # update-branch issued: the latch is suspended at the approved head.
+        %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :behind_base},
+        # CI goes red before the update lands: the fix pass is dispatched.
+        %{status: :open, approved: true, head_sha: approved, base_ref: "main", block_reason: :ci_failed},
+        # The fix pass's commit is the first new head the Watchdog sees.
+        %{status: :open, approved: true, head_sha: pushed, base_ref: "main"}
+      ])
+
+      wpid = start_watchdog(pid, task.id, mr_ref, ws, max_auto_resolve_attempts: 2)
+      ref = Process.monitor(wpid)
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+
+      assert StubMerger.update_branch_count(mr_ref) == 1
+      assert StubFixPassDispatcher.call_count() == 1
+      assert StubMerger.merge_count(mr_ref) == 0
+      assert StubAutoResumeDispatcher.resume_count() == 1
+    end
+  end
+
   # ---- AC5 / bd-985tkl: the review round is not stranded by the fix pass ---
 
   describe "a review round refused because the fix pass still holds the task's registry family" do
