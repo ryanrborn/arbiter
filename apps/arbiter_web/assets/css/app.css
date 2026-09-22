@@ -237,6 +237,13 @@
   --control-lg: 44px;
 
   --nav-height: 46px;
+  /* bd-5ed7w4: the left icon rail. Collapsed it is an icon column wide
+     enough for a 16px glyph plus its hit target; expanded it also carries
+     the item label and the uppercase group headers. `sidebar_nav/1` sizes
+     itself from these two, never from literals, so the page-inset contract
+     and the rail can never disagree about how wide the rail is. */
+  --nav-rail-width: 56px;
+  --nav-rail-width-expanded: 200px;
   --toolbar-height: 44px;
   /* bd-dlc136: the session dock's collapsed strip. Title bars and the roster
      toggle are this tall, and every page reserves this much room at its
