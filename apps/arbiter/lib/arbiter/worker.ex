@@ -1044,7 +1044,7 @@ defmodule Arbiter.Worker do
   # nil — subsequent terminal updates will no-op cleanly.
   defp record_run_started(%State{} = state) do
     worker_type = worker_type_from_meta(state.meta)
-    provider = provider_from_meta(state.meta) || default_run_provider(state, worker_type)
+    provider = provider(state.meta) || default_run_provider(state, worker_type)
     provider_fallback = provider_fallback_from_meta(state.meta)
 
     attrs = %{
@@ -1089,13 +1089,29 @@ defmodule Arbiter.Worker do
       state
   end
 
-  defp provider_from_meta(meta) when is_map(meta) do
+  @doc """
+  Resolves the provider (e.g. `"claude"`, `"codex"`, `"gemini"`) a worker's
+  meta says it runs on, or `nil` if unknown.
+
+  Checks, in order: `meta.provider` / `meta["provider"]`, then
+  `meta.routing_config.provider` / `meta["routing_config"]["provider"]`, then
+  `meta.agent_type` / `meta["agent_type"]`. Atom and string keys/values are
+  both accepted since meta is assembled from mixed sources (spawn-time
+  routing decisions vs. synced session events).
+
+  This is the single source of truth for "what provider is this worker on" —
+  callers (board snapshot, workers index, worker detail) resolve through here
+  rather than re-deriving it, so a future adapter model only has to change
+  this one function.
+  """
+  @spec provider(map() | nil) :: String.t() | nil
+  def provider(meta) when is_map(meta) do
     meta
     |> find_meta_provider()
     |> normalize_provider_string()
   end
 
-  defp provider_from_meta(_), do: nil
+  def provider(_), do: nil
 
   defp find_meta_provider(meta) do
     Enum.find_value(
@@ -1199,7 +1215,7 @@ defmodule Arbiter.Worker do
     # Extract the model from meta, checking both potential sources
     meta = state.meta || %{}
     model = Map.get(meta, :model)
-    provider = provider_from_meta(meta)
+    provider = provider(meta)
     provider_fallback = provider_fallback_from_meta(meta)
 
     attrs = %{

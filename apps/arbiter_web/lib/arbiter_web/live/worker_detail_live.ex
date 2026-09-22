@@ -979,7 +979,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <% end %>
                 </:item>
                 <:item label="Provider">
-                  <code class="font-mono text-xs">{execution_provider(@snapshot)}</code>
+                  <span class="inline-flex items-center gap-1.5">
+                    <.provider_icon provider={Worker.provider(@snapshot.meta)} class="size-4" />
+                    <code class="font-mono text-xs">
+                      {ArbiterWeb.CoreComponents.ProviderIcon.display_name(
+                        Worker.provider(@snapshot.meta)
+                      )}
+                    </code>
+                  </span>
                 </:item>
                 <:item :if={thinking = execution_thinking(@snapshot)} label="Reasoning effort">
                   <code class="font-mono text-xs">{thinking}</code>
@@ -1440,17 +1447,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp mr_ref(_), do: nil
 
   # ---- execution context helpers ----------------------------------------
-
-  # Provider: prefer the ACTUAL model provider synced from session (set once
-  # the Claude init event arrives), then fall back to the routing config
-  # stamped at spawn time (set before spawn via Worker.report).
-  defp execution_provider(%{meta: meta}) when is_map(meta) do
-    Map.get(meta, :provider) ||
-      get_in(meta, [:routing_config, :provider]) ||
-      "claude"
-  end
-
-  defp execution_provider(_), do: "claude"
 
   # Model: prefer the ACTUAL model from the running session (synced from the
   # Claude streaming init event — exact concrete model name), then fall back to
