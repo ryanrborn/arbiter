@@ -2435,7 +2435,7 @@ defmodule Arbiter.Worker do
 
   def handle_info({:EXIT, from, reason}, %State{} = state) do
     Logger.warning(
-      "Worker: task=#{state.task_id} linked #{inspect(from)} exited #{inspect(reason)}; stopping"
+      "Worker: task=#{state.task_id} linked #{inspect(from)} exited #{crash_inspect(reason)}; stopping"
     )
 
     {:stop, {:linked_exit, from, reason}, state}
@@ -6167,9 +6167,19 @@ defmodule Arbiter.Worker do
         record_run_finished(%State{
           state
           | status: :failed,
-            meta: Map.put(state.meta, :failure_reason, "worker crashed: #{inspect(reason)}")
+            meta: Map.put(state.meta, :failure_reason, "worker crashed: #{crash_inspect(reason)}")
         })
     end
+  end
+
+  # A crash reason can carry a whole state or stacktrace. Bounded so the stamp
+  # stays under Run.failure_reason's 2000-char max_length — an over-long value
+  # fails validation, the row is left :running, and the reconciler later
+  # misreports the crash as "server restarted".
+  defp crash_inspect(reason) do
+    reason
+    |> inspect(limit: 20, printable_limit: 200)
+    |> String.slice(0, 1_500)
   end
 
   defp terminate_outcome(:normal), do: :completed

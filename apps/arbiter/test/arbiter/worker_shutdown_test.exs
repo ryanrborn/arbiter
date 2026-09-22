@@ -228,6 +228,28 @@ defmodule Arbiter.WorkerShutdownTest do
       assert run.failure_reason =~ "worker crashed"
       assert run.failure_reason =~ "boom"
     end
+
+    test "a huge crash reason is bounded before it lands in failure_reason" do
+      sup = start_sup!()
+      {pid, task_id} = start_worker!(sup)
+      :ok = Worker.advance(pid, :implement)
+      ref = Process.monitor(pid)
+
+      huge = {:boom, List.duplicate(String.duplicate("x", 100), 50)}
+
+      :sys.replace_state(pid, fn s ->
+        spawn_link(fn -> exit(huge) end)
+        s
+      end)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, {:linked_exit, _from, _}}
+
+      run = run_for(task_id)
+      assert run.status == :failed
+      assert run.failure_reason =~ "worker crashed"
+      assert run.failure_reason =~ "boom"
+      assert String.length(run.failure_reason) < 2_000
+    end
   end
 
   describe "agent exits while the node is stopping" do
