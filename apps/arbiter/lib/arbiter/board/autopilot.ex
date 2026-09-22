@@ -217,11 +217,16 @@ defmodule Arbiter.Board.Autopilot do
   `changed_at`/`changed_by` are `nil` until the first pause/resume this
   process has seen — including one it inherited from a persisted value at
   boot.
+
+  `dispatching` is the id of a promotion still in flight, or `nil`. A pause
+  does not cancel one already under way — it runs to completion and starts a
+  worker — so `Arbiter.Board.Drain` counts it as live work (bd-9fgg04).
   """
   @spec status(GenServer.server(), timeout()) :: %{
           paused?: boolean(),
           changed_at: DateTime.t() | nil,
-          changed_by: String.t() | nil
+          changed_by: String.t() | nil,
+          dispatching: String.t() | nil
         }
   def status(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :status, timeout)
 
@@ -291,7 +296,8 @@ defmodule Arbiter.Board.Autopilot do
      %{
        paused?: state.paused?,
        changed_at: state.paused_changed_at,
-       changed_by: state.paused_changed_by
+       changed_by: state.paused_changed_by,
+       dispatching: dispatching_id(state)
      }, state}
   end
 
@@ -535,7 +541,13 @@ defmodule Arbiter.Board.Autopilot do
   # again from here would only duplicate that resolution — and get it wrong the
   # moment the precedence rules change. A task with no assignment still relies
   # on the sole-configured-repo auto-select, exactly as before.
-  defp default_dispatch(id), do: Arbiter.Worker.Dispatch.dispatch(id, start_claude: true)
+  # `dispatched_by` rides into the worker's meta so a drain report can name a
+  # board dispatch as one (bd-9fgg04), not just as "a dispatch".
+  defp default_dispatch(id),
+    do: Arbiter.Worker.Dispatch.dispatch(id, start_claude: true, dispatched_by: "autopilot")
+
+  defp dispatching_id(%{dispatching: %{id: id}}), do: id
+  defp dispatching_id(_), do: nil
 
   defp announce(message) do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, @topic, message)

@@ -1205,6 +1205,9 @@ defmodule Arbiter.Worker.Dispatch do
         Keyword.get(opts, :agent_type) && to_string(Keyword.get(opts, :agent_type))
       )
       |> put_if_present(:provider_fallback, Keyword.get(opts, :provider_fallback))
+      # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
+      # "autopilot"), so a drain report can name a board dispatch as one.
+      |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))
 
     base = maybe_put_resume_meta(base, opts)
 
