@@ -139,6 +139,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
       snap = CloudCode.gemini(opts(creds, project_id: "p"))
       assert snap.models == []
       assert snap.message =~ "auth"
+      assert snap.auth_expired == true
     end
 
     test "reports missing project id when loadCodeAssist yields none" do
@@ -180,6 +181,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       assert snap.provider == "antigravity"
       assert snap.message == nil
+      assert snap.auth_expired == false
       assert length(snap.models) == 4
 
       by_id = Map.new(snap.models, &{&1.model_id, &1})
@@ -227,6 +229,10 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       assert snap.models == []
       assert snap.message =~ "not authenticated"
+      # bd-1fpjgx: the one outcome CloudProbe treats as a credential-expiry
+      # signal — see the moduledoc's "Flow — Antigravity" and CloudProbe's own
+      # "Credential-expiry signals" section.
+      assert snap.auth_expired == true
     end
 
     test "degrades to a clear message on a subprocess timeout" do
@@ -234,6 +240,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       assert snap.models == []
       assert snap.message =~ "did not respond in time"
+      assert snap.auth_expired == false
     end
 
     test "degrades to a clear message on malformed JSON" do
@@ -241,6 +248,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       assert snap.models == []
       assert snap.message =~ "unexpected data"
+      assert snap.auth_expired == false
     end
 
     test "degrades to a clear message when the decoded JSON has no usage groups" do

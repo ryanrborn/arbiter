@@ -741,6 +741,323 @@ defmodule Arbiter.Quota.CloudProbeTest do
     end
   end
 
+  describe "probe/1 codex 401 streak -> CredentialWatchdog (bd-1fpjgx)" do
+    # These drive `note_codex_result/2` directly via the same
+    # `{:codex_refresh_result, result}` message `default_refresh/2` sends,
+    # decoupled from the real `Arbiter.Quota.Codex` HTTP call (covered
+    # separately by `Arbiter.Quota.CodexTest`'s `auth_expired` assertions).
+    # "codex 401 streak actually reaches CredentialWatchdog" below proves the
+    # two are wired together for real.
+    defp codex_401_result,
+      do: %{
+        codex: nil,
+        message: "Codex connected. Usage API temporarily unavailable (401).",
+        auth_expired: true
+      }
+
+    defp codex_ok_result, do: %{codex: %{plan: "plus"}, message: nil, auth_expired: false}
+
+    test "two consecutive 401s trip the watchdog's expired flag for Codex" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 2 end)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+    end
+
+    # Host-global credentials: several workspaces' independent fetches this
+    # cycle report the same 401, but only the first must count.
+    test "a second workspace's 401 in the same cycle does not double-count the streak" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
+      Process.sleep(50)
+      assert CloudProbe.state(pid).codex_consecutive_401s == 1
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+    end
+
+    test "a success resets the codex 401 streak" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_ok_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 0 end)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+    end
+
+    test "a genuine recovery after expiry calls mark_recovered" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 2 end)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_ok_result()})
+      wait_until(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog) == false end)
+    end
+
+    # Proves `default_refresh/2` really sends `{:codex_refresh_result, _}` off
+    # the real `Arbiter.Quota.Codex.fetch/2` call, not just that CloudProbe
+    # reacts correctly to a hand-built message (covered above).
+    test "codex 401 streak actually reaches CredentialWatchdog via the real Codex fetch",
+         context do
+      Req.Test.set_req_test_to_shared(context)
+      ws = workspace!("codex-wired")
+      watchdog = start_watchdog()
+
+      auth_path =
+        Path.join(
+          System.tmp_dir!(),
+          "codex_auth_probe_#{System.unique_integer([:positive])}.json"
+        )
+
+      File.write!(
+        auth_path,
+        Jason.encode!(%{"tokens" => %{"access_token" => "tok", "account_id" => "acct"}})
+      )
+
+      on_exit(fn -> File.rm(auth_path) end)
+
+      original_codex_cfg = Application.get_env(:arbiter, :codex_quota, [])
+      Application.put_env(:arbiter, :codex_quota, auth_path: auth_path)
+      Application.put_env(:arbiter, :codex_quota_http_stub, true)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :codex_quota, original_codex_cfg)
+        Application.delete_env(:arbiter, :codex_quota_http_stub)
+      end)
+
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 401, "")
+      end)
+
+      pid = start_probe(enabled: true, interval_ms: 3_600_000, credential_watchdog: watchdog)
+      _ws = ws
+
+      CloudProbe.probe(pid)
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
+      CloudProbe.probe(pid)
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 2 end)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+    end
+  end
+
+  describe "probe/1 antigravity auth-failure streak -> CredentialWatchdog (bd-1fpjgx)" do
+    defp antigravity_auth_expired_result,
+      do: %{
+        provider: "antigravity",
+        plan: "Unknown",
+        models: [],
+        message: "Antigravity CLI (agy) is not authenticated (exit 1); run `agy` to sign in.",
+        captured_at: "2026-01-01T00:00:00Z",
+        auth_expired: true
+      }
+
+    defp antigravity_healthy_result,
+      do: %{
+        provider: "antigravity",
+        plan: "Unknown",
+        models: [%{model_id: "gemini_models_5h"}],
+        message: nil,
+        captured_at: "2026-01-01T00:00:00Z",
+        auth_expired: false
+      }
+
+    defp antigravity_not_installed_result,
+      do: %{
+        provider: "antigravity",
+        plan: "Unknown",
+        models: [],
+        message: "Antigravity CLI (agy) is not installed on this host",
+        captured_at: "2026-01-01T00:00:00Z",
+        auth_expired: false
+      }
+
+    test "two consecutive auth failures trip the watchdog's expired flag for Gemini" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 2 end)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+    end
+
+    test "a healthy row resets the streak" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_healthy_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 0 end)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+    end
+
+    test "a genuine recovery after expiry calls mark_recovered for Gemini" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 2 end)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_healthy_result()})
+
+      wait_until(fn ->
+        CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog) == false
+      end)
+    end
+
+    # `agy` simply not being installed says nothing about the credential —
+    # must not move the streak either way.
+    test "agy not installed is neutral, not a recovery or a failure" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
+
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_not_installed_result()})
+      Process.sleep(50)
+
+      assert CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+    end
+
+    # Proves `default_refresh/2` really sends `{:antigravity_refresh_result,
+    # _}` off the real `Arbiter.Quota.CloudCode.refresh/3` call.
+    test "antigravity auth-failure streak actually reaches CredentialWatchdog via the real agy shell-out",
+         context do
+      Req.Test.set_req_test_to_shared(context)
+      ws = workspace!("agy-wired")
+      watchdog = start_watchdog()
+
+      original_agy_cmd = Application.get_env(:arbiter, :agy_cmd)
+      # `false` is a real executable (coreutils) that always exits 1 — the
+      # same "not authenticated" fixture `CloudCodeTest`'s real shell-out
+      # tests use.
+      Application.put_env(:arbiter, :agy_cmd, "false")
+      on_exit(fn -> Application.put_env(:arbiter, :agy_cmd, original_agy_cmd) end)
+
+      pid = start_probe(enabled: true, interval_ms: 3_600_000, credential_watchdog: watchdog)
+      _ws = ws
+
+      CloudProbe.probe(pid)
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
+      CloudProbe.probe(pid)
+      wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 2 end)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+    end
+  end
+
   describe "state/1" do
     test "reports enabled + a probe counter" do
       pid = start_probe(enabled: true, interval_ms: 3_600_000, refresh_fun: fn _ -> :ok end)

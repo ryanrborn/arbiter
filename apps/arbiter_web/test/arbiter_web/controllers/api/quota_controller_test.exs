@@ -39,6 +39,37 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert is_binary(resp["data"]["codex_message"])
   end
 
+  # bd-1fpjgx: generalises `claude`'s `credentials_expired` field to Codex and
+  # Gemini/Antigravity — sourced live off `CredentialWatchdog`, not the
+  # persisted snapshot.
+  test "reports codex_credentials_expired / gemini_credentials_expired off CredentialWatchdog",
+       %{conn: conn} do
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["codex_credentials_expired"] == false
+    assert resp["data"]["gemini_credentials_expired"] == false
+
+    alias Arbiter.Agents.CredentialWatchdog
+    alias Arbiter.Worker.StopReason
+
+    on_exit(fn -> CredentialWatchdog.reset() end)
+
+    reason = %StopReason{
+      category: :auth_expired,
+      summary: "test",
+      remediation: nil,
+      exit_status: nil,
+      signal: nil
+    }
+
+    :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Codex, reason)
+    :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Gemini, reason)
+    _ = CredentialWatchdog.expired?(Arbiter.Agents.Claude)
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["codex_credentials_expired"] == true
+    assert resp["data"]["gemini_credentials_expired"] == true
+  end
+
   test "returns the captured snapshot for the default workspace", %{conn: conn, ws: ws} do
     {:ok, _} =
       Quota.capture(ws.id, [
