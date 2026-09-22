@@ -333,6 +333,142 @@ defmodule Arbiter.Workflows.ConductorTest do
     end
   end
 
+  # ---- account concurrency ceiling (P8, §4.2-§4.4) ------------------------
+
+  defp account!(provider, slug, attrs \\ %{}) do
+    Ash.create!(
+      Arbiter.Accounts.ProviderAccount,
+      Map.merge(
+        %{provider: provider, slug: "#{slug}-#{System.unique_integer([:positive])}"},
+        attrs
+      )
+    )
+  end
+
+  defp link_account!(ws, provider, account, attrs \\ %{}) do
+    Ash.create!(
+      Arbiter.Accounts.WorkspaceProviderAccount,
+      Map.merge(
+        %{workspace_id: ws.id, provider: provider, provider_account_id: account.id},
+        attrs
+      )
+    )
+  end
+
+  # A process registered under the worker registry exactly as
+  # `Arbiter.Worker.init/1` registers one — enough for the ceiling to see a
+  # live worker without spawning an agent session.
+  defp live_worker!(ws, provider) do
+    key = "cnd-worker-#{System.unique_integer([:positive])}"
+    test = self()
+
+    pid =
+      spawn(fn ->
+        {:ok, _} = Registry.register(Arbiter.Worker.Registry, key, nil)
+        :ok = Arbiter.Worker.Registry.put_dispatch(key, ws.id, provider)
+        send(test, {:registered, self()})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:registered, ^pid}
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    pid
+  end
+
+  describe "account concurrency ceiling (§4.2)" do
+    test "the account's max_concurrent caps below the workspace max", %{ws: ws} do
+      account = account!(:claude, "cnd-ceiling", %{max_concurrent: 2})
+      link_account!(ws, :claude, account)
+
+      issues = for _ <- 1..4, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      kickoff(g, workspace_max_concurrent: 4, system_max_concurrent: 10)
+
+      assert_receive {:dispatched, _, _}
+      assert_receive {:dispatched, _, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "two graphs in one workspace share one ceiling (§4.1's double-count bug)", %{ws: ws} do
+      account = account!(:claude, "cnd-two-graphs", %{max_concurrent: 2})
+      link_account!(ws, :claude, account)
+
+      # Graph A drains first and takes the whole ceiling.
+      a_issues = for _ <- 1..3, do: issue(ws)
+      ga = graph(ws)
+      Enum.each(a_issues, &add_member(ga, &1))
+
+      kickoff(ga, workspace_max_concurrent: 4, system_max_concurrent: 10)
+
+      assert_receive {:dispatched, _, _}
+      assert_receive {:dispatched, _, _}
+      refute_receive {:dispatched, _, _}, 100
+
+      # Those two dispatches are now live workers on the account.
+      live_worker!(ws, "claude")
+      live_worker!(ws, "claude")
+
+      # A second Conductor, on a second graph in the SAME workspace. Before P8
+      # this one got its own full `workspace_max_concurrent` — 4 more workers
+      # on a 2-slot account. It must now see zero headroom.
+      b_issues = for _ <- 1..3, do: issue(ws)
+      gb = graph(ws)
+      Enum.each(b_issues, &add_member(gb, &1))
+
+      kickoff(gb, workspace_max_concurrent: 4, system_max_concurrent: 10)
+
+      refute_receive {:dispatched, _, _}, 200
+    end
+
+    test "the workspace share caps below the account ceiling (§4.3)", %{ws: ws} do
+      account = account!(:claude, "cnd-share", %{max_concurrent: 4})
+      link_account!(ws, :claude, account, %{share: 1})
+
+      issues = for _ <- 1..3, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      kickoff(g, workspace_max_concurrent: 4, system_max_concurrent: 10)
+
+      assert_receive {:dispatched, _, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "a nil max_concurrent changes nothing — §4.4's migration default", %{ws: ws} do
+      account = account!(:claude, "cnd-optin")
+      link_account!(ws, :claude, account)
+
+      # Three workers already live on the account. With no ceiling and no
+      # share they impose nothing: throughput is the pre-P8 workspace max.
+      for _ <- 1..3, do: live_worker!(ws, "claude")
+
+      issues = for _ <- 1..4, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      kickoff(g, workspace_max_concurrent: 3, system_max_concurrent: 10)
+
+      assert_receive {:dispatched, _, _}
+      assert_receive {:dispatched, _, _}
+      assert_receive {:dispatched, _, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "a workspace linked to no account is unconstrained", %{ws: ws} do
+      issues = for _ <- 1..3, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      kickoff(g, workspace_max_concurrent: 2, system_max_concurrent: 10)
+
+      assert_receive {:dispatched, _, _}
+      assert_receive {:dispatched, _, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+  end
+
   # ---- effective cap (workspace × system × quota) -------------------------
 
   describe "effective concurrency cap" do

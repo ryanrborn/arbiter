@@ -156,6 +156,7 @@ defmodule Arbiter.Workflows.Conductor do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Accounts.Concurrency
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.DependencyGraph
   alias Arbiter.Tasks.EdgeGate
@@ -527,23 +528,58 @@ defmodule Arbiter.Workflows.Conductor do
     )
   end
 
-  # Effective cap this drain cycle: min of the two hardware caps, then further
-  # bounded by the quota headroom returned by the gate. Returns 0 when the gate
-  # holds all dispatch.
-  defp effective_cap(%State{
-         workspace_max_concurrent: w_max,
-         system_max_concurrent: s_max,
-         system_max_explicit?: explicit?,
-         quota_gate: gate,
-         workspace_id: ws_id
-       }) do
+  # Effective cap this drain cycle (§4.2):
+  #
+  #     min(workspace_max, system_max, account_headroom(account, ws), quota_headroom(account))
+  #
+  # `active_count` is how many of this graph's members are already in flight —
+  # the number the caller is about to subtract from this cap to get its free
+  # slots. The account term is a *headroom* ("how many more on this account"),
+  # not an absolute cap, so it is folded in through
+  # `Concurrency.clamp/3`, which re-expresses it in the caller's frame. Folding
+  # it straight into the `min/2` above would subtract this graph's own live
+  # workers a second time and hold a single graph to roughly half the ceiling
+  # the operator configured.
+  #
+  # Returns 0 when the gate — or the account ceiling — holds all dispatch.
+  defp effective_cap(
+         %State{
+           workspace_max_concurrent: w_max,
+           system_max_concurrent: s_max,
+           system_max_explicit?: explicit?,
+           quota_gate: gate,
+           workspace_id: ws_id
+         },
+         active_count
+       ) do
     s_max = if explicit?, do: s_max, else: live_system_max()
     base = min(w_max, s_max)
 
-    case safe_quota_headroom(gate, ws_id) do
-      :unlimited -> base
-      n -> min(base, n)
-    end
+    workspace = safe_workspace(ws_id)
+    provider = Arbiter.Quota.default_provider(workspace || ws_id)
+
+    base =
+      case safe_quota_headroom(gate, ws_id, workspace, provider) do
+        :unlimited -> base
+        n -> min(base, n)
+      end
+
+    Concurrency.clamp(base, safe_account_headroom(ws_id, provider), active_count)
+  end
+
+  # The account concurrency ceiling (P8, `docs/provider-account-design.md`
+  # §4.2). Fails open: an unreadable account imposes no ceiling, the same way
+  # an unreadable quota snapshot does.
+  defp safe_account_headroom(ws_id, provider) do
+    Concurrency.headroom(ws_id, provider)
+  rescue
+    e ->
+      Logger.warning("Concurrency.headroom/2 raised: #{Exception.message(e)}; allowing")
+      :unlimited
+  catch
+    :exit, reason ->
+      Logger.warning("Concurrency.headroom/2 exited: #{inspect(reason)}; allowing")
+      :unlimited
   end
 
   # The gate is keyed by the **provider account** since P7
@@ -552,9 +588,10 @@ defmodule Arbiter.Workflows.Conductor do
   # workspace rides along in `opts` as policy context only — it supplies the
   # `:continue`-mode check and the workspace half of `min(account, workspace)`
   # threshold resolution, never the key.
-  defp safe_quota_headroom(gate, workspace_id) do
-    workspace = safe_workspace(workspace_id)
-    provider = Arbiter.Quota.default_provider(workspace || workspace_id)
+  # `workspace` / `provider` are resolved once by the caller and threaded in —
+  # the account concurrency ceiling needs the same two values, and loading the
+  # workspace twice per drain cycle is pure waste.
+  defp safe_quota_headroom(gate, workspace_id, workspace, provider) do
     account_id = Arbiter.Quota.account_id(workspace_id, provider)
 
     gate.quota_headroom(account_id,
@@ -614,8 +651,9 @@ defmodule Arbiter.Workflows.Conductor do
       active_ids =
         for issue <- member_issues, issue.status == :in_progress, into: MapSet.new(), do: issue.id
 
-      cap = effective_cap(state)
-      slots = max(0, cap - MapSet.size(active_ids))
+      active_count = MapSet.size(active_ids)
+      cap = effective_cap(state, active_count)
+      slots = max(0, cap - active_count)
 
       ready =
         [workspace_id: state.workspace_id]

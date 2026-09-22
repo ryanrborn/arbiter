@@ -8,6 +8,7 @@ defmodule ArbiterWeb.Api.AccountController do
     * `GET    /api/accounts`            — :index (optional `?provider=`, `?include_merged=true`)
     * `POST   /api/accounts`            — :create
     * `GET    /api/accounts/:ref`       — :show   (`:ref` — uuid, `provider:slug`, or bare slug)
+    * `PATCH  /api/accounts/:ref`       — :update (`max_concurrent`, nullable)
     * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`)
     * `POST   /api/accounts/:ref/rotate`  — :rotate (`kind`, `env_var`, `secret`, optional `scopes`)
     * `POST   /api/accounts/:ref/merge`   — :merge  (`into` — the surviving account ref)
@@ -70,6 +71,49 @@ defmodule ArbiterWeb.Api.AccountController do
       |> render(:show, account: account)
     end
   end
+
+  @doc """
+  The account concurrency ceiling (P8, `docs/provider-account-design.md`
+  §4.2). `max_concurrent` is nullable and an explicit `null` clears it: the
+  ceiling is opt-in (§4.4), so "no ceiling" has to be reachable, and an
+  *absent* key is a malformed request rather than a clear.
+
+  Deliberately the only attribute this action accepts. `provider`/`slug` are
+  the account's identity (§3.1) and changing either is a new account, not an
+  edit; everything else an operator sets today is set at `create`.
+  """
+  def update(conn, %{"ref" => ref} = params) do
+    with {:ok, max_concurrent} <- fetch_max_concurrent(params),
+         {:ok, account} <- ref |> Accounts.set_max_concurrent(max_concurrent) |> friendly() do
+      render(conn, :show, account: account)
+    end
+  end
+
+  defp fetch_max_concurrent(params) do
+    case Map.fetch(params, "max_concurrent") do
+      :error ->
+        {:error, {:invalid_request, "missing required parameter: max_concurrent"}}
+
+      {:ok, value} ->
+        cast_max_concurrent(value)
+    end
+  end
+
+  defp cast_max_concurrent(nil), do: {:ok, nil}
+  defp cast_max_concurrent(""), do: {:ok, nil}
+  defp cast_max_concurrent(n) when is_integer(n) and n >= 0, do: {:ok, n}
+
+  defp cast_max_concurrent(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, ""} when n >= 0 -> {:ok, n}
+      _ -> invalid_max_concurrent()
+    end
+  end
+
+  defp cast_max_concurrent(_), do: invalid_max_concurrent()
+
+  defp invalid_max_concurrent,
+    do: {:error, {:invalid_request, "max_concurrent must be a non-negative integer or null"}}
 
   def attach(conn, %{"ref" => ref} = params) do
     with {:ok, workspace_id} <- require_param(params, "workspace_id"),

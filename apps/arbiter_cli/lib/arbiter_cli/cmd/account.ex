@@ -19,10 +19,22 @@ defmodule ArbiterCli.Cmd.Account do
                                      [--max-concurrent N]
                                      No credential is required at creation
                                      time (§2.4 — operator-asserted identity).
+      arb account set    <ref> --max-concurrent N|none
+                                     The account concurrency ceiling (P8,
+                                     §4.2): at most N workers may run on this
+                                     account across every workspace metered
+                                     under it. `none` clears it — the ceiling
+                                     is opt-in (§4.4) and an account without
+                                     one behaves exactly as it did before P8.
       arb account attach <workspace-id> <provider> <ref> [--share N]
                                      Points a workspace at an account for a
                                      provider — writes/updates the
                                      workspace_provider_accounts row.
+                                     `--share N` is this workspace's cap on
+                                     its use of the account ceiling (§4.3) —
+                                     a **cap, not a reservation**: shares may
+                                     sum to more than the ceiling, and that is
+                                     the useful configuration.
       arb account rotate <ref> --kind oauth_token|api_key|cli_credentials_file
                                      --env-var VAR (--secret VALUE | --secret-file PATH | -)
                                      [--scopes a,b]
@@ -50,7 +62,9 @@ defmodule ArbiterCli.Cmd.Account do
     provider: :string,
     label: :string,
     plan: :string,
-    max_concurrent: :integer,
+    # :string, not :integer, so `--max-concurrent none` can clear the
+    # ceiling — it is nullable and `nil` means "no ceiling" (§4.4).
+    max_concurrent: :string,
     share: :integer,
     kind: :string,
     env_var: :string,
@@ -80,6 +94,9 @@ defmodule ArbiterCli.Cmd.Account do
         ["create" | args] ->
           create(args, opts, mode)
 
+        ["set" | args] ->
+          set(args, opts, mode)
+
         ["attach" | args] ->
           attach(args, opts, mode)
 
@@ -92,7 +109,7 @@ defmodule ArbiterCli.Cmd.Account do
         [] ->
           Output.die(
             "account requires a subcommand",
-            "verbs: list, show, create, attach, rotate, merge"
+            "verbs: list, show, create, set, attach, rotate, merge"
           )
 
         [unknown | _] ->
@@ -186,12 +203,43 @@ defmodule ArbiterCli.Cmd.Account do
       %{"provider" => provider, "slug" => slug}
       |> maybe_put("label", opts[:label])
       |> maybe_put("plan", opts[:plan])
-      |> maybe_put("max_concurrent", opts[:max_concurrent])
+      |> maybe_put("max_concurrent", max_concurrent!(opts))
 
     case Client.post("/api/accounts", payload) do
       {:ok, account} -> emit_written(account, "created", mode)
       {:error, err} -> Output.die(err)
     end
+  end
+
+  # ---- set ---------------------------------------------------------------
+
+  # P8 (`docs/provider-account-design.md` §4.2): the account concurrency
+  # ceiling. A PATCH rather than its own verb endpoint — it edits one column
+  # on an existing row.
+  defp set(args, opts, mode) do
+    ref = one_ref!(args, "set")
+
+    max_concurrent =
+      case Keyword.fetch(opts, :max_concurrent) do
+        {:ok, _} -> max_concurrent!(opts)
+        :error -> Output.die("account set requires --max-concurrent N|none")
+      end
+
+    ceiling = if max_concurrent == :clear, do: nil, else: max_concurrent
+
+    case Client.patch("/api/accounts/" <> URI.encode(ref), %{"max_concurrent" => ceiling}) do
+      {:ok, account} -> emit_set(account, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_set(account, :json), do: IO.puts(Jason.encode!(account))
+
+  defp emit_set(account, :text) do
+    IO.puts(
+      "#{account["provider"]}:#{account["slug"]} max_concurrent=" <>
+        "#{account["max_concurrent"] || "(none)"}"
+    )
   end
 
   # ---- attach ------------------------------------------------------------
@@ -325,6 +373,29 @@ defmodule ArbiterCli.Cmd.Account do
     end
   end
 
+  # `nil` when the flag was not given at all, so `maybe_put/3` drops it;
+  # an explicit `none` is the sentinel that clears the ceiling.
+  defp max_concurrent!(opts) do
+    case opts[:max_concurrent] do
+      nil -> nil
+      value when value in ~w(none nil null clear unset) -> :clear
+      value -> parse_max_concurrent(value)
+    end
+  end
+
+  defp parse_max_concurrent(value) do
+    case Integer.parse(value) do
+      {n, ""} when n >= 0 ->
+        n
+
+      _ ->
+        Output.die(
+          "--max-concurrent must be a non-negative integer, or `none` to clear it (got #{inspect(value)})"
+        )
+    end
+  end
+
+  defp maybe_put(map, key, :clear), do: Map.put(map, key, nil)
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

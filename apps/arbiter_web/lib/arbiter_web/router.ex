@@ -181,6 +181,7 @@ defmodule ArbiterWeb.Router do
     get("/accounts", AccountController, :index)
     post("/accounts", AccountController, :create)
     get("/accounts/:ref", AccountController, :show)
+    patch("/accounts/:ref", AccountController, :update)
     post("/accounts/:ref/attach", AccountController, :attach)
     post("/accounts/:ref/rotate", AccountController, :rotate)
     post("/accounts/:ref/merge", AccountController, :merge)

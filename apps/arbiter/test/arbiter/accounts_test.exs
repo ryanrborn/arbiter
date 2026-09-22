@@ -121,6 +121,23 @@ defmodule Arbiter.AccountsTest do
       assert found.id == codex.id
     end
 
+    test "a 16-character ref is not mistaken for a raw UUID" do
+      # `Ecto.UUID.cast/1` accepts a raw 16-*byte* binary as well as the
+      # 36-character hyphenated form, so any ref that happens to be exactly 16
+      # characters long ("claude:ceil-refs", "sixteen-char-abc") used to be
+      # routed to the id lookup and 404 — including from `arb account set`.
+      account = create_account!(%{provider: :claude, slug: "ceil-refs"})
+      assert byte_size("claude:ceil-refs") == 16
+
+      assert {:ok, found} = Accounts.get_account("claude:ceil-refs")
+      assert found.id == account.id
+
+      bare = create_account!(%{provider: :codex, slug: "sixteen-char-abc"})
+      assert byte_size("sixteen-char-abc") == 16
+      assert {:ok, found} = Accounts.get_account("sixteen-char-abc")
+      assert found.id == bare.id
+    end
+
     test "resolves an unambiguous bare slug" do
       account = create_account!(%{provider: :claude, slug: "unique-slug"})
       assert {:ok, found} = Accounts.get_account("unique-slug")
@@ -145,6 +162,49 @@ defmodule Arbiter.AccountsTest do
       assert account.provider == :claude
       assert account.slug == "fresh"
       assert account.enabled == true
+    end
+  end
+
+  describe "set_max_concurrent/2 (P8 §4.2)" do
+    test "sets the ceiling by slug" do
+      create_account!(%{provider: :claude, slug: "ceil-set"})
+
+      assert {:ok, account} = Accounts.set_max_concurrent("ceil-set", 4)
+      assert account.max_concurrent == 4
+    end
+
+    test "nil clears it — the ceiling is opt-in (§4.4)" do
+      create_account!(%{provider: :claude, slug: "ceil-clear", max_concurrent: 4})
+
+      assert {:ok, account} = Accounts.set_max_concurrent("ceil-clear", nil)
+      assert account.max_concurrent == nil
+    end
+
+    test "resolves the same refs every other verb does" do
+      account = create_account!(%{provider: :claude, slug: "ceil-refs"})
+
+      assert {:ok, _} = Accounts.set_max_concurrent(account.id, 1)
+      assert {:ok, _} = Accounts.set_max_concurrent("claude:ceil-refs", 2)
+      assert {:error, :not_found} = Accounts.set_max_concurrent("no-such-account", 2)
+    end
+  end
+
+  describe "share is a cap, not a reservation (§4.3)" do
+    test "shares may sum to more than the account ceiling" do
+      account = create_account!(%{provider: :claude, slug: "oversubscribed", max_concurrent: 4})
+
+      # 3 + 3 + 3 = 9 against a ceiling of 4. Deliberately allowed: it lets a
+      # quiet workspace's slots be taken by a busy one while still bounding
+      # any single workspace. A reservation would have to reject this.
+      for name <- ~w(over-a over-b over-c) do
+        ws = create_workspace!(name)
+        assert {:ok, link} = Accounts.attach_workspace(ws.id, :claude, account.id, share: 3)
+        assert link.share == 3
+      end
+
+      {:ok, reloaded} = Accounts.get_account(account.id)
+      assert reloaded.max_concurrent == 4
+      assert length(Arbiter.Accounts.Resolver.workspace_ids(account.id)) == 3
     end
   end
 
