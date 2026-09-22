@@ -196,12 +196,12 @@ async function run(page) {
 
   // -- the headline: navigate with the window open --------------------------
 
-  await page.eval(`document.querySelector('#top-nav a[href="/tasks"]').click()`)
+  await page.eval(`document.querySelector('#nav-rail a[href="/tasks"]').click()`)
   await page.poll(`location.pathname === "/tasks"`, "the navigation to /tasks never happened")
   await page.waitForLive()
   await page.settle()
 
-  await page.eval(`document.querySelector('#top-nav a[href="/epics"]').click()`)
+  await page.eval(`document.querySelector('#nav-rail a[href="/epics"]').click()`)
   await page.poll(`location.pathname === "/epics"`, "the navigation to /epics never happened")
   await page.waitForLive()
   await page.settle()
@@ -797,7 +797,7 @@ function layout(page, id) {
     const win = document.getElementById("session-dock-window-${id}")
     const rect = win ? win.getBoundingClientRect() : null
     const main = document.querySelector("main")
-    const nav = document.getElementById("top-nav")
+    const nav = document.getElementById("app-status-bar")
     const roster = document.getElementById("session-dock-roster-toggle")
     const rosterRect = roster ? roster.getBoundingClientRect() : null
     const term = document.getElementById("session-dock-terminal-${id}")
