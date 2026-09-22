@@ -374,11 +374,22 @@ defmodule Arbiter.Worker.Worktree do
   If `branch_name` already exists — either as a live worktree, or merely as a
   branch ref left behind after its worktree was torn down (`:await_verification`
   runs `CleanupWorktree` the moment a PR merges, well before a `task_verify
-  failed` reopen can redispatch onto it) — and that branch's own tip is
-  already an ancestor of the freshly-fetched `origin/<base_branch>` — i.e. its
-  commits are already merged upstream, from a prior round of this task — hard
-  reset it to `origin/<base_branch>` so a redispatch starts clean instead of
-  reusing a branch with nothing left to contribute (bd-8ssxap).
+  failed` reopen can redispatch onto it) — reset it to `origin/<base_branch>`
+  so a redispatch starts clean instead of reusing a branch with nothing left
+  to contribute (bd-8ssxap). Two independent signals trigger the reset:
+
+    * **Ancestry** — the branch's own tip is already an ancestor of the
+      freshly-fetched `origin/<base_branch>`. This only fires for a
+      merge-commit-preserving merge strategy; it never fires after a squash
+      merge, since a squash produces a brand-new commit on the base branch
+      that the old branch tip is never an ancestor of.
+    * **`force: true`** (caller-supplied, via `opts`) — the caller already
+      knows from task state (e.g. `verification_outcome == :failed`, which
+      only happens after a PR merged and then failed verification in
+      production) that the branch's content is already upstream, regardless
+      of what git ancestry says. This is what actually catches the squash
+      case, which is this repo's default merge method
+      (`lib/arbiter/mergers/github/config.ex`).
 
   Call this BEFORE `create/3`, which is otherwise idempotent-without-a-fetch
   for an already-existing worktree, and whose "already exists" fallback
@@ -387,24 +398,36 @@ defmodule Arbiter.Worker.Worktree do
   straight back to the worker, the empty-PR redispatch bug this function
   exists to prevent.
 
+  A live worktree is never hard-reset while it has uncommitted changes
+  (staged, unstaged, or untracked — see `has_uncommitted?/1`), even under
+  `force: true`: those changes are exactly what `Dispatch.resume/2` exists to
+  preserve, and destroying them silently would be worse than leaving a stale
+  branch in place. Callers on a resume path should additionally avoid calling
+  this function at all (skip straight to `{:ok, :kept}`), since a resumed
+  worktree's whole point is continuity from its preserved state.
+
   Returns:
 
-    * `{:ok, :reset}` — the branch was already merged; hard-reset (in place,
-      if a worktree exists) or force-moved (if only the ref survived) to the
+    * `{:ok, :reset}` — the branch was merged (by ancestry or `force:
+      true`) and had no uncommitted changes; hard-reset (in place, if a
+      worktree exists) or force-moved (if only the ref survived) to the
       current `origin/<base_branch>` tip.
     * `{:ok, :kept}` — `branch_name` does not exist yet at all (nothing to
-      reset; `create/3` will cut a fresh one), or it has commits that are NOT
-      yet on `origin/<base_branch>` (genuine unmerged work — a normal
-      changes-requested redispatch must keep it).
+      reset; `create/3` will cut a fresh one), it has commits that are NOT
+      merged and `force` was not given (genuine unmerged work — a normal
+      changes-requested redispatch must keep it), or a live worktree has
+      uncommitted changes that a hard reset would destroy.
     * `{:error, reason}` — `origin` is missing, the fetch failed, or the reset
       itself failed. Callers should fail the dispatch rather than silently
       reusing an un-checked branch.
   """
-  @spec reset_if_merged(path(), String.t(), String.t()) ::
+  @spec reset_if_merged(path(), String.t(), String.t(), keyword()) ::
           {:ok, :reset | :kept} | {:error, error_reason()}
-  def reset_if_merged(repo_path, branch_name, base_branch)
-      when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) do
+  def reset_if_merged(repo_path, branch_name, base_branch, opts \\ [])
+      when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) and
+             is_list(opts) do
     path = worktree_path(branch_name)
+    force? = Keyword.get(opts, :force, false)
 
     with :ok <- ensure_origin_remote(repo_path),
          :ok <- fetch_origin_branch(repo_path, base_branch),
@@ -413,10 +436,10 @@ defmodule Arbiter.Worker.Worktree do
 
       cond do
         File.dir?(path) ->
-          reset_worktree_if_merged(path, branch_name, ref)
+          reset_worktree_if_merged(path, branch_name, ref, force?)
 
         branch_ref_exists?(repo_path, branch_name) ->
-          reset_branch_ref_if_merged(repo_path, branch_name, ref)
+          reset_branch_ref_if_merged(repo_path, branch_name, ref, force?)
 
         true ->
           {:ok, :kept}
@@ -424,29 +447,41 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
-  defp reset_worktree_if_merged(path, branch_name, ref) do
-    case run_git(["merge-base", "--is-ancestor", branch_name, ref], cd: path) do
-      {:ok, _} ->
-        with {:ok, _} <- run_git(["checkout", branch_name], cd: path),
-             {:ok, _} <- run_git(["reset", "--hard", ref], cd: path) do
-          {:ok, :reset}
-        end
+  defp reset_worktree_if_merged(path, branch_name, ref, force?) do
+    if force? or ancestor?(branch_name, ref, path) do
+      case has_uncommitted?(path) do
+        {:ok, true} ->
+          {:ok, :kept}
 
-      {:error, _not_ancestor} ->
-        {:ok, :kept}
+        {:ok, false} ->
+          with {:ok, _} <- run_git(["checkout", branch_name], cd: path),
+               {:ok, _} <- run_git(["reset", "--hard", ref], cd: path) do
+            {:ok, :reset}
+          end
+
+        {:error, _} = err ->
+          err
+      end
+    else
+      {:ok, :kept}
     end
   end
 
-  defp reset_branch_ref_if_merged(repo_path, branch_name, ref) do
-    case run_git(["merge-base", "--is-ancestor", branch_name, ref], cd: repo_path) do
-      {:ok, _} ->
-        case run_git(["branch", "-f", branch_name, ref], cd: repo_path) do
-          {:ok, _} -> {:ok, :reset}
-          {:error, _} = err -> err
-        end
+  defp reset_branch_ref_if_merged(repo_path, branch_name, ref, force?) do
+    if force? or ancestor?(branch_name, ref, repo_path) do
+      case run_git(["branch", "-f", branch_name, ref], cd: repo_path) do
+        {:ok, _} -> {:ok, :reset}
+        {:error, _} = err -> err
+      end
+    else
+      {:ok, :kept}
+    end
+  end
 
-      {:error, _not_ancestor} ->
-        {:ok, :kept}
+  defp ancestor?(branch_name, ref, cd) do
+    case run_git(["merge-base", "--is-ancestor", branch_name, ref], cd: cd) do
+      {:ok, _} -> true
+      {:error, _not_ancestor} -> false
     end
   end
 

@@ -184,8 +184,12 @@ defmodule Arbiter.Worker.WorktreeTest do
       {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the fix"])
       {_, 0} = System.cmd("git", ["-C", path, "push", "-q", "origin", "bugfix/already-merged"])
 
-      # Simulate the fix landing on main via a squash merge (a NEW commit on
-      # main, not a fast-forward — matches how the real MergeQueue lands PRs).
+      # Simulate the fix landing on main via a merge-commit-preserving merge (a
+      # NEW commit on main whose second parent is still the old branch tip, so
+      # the old tip remains an ancestor of main and the plain merge-base
+      # ancestry check below catches it without needing `force: true`). This is
+      # NOT how this repo's default GitHub merger actually lands PRs — see the
+      # squash-merge tests below for that case.
       {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", "bugfix/already-merged"])
       {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
 
@@ -226,6 +230,66 @@ defmodule Arbiter.Worker.WorktreeTest do
 
     test "is a no-op when no worktree exists yet for the branch", %{repo: repo} do
       assert {:ok, :kept} = Worktree.reset_if_merged(repo, "bugfix/never-created", "main")
+    end
+
+    # bd-8ssxap round 2 (reviewer finding 1): this repo's default GitHub merge
+    # method is squash (`lib/arbiter/mergers/github/config.ex`), which lands a
+    # brand-new single-parent commit on main. The old per-task branch tip is
+    # NEVER an ancestor of that commit, so plain merge-base ancestry — the only
+    # signal `reset_if_merged/3` used before this round — never catches a
+    # squash-merged branch and silently keeps handing the stale branch back.
+    test "does NOT reset a squash-merged branch without force: true",
+         %{repo: repo} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/squash-merged", "main")
+      File.write!(Path.join(path, "fix.md"), "the fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "fix.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the fix"])
+      {_, 0} = System.cmd("git", ["-C", path, "push", "-q", "origin", "bugfix/squash-merged"])
+
+      squash_merge_onto_main(repo, "bugfix/squash-merged", "the fix (squashed)")
+
+      # Ancestry alone says "not merged" — the branch tip is not reachable
+      # from the new squash commit at all — so without force it is kept.
+      assert {:ok, :kept} = Worktree.reset_if_merged(repo, "bugfix/squash-merged", "main")
+      assert File.exists?(Path.join(path, "fix.md"))
+    end
+
+    test "hard-resets a squash-merged branch when force: true is given",
+         %{repo: repo, remote: remote} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/squash-merged-force", "main")
+      File.write!(Path.join(path, "fix.md"), "the fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "fix.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the fix"])
+
+      {_, 0} =
+        System.cmd("git", ["-C", path, "push", "-q", "origin", "bugfix/squash-merged-force"])
+
+      squash_merge_onto_main(repo, "bugfix/squash-merged-force", "the fix (squashed)")
+
+      assert {:ok, :reset} =
+               Worktree.reset_if_merged(repo, "bugfix/squash-merged-force", "main", force: true)
+
+      {:ok, remote_main_sha} = git_rev_parse(remote, "main")
+      {:ok, head_sha} = git_rev_parse(path, "HEAD")
+      assert head_sha == remote_main_sha
+    end
+
+    # bd-8ssxap round 2 (reviewer finding 2): `force: true` must never destroy
+    # uncommitted work sitting on a branch that git-level state alone can't
+    # distinguish from a genuinely already-merged one — e.g. a resumed
+    # worker's edits that were never committed. `Dispatch` also skips calling
+    # this function at all on a resume, but the guard belongs here too so a
+    # dirty worktree is never hard-reset no matter how it's reached.
+    test "keeps uncommitted changes on a zero-commits-ahead branch even with force: true",
+         %{repo: repo} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/dirty-resume", "main")
+      File.write!(Path.join(path, "in_progress.md"), "not committed yet\n")
+
+      assert {:ok, :kept} =
+               Worktree.reset_if_merged(repo, "bugfix/dirty-resume", "main", force: true)
+
+      assert File.exists?(Path.join(path, "in_progress.md"))
+      assert File.read!(Path.join(path, "in_progress.md")) == "not committed yet\n"
     end
 
     # bd-8ssxap: `:await_verification` runs `CleanupWorktree` the moment a PR
@@ -270,6 +334,18 @@ defmodule Arbiter.Worker.WorktreeTest do
       {:ok, branch_sha} = git_rev_parse(repo, "bugfix/torn-down")
       assert branch_sha == remote_main_sha
     end
+  end
+
+  # Lands `branch`'s changes onto `repo`'s main as a single new commit whose
+  # only parent is main's prior tip — a real `git merge --squash`, matching
+  # how this repo's default GitHub merger actually lands PRs. Unlike
+  # `--no-ff`, the old branch tip is NOT an ancestor of the result.
+  defp squash_merge_onto_main(repo, branch, message) do
+    {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", branch])
+    {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+    {_, 0} = System.cmd("git", ["-C", repo, "merge", "-q", "--squash", "origin/" <> branch])
+    {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", message])
+    {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
   end
 
   defp git_rev_parse(cd, ref) do

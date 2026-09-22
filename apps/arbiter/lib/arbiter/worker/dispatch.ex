@@ -1317,6 +1317,13 @@ defmodule Arbiter.Worker.Dispatch do
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  # `resume/2` and `resume_session/2` both always set `:resume` to `true`
+  # before delegating to `dispatch/2` (`resume_session_id` is only set on top
+  # of that, never on its own) — so `:resume` alone is a reliable signal that
+  # this dispatch is re-attaching to a preserved worktree rather than cutting
+  # a fresh one.
+  defp resuming?(opts), do: Keyword.get(opts, :resume) == true
+
   defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
@@ -1347,7 +1354,30 @@ defmodule Arbiter.Worker.Dispatch do
             # `create/3` alone would reuse that branch as-is — the worker gets
             # nothing new to add and can submit an empty PR. Reset it to current
             # upstream first; a branch with genuine unmerged work is left alone.
-            case Worktree.reset_if_merged(repo_path, branch, target_branch) do
+            #
+            # `force: true` when the task's last transition was a failed
+            # verification: this repo's default GitHub merge method is squash
+            # (`lib/arbiter/mergers/github/config.ex`), which produces a brand
+            # new commit on the base branch that the old per-task branch tip is
+            # NEVER an ancestor of — plain merge-base ancestry (still used for
+            # every other redispatch) would never catch that case, which is
+            # exactly the bd-96mn8i incident this exists to prevent.
+            #
+            # A resume (`opts[:resume]`) skips this reset entirely rather than
+            # passing `force: true` through: `Dispatch.resume/2` exists to
+            # preserve a stopped worker's committed *and* uncommitted worktree
+            # state, and this branch's whole point on a resume is continuity,
+            # not a clean slate.
+            reset_result =
+              if resuming?(opts) do
+                {:ok, :kept}
+              else
+                Worktree.reset_if_merged(repo_path, branch, target_branch,
+                  force: task.verification_outcome == :failed
+                )
+              end
+
+            case reset_result do
               {:ok, _} ->
                 case Worktree.create(repo_path, branch, target_branch) do
                   {:ok, path} ->
