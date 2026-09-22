@@ -41,6 +41,48 @@ defmodule Arbiter.Worker.WatchdogTest do
   # Watchdog calls `resolve/1` + `escalate_unresolved/4` from its own process, so
   # results are routed back to the test via a per-task pid stashed in
   # :persistent_term (unique task ids keep cases isolated).
+  # P7 (bd-60r6wp): the approved net diff, the same content after a rebase, and
+  # the same change plus a line a post-approval fix pass authored.
+  @fixpass_reviewed_diff """
+  diff --git a/lib/a.ex b/lib/a.ex
+  index 1111111..2222222 100644
+  --- a/lib/a.ex
+  +++ b/lib/a.ex
+  @@ -10,6 +10,7 @@ defmodule A do
+     def run do
+       :ok
+  +    :extra
+     end
+   end
+  """
+
+  @fixpass_same_content_diff """
+  diff --git a/lib/a.ex b/lib/a.ex
+  index 3333333..4444444 100644
+  --- a/lib/a.ex
+  +++ b/lib/a.ex
+  @@ -41,6 +41,7 @@ defmodule A do
+     def run do
+       :ok
+  +    :extra
+     end
+   end
+  """
+
+  @fixpass_authored_diff """
+  diff --git a/lib/a.ex b/lib/a.ex
+  index 1111111..5555555 100644
+  --- a/lib/a.ex
+  +++ b/lib/a.ex
+  @@ -10,6 +10,8 @@ defmodule A do
+     def run do
+       :ok
+  +    :extra
+  +    :credo_fix
+     end
+   end
+  """
+
   defmodule StubConflictResolver do
     @moduledoc false
     @behaviour Arbiter.Workflows.MergeQueue.ConflictResolver
@@ -2450,17 +2492,25 @@ defmodule Arbiter.Worker.WatchdogTest do
     # re-latched the SAME pre-push head. When the fix commit finally appeared the
     # guard saw reviewed != head and refused forever — deadlocking exactly the
     # auto-heal lane the clear exists to keep converging.
-    test "a fix-pass commit that lands several polls later still merges, guarded on the new head" do
+    #
+    # P7 (bd-60r6wp / #1738, §4.5) replaced the suspension for fix passes: the
+    # approved baseline stays pinned and the late-landing commit is judged on
+    # CONTENT. Neither arm deadlocks — a commit that changes nothing merges, a
+    # commit that authored content goes to a review round (never re-latched as
+    # "reviewed", which is how #1702/#1723/#1725 merged unreviewed).
+    test "a fix-pass commit that lands several polls later and changes no content still merges, on the new head" do
       {pid, task_id} = running_worker()
 
+      StubMerger.set_diff("!rs6", "sha-a", @fixpass_reviewed_diff)
+      StubMerger.set_diff("!rs6", "sha-b", @fixpass_same_content_diff)
+
       StubMerger.queue_get("!rs6", [
-        # Poll 1: approved at sha-a but CI is red -> dispatch the fix pass and
-        # suspend the latch.
-        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed},
+        # Poll 1: approved at sha-a but CI is red -> dispatch the fix pass.
+        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
         # Poll 2: the fix pass is still running; the head has NOT moved yet.
-        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed},
+        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
         # Poll 3+: the fix commit landed and CI is green.
-        %{status: :open, approved: true, head_sha: "sha-b"}
+        %{status: :open, approved: true, head_sha: "sha-b", base_ref: "main"}
       ])
 
       start_watchdog(pid, task_id, "!rs6",
@@ -2476,7 +2526,34 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubMerger.merge_count("!rs6") == 1
 
       assert StubMerger.last_merge() == {"!rs6", "sha-b"},
-             "the fleet's own fix-pass commit must re-baseline the guard, not deadlock it"
+             "a content-equal fleet push must merge on its own head, not deadlock the guard"
+    end
+
+    test "a fix-pass commit that authored content goes to a review round instead of merging" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.set_diff("!rs6b", "sha-a", @fixpass_reviewed_diff)
+      StubMerger.set_diff("!rs6b", "sha-b", @fixpass_authored_diff)
+
+      StubMerger.queue_get("!rs6b", [
+        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
+        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed, base_ref: "main"},
+        %{status: :open, approved: true, head_sha: "sha-b", base_ref: "main"}
+      ])
+
+      start_watchdog(pid, task_id, "!rs6b",
+        auto_merge: true,
+        max_auto_resolve_attempts: 1,
+        interval_ms: 15,
+        fix_pass_dispatcher: StubFixPassDispatcher,
+        workspace: test_workspace(),
+        auto_resume_dispatcher: StubAutoResumeDispatcher
+      )
+
+      wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end, 3_000)
+
+      assert StubMerger.merge_count("!rs6b") == 0,
+             "a post-approval fix-pass commit merged with no review having seen it"
     end
 
     # The suspension must not become a hole in the guard: once the fleet's push

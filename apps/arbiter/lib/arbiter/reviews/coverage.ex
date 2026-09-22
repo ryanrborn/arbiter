@@ -220,6 +220,65 @@ defmodule Arbiter.Reviews.Coverage do
     end
   end
 
+  @doc """
+  The `:mechanical` row a content-equality proof the caller has ALREADY made
+  implies for `head`, or `nil` when it implies none.
+
+  P7 (bd-60r6wp / #1738, §4.5). The legacy merge guard's own content check
+  (the Watchdog's `base_merge_only?/3`, the MergeQueue's mirror of it) merges a
+  fleet-pushed head whose net diff equals the reviewed one, and has the head's
+  diff in hand when it does. That merge is authorised by exactly rule 3's
+  proof, so it records the same row rule 3 would — naming the covered entry
+  whose `net_diff_id` the head's diff fingerprints to — rather than leaving a
+  merged head with no coverage behind it. Pure: nothing is written here.
+
+  `nil` when `head` is already covered (rule 1 answers next time without a
+  row), when `head_diff` does not fingerprint, or when no entry carries that
+  fingerprint (a PR with no coverage to derive from — the row would have no
+  parent, and `record/1` rejects that).
+  """
+  @spec mechanical_for_diff([Entry.t()], String.t() | nil, String.t() | nil, term(), atom()) ::
+          attrs() | nil
+  def mechanical_for_diff(coverage, head, base_ref, head_diff, source \\ @default_source)
+
+  def mechanical_for_diff(coverage, head, base_ref, head_diff, source)
+      when is_binary(head) and is_binary(head_diff) do
+    coverage = List.wrap(coverage)
+
+    with false <- covered_head?(coverage, head),
+         true <- present?(base_ref),
+         fingerprint when is_binary(fingerprint) <- NetDiff.fingerprint(head_diff),
+         %Entry{} = matched <- match_fingerprint(coverage, fingerprint) do
+      mechanical_row(matched, head, fingerprint, %{base_ref: base_ref, source: source})
+    else
+      _ -> nil
+    end
+  end
+
+  def mechanical_for_diff(_coverage, _head, _base_ref, _head_diff, _source), do: nil
+
+  @doc """
+  Every head `mr_ref`'s coverage rows name, **newest first**, deduplicated.
+
+  What the ReviewGate reads to scope a re-review to the delta since the last
+  covered commit (P7, §4.5): the head it is about to review is only a delta
+  when one of these is its ancestor. Never raises — a failed read answers `[]`,
+  which scopes nothing and leaves the gate reviewing the whole branch, the
+  conservative direction.
+  """
+  @spec covered_heads(String.t() | nil) :: [String.t()]
+  def covered_heads(mr_ref) do
+    mr_ref
+    |> for_mr()
+    |> Enum.sort_by(&{covered_at_key(&1.covered_at), &1.id}, :desc)
+    |> Enum.map(& &1.head_sha)
+    |> Enum.uniq()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
   defp covered_head?(coverage, head), do: Enum.any?(coverage, &(&1.head_sha == head))
 
   # Rule 2. Each conjunct is load-bearing: the local head must itself be
