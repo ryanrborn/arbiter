@@ -530,6 +530,42 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     end
   end
 
+  # bd-8ssxap: a task reopened by `task_verify failed` was redispatched with no
+  # mention of the recorded evidence — the worker had no way to know its prior
+  # (already-merged) attempt didn't actually fix the bug, and just re-submitted
+  # the same work.
+  describe "merged-fix-failed verification section (bd-8ssxap)" do
+    test "surfaces verification_evidence prominently when the prior verdict was :failed" do
+      prompt =
+        PromptBuilder.prompt_for_task(
+          task(%{
+            verification_outcome: :failed,
+            verification_evidence: "after restart, capture_source still reads headers"
+          }),
+          []
+        )
+
+      assert prompt =~ "after restart, capture_source still reads headers"
+      assert prompt =~ "MERGED FIX FAILED IN PRODUCTION"
+    end
+
+    test "omits the section when there is no recorded verdict" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      refute prompt =~ "MERGED FIX FAILED IN PRODUCTION"
+    end
+
+    test "omits the section when the recorded verdict was :observed (task closed cleanly)" do
+      prompt =
+        PromptBuilder.prompt_for_task(
+          task(%{verification_outcome: :observed, verification_evidence: "worked fine"}),
+          []
+        )
+
+      refute prompt =~ "MERGED FIX FAILED IN PRODUCTION"
+    end
+  end
+
   describe "adapter-aware async tools prompt (bd-937r5u)" do
     test "gemini worker prompt contains no Claude tools and instructs polling manage_task status" do
       work_prompt =

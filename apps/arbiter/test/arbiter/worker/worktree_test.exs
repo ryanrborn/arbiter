@@ -167,6 +167,118 @@ defmodule Arbiter.Worker.WorktreeTest do
     end
   end
 
+  # bd-8ssxap: `create/3` is deliberately idempotent-without-a-fetch when a
+  # worktree already exists on the requested branch — cheap re-provisioning
+  # for the common case. But a redispatch of a task whose prior PR already
+  # merged finds its OLD branch still sitting there with the same (now fully
+  # merged) commits, and `create/3` alone happily reuses it as-is: the worker
+  # starts on a branch with nothing new to add, and can produce an empty PR.
+  # `reset_if_merged/3` is the pre-check `Dispatch` runs before `create/3` to
+  # catch exactly that case.
+  describe "reset_if_merged/3" do
+    test "hard-resets a branch whose commits are already merged into the base",
+         %{repo: repo, remote: remote} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/already-merged", "main")
+      File.write!(Path.join(path, "fix.md"), "the fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "fix.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the fix"])
+      {_, 0} = System.cmd("git", ["-C", path, "push", "-q", "origin", "bugfix/already-merged"])
+
+      # Simulate the fix landing on main via a squash merge (a NEW commit on
+      # main, not a fast-forward — matches how the real MergeQueue lands PRs).
+      {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", "bugfix/already-merged"])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          repo,
+          "merge",
+          "-q",
+          "--no-ff",
+          "-m",
+          "merge the fix",
+          "origin/bugfix/already-merged"
+        ])
+
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      assert {:ok, :reset} = Worktree.reset_if_merged(repo, "bugfix/already-merged", "main")
+
+      # HEAD now matches origin/main (post-merge) — no commits ahead.
+      assert {:ok, false} = Worktree.has_commits_ahead?(path, "origin/main")
+
+      {:ok, remote_main_sha} = git_rev_parse(remote, "main")
+      {:ok, head_sha} = git_rev_parse(path, "HEAD")
+      assert head_sha == remote_main_sha
+    end
+
+    test "leaves a branch with unmerged commits alone", %{repo: repo} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/still-wip", "main")
+      File.write!(Path.join(path, "wip.md"), "wip\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "wip.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "wip"])
+
+      assert {:ok, :kept} = Worktree.reset_if_merged(repo, "bugfix/still-wip", "main")
+      assert File.exists?(Path.join(path, "wip.md"))
+      assert {:ok, true} = Worktree.has_commits_ahead?(path, "origin/main")
+    end
+
+    test "is a no-op when no worktree exists yet for the branch", %{repo: repo} do
+      assert {:ok, :kept} = Worktree.reset_if_merged(repo, "bugfix/never-created", "main")
+    end
+
+    # bd-8ssxap: `:await_verification` runs `CleanupWorktree` the moment a PR
+    # merges — well before a `task_verify failed` reopen can redispatch. So by
+    # the time a redispatch runs, there is no live worktree directory to reset
+    # at all: only the branch ref survives (its worktree was torn down, but
+    # `Worktree.cleanup/1` deliberately does not delete the branch itself).
+    # The directory-only check in the tests above would miss this case.
+    test "force-moves an already-merged branch ref to the base tip when its worktree is gone",
+         %{repo: repo, remote: remote} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/torn-down", "main")
+      File.write!(Path.join(path, "fix.md"), "the fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "fix.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the fix"])
+      {_, 0} = System.cmd("git", ["-C", path, "push", "-q", "origin", "bugfix/torn-down"])
+
+      {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", "bugfix/torn-down"])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          repo,
+          "merge",
+          "-q",
+          "--no-ff",
+          "-m",
+          "merge the fix",
+          "origin/bugfix/torn-down"
+        ])
+
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # The worktree directory is gone (as CleanupWorktree would leave it),
+      # but the branch ref survives — reset_if_merged/3 must still catch it.
+      :ok = Worktree.cleanup(path)
+      refute File.dir?(path)
+
+      assert {:ok, :reset} = Worktree.reset_if_merged(repo, "bugfix/torn-down", "main")
+
+      {:ok, remote_main_sha} = git_rev_parse(remote, "main")
+      {:ok, branch_sha} = git_rev_parse(repo, "bugfix/torn-down")
+      assert branch_sha == remote_main_sha
+    end
+  end
+
+  defp git_rev_parse(cd, ref) do
+    case System.cmd("git", ["-C", cd, "rev-parse", ref], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, String.trim(out)}
+      {out, _} -> {:error, out}
+    end
+  end
+
   # bd-9r1tta: dispatches that produce no branch (task-type audits, reviews)
   # used to run straight from the shared local checkout — whatever HEAD a human
   # contributor happened to leave it on, however many commits behind origin.

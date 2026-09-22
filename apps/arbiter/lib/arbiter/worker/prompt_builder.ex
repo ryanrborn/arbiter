@@ -259,7 +259,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
     Acceptance:
     #{task.acceptance || "(none)"}
-    #{prior_review_findings_section(task)}
+    #{verification_failure_section(task)}#{prior_review_findings_section(task)}
     Your current directory is a fresh git worktree on a per-task branch.
     #{isolation_section}
     #{process_kill_discipline_section()}
@@ -511,6 +511,37 @@ defmodule Arbiter.Worker.PromptBuilder do
   # and surface its findings here, so the re-dispatched worker sees them
   # immediately in its prompt without having to call task_show or gh pr view
   # first.
+  # bd-8ssxap: `task_verify failed` reopens the task but leaves `pr_ref` cleared
+  # and `verification_outcome`/`verification_evidence` in place (they only
+  # reset on the *next* `:await_verification`, see Issue's moduledoc) — so this
+  # stays true across the whole redispatch until a fresh merge is verified.
+  # Without this section the redispatched worker has no way to learn its prior
+  # (already-merged) attempt didn't actually fix the bug in production, and
+  # nothing here stopped it from just re-submitting the same, already-landed
+  # commits (the empty-PR incident this task fixes). Placed right after
+  # Acceptance — before any other context — so it can't be missed.
+  defp verification_failure_section(%Issue{
+         verification_outcome: :failed,
+         verification_evidence: evidence
+       })
+       when is_binary(evidence) and evidence != "" do
+    """
+
+    ⚠ MERGED FIX FAILED IN PRODUCTION — read this before doing anything else.
+
+    A previous attempt at this task was merged and closed, but a post-merge
+    verification check found it did NOT actually fix the problem. The merged
+    commits are NOT the fix — do not re-submit them as-is. New work is
+    required: understand why the merged change didn't work, then fix the
+    actual defect.
+
+    What was observed when verification failed:
+    #{evidence}
+    """
+  end
+
+  defp verification_failure_section(%Issue{}), do: ""
+
   defp prior_review_findings_section(%Issue{id: task_id}) when is_binary(task_id) do
     case latest_review_round_findings(task_id) do
       findings when is_binary(findings) and findings != "" ->

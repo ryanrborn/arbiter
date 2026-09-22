@@ -371,6 +371,95 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  If `branch_name` already exists — either as a live worktree, or merely as a
+  branch ref left behind after its worktree was torn down (`:await_verification`
+  runs `CleanupWorktree` the moment a PR merges, well before a `task_verify
+  failed` reopen can redispatch onto it) — and that branch's own tip is
+  already an ancestor of the freshly-fetched `origin/<base_branch>` — i.e. its
+  commits are already merged upstream, from a prior round of this task — hard
+  reset it to `origin/<base_branch>` so a redispatch starts clean instead of
+  reusing a branch with nothing left to contribute (bd-8ssxap).
+
+  Call this BEFORE `create/3`, which is otherwise idempotent-without-a-fetch
+  for an already-existing worktree, and whose "already exists" fallback
+  (`attach/2`) simply checks out whatever a pre-existing *branch ref* already
+  points to — either path would happily hand the stale, fully-merged branch
+  straight back to the worker, the empty-PR redispatch bug this function
+  exists to prevent.
+
+  Returns:
+
+    * `{:ok, :reset}` — the branch was already merged; hard-reset (in place,
+      if a worktree exists) or force-moved (if only the ref survived) to the
+      current `origin/<base_branch>` tip.
+    * `{:ok, :kept}` — `branch_name` does not exist yet at all (nothing to
+      reset; `create/3` will cut a fresh one), or it has commits that are NOT
+      yet on `origin/<base_branch>` (genuine unmerged work — a normal
+      changes-requested redispatch must keep it).
+    * `{:error, reason}` — `origin` is missing, the fetch failed, or the reset
+      itself failed. Callers should fail the dispatch rather than silently
+      reusing an un-checked branch.
+  """
+  @spec reset_if_merged(path(), String.t(), String.t()) ::
+          {:ok, :reset | :kept} | {:error, error_reason()}
+  def reset_if_merged(repo_path, branch_name, base_branch)
+      when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) do
+    path = worktree_path(branch_name)
+
+    with :ok <- ensure_origin_remote(repo_path),
+         :ok <- fetch_origin_branch(repo_path, base_branch),
+         :ok <- ensure_origin_ref(repo_path, base_branch) do
+      ref = "origin/" <> base_branch
+
+      cond do
+        File.dir?(path) ->
+          reset_worktree_if_merged(path, branch_name, ref)
+
+        branch_ref_exists?(repo_path, branch_name) ->
+          reset_branch_ref_if_merged(repo_path, branch_name, ref)
+
+        true ->
+          {:ok, :kept}
+      end
+    end
+  end
+
+  defp reset_worktree_if_merged(path, branch_name, ref) do
+    case run_git(["merge-base", "--is-ancestor", branch_name, ref], cd: path) do
+      {:ok, _} ->
+        with {:ok, _} <- run_git(["checkout", branch_name], cd: path),
+             {:ok, _} <- run_git(["reset", "--hard", ref], cd: path) do
+          {:ok, :reset}
+        end
+
+      {:error, _not_ancestor} ->
+        {:ok, :kept}
+    end
+  end
+
+  defp reset_branch_ref_if_merged(repo_path, branch_name, ref) do
+    case run_git(["merge-base", "--is-ancestor", branch_name, ref], cd: repo_path) do
+      {:ok, _} ->
+        case run_git(["branch", "-f", branch_name, ref], cd: repo_path) do
+          {:ok, _} -> {:ok, :reset}
+          {:error, _} = err -> err
+        end
+
+      {:error, _not_ancestor} ->
+        {:ok, :kept}
+    end
+  end
+
+  defp branch_ref_exists?(repo_path, branch_name) do
+    case run_git(["rev-parse", "--verify", "--quiet", "refs/heads/" <> branch_name],
+           cd: repo_path
+         ) do
+      {:ok, _} -> true
+      {:error, _} -> false
+    end
+  end
+
+  @doc """
   Attach a worktree at `<worktree_root>/<sanitized_branch_name>/` to an
   **existing** branch — no `-b`, no new branch creation.
 

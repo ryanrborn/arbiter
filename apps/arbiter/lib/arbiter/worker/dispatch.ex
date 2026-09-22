@@ -1341,27 +1341,39 @@ defmodule Arbiter.Worker.Dispatch do
             branch = BranchNamer.derive(task)
             target_branch = resolve_target_branch(task, opts)
 
-            case Worktree.create(repo_path, branch, target_branch) do
-              {:ok, path} ->
-                {:ok, path}
+            # bd-8ssxap: a redispatch can find its OLD per-task branch still on
+            # disk with commits that are already merged upstream (a prior round
+            # verified-failed post-merge, or was simply reopened after merge).
+            # `create/3` alone would reuse that branch as-is — the worker gets
+            # nothing new to add and can submit an empty PR. Reset it to current
+            # upstream first; a branch with genuine unmerged work is left alone.
+            case Worktree.reset_if_merged(repo_path, branch, target_branch) do
+              {:ok, _} ->
+                case Worktree.create(repo_path, branch, target_branch) do
+                  {:ok, path} ->
+                    {:ok, path}
 
-              {:error, {:git_failed, msg}} when is_binary(msg) ->
-                cond do
-                  String.contains?(msg, "already exists") ->
-                    # Pre-existing nesting 5 — baselined when bd-4x2yhq first
-                    # wired Credo up. Thresholds stay at the tool's own default so new
-                    # code is held to it; see the note in .credo.exs.
-                    # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-                    case Worktree.attach(repo_path, branch) do
-                      {:ok, path} -> {:ok, path}
-                      {:error, reason} -> {:error, {:worktree_failed, reason}}
+                  {:error, {:git_failed, msg}} when is_binary(msg) ->
+                    cond do
+                      String.contains?(msg, "already exists") ->
+                        # Pre-existing nesting 5 — baselined when bd-4x2yhq first
+                        # wired Credo up. Thresholds stay at the tool's own default so new
+                        # code is held to it; see the note in .credo.exs.
+                        # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+                        case Worktree.attach(repo_path, branch) do
+                          {:ok, path} -> {:ok, path}
+                          {:error, reason} -> {:error, {:worktree_failed, reason}}
+                        end
+
+                      String.contains?(msg, "different branch") ->
+                        recover_from_detached_worktree(repo_path, branch, target_branch, msg)
+
+                      true ->
+                        {:error, {:worktree_failed, {:git_failed, msg}}}
                     end
 
-                  String.contains?(msg, "different branch") ->
-                    recover_from_detached_worktree(repo_path, branch, target_branch, msg)
-
-                  true ->
-                    {:error, {:worktree_failed, {:git_failed, msg}}}
+                  {:error, reason} ->
+                    {:error, {:worktree_failed, reason}}
                 end
 
               {:error, reason} ->
