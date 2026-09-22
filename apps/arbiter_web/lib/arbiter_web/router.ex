@@ -234,6 +234,9 @@ defmodule ArbiterWeb.Router do
     # Anthropic quota snapshot (captured by the local proxy)
     get("/quota", QuotaController, :show)
 
+    # P3 shadow-mode rollout gate (bd-cy2mmu): backs `arb preflip-gate`
+    get("/coverage_shadow/preflip_gate", CoverageShadowController, :preflip_gate)
+
     # Workers (workflow runner)
     post("/workers/dispatch", WorkerController, :dispatch)
     post("/workers/review", WorkerController, :review)
