@@ -144,18 +144,53 @@ defmodule Arbiter.Usage.CodexUsageBackfillTest do
       assert reloaded.tokens_in == 42
     end
 
-    test "a row with no matching rollout is counted, not silently dropped" do
+    test "a row with no matching rollout is counted, not silently dropped, and gets an honest note" do
       dir = tmp_sessions_dir()
 
-      create_event!(%{occurred_at: DateTime.utc_now(), tokens_in: nil, tokens_out: nil})
+      ev =
+        create_event!(%{
+          occurred_at: DateTime.utc_now(),
+          tokens_in: nil,
+          tokens_out: nil,
+          cost_note:
+            "no structured usage in probe output (the CLI returned no parseable result object)"
+        })
 
       report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
       assert report.scanned == 1
       assert report.no_rollout_file == 1
       assert report.backfilled == 0
+
+      # bd-96mn8i round 5 finding 2: the disproven pre-fix note ("CLI
+      # reported nothing") must not survive an --apply pass on a row this
+      # backfill couldn't recover — it gets a note admitting the real cause
+      # (unrecoverable, not "nothing to recover").
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.tokens_in == nil
+      assert reloaded.cost_note =~ "unrecoverable"
+      refute reloaded.cost_note =~ "CLI returned no parseable result object"
     end
 
-    test "a matched rollout with no token_count line is counted separately" do
+    test "a dry-run leaves a row with no matching rollout untouched" do
+      dir = tmp_sessions_dir()
+
+      ev =
+        create_event!(%{
+          occurred_at: DateTime.utc_now(),
+          tokens_in: nil,
+          tokens_out: nil,
+          cost_note:
+            "no structured usage in probe output (the CLI returned no parseable result object)"
+        })
+
+      report = CodexUsageBackfill.backfill(sessions_dir: dir)
+      assert report.no_rollout_file == 1
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.cost_note =~ "CLI returned no parseable result object"
+    end
+
+    test "a matched rollout with no token_count line is counted separately and gets an honest note" do
       dir = tmp_sessions_dir()
       occurred_at = ~U[2026-09-17 00:04:36.349Z]
 
@@ -168,16 +203,24 @@ defmodule Arbiter.Usage.CodexUsageBackfillTest do
           ~s("timestamp":"2026-09-17T00:04:32.619Z"}}) <> "\n"
       )
 
-      create_event!(%{
-        occurred_at: occurred_at,
-        duration_ms: 4505,
-        tokens_in: nil,
-        tokens_out: nil
-      })
+      ev =
+        create_event!(%{
+          occurred_at: occurred_at,
+          duration_ms: 4505,
+          tokens_in: nil,
+          tokens_out: nil,
+          cost_note:
+            "no structured usage in probe output (the CLI returned no parseable result object)"
+        })
 
       report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
       assert report.no_token_count == 1
       assert report.backfilled == 0
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.tokens_in == nil
+      assert reloaded.cost_note =~ "unrecoverable"
+      refute reloaded.cost_note =~ "CLI returned no parseable result object"
     end
   end
 end

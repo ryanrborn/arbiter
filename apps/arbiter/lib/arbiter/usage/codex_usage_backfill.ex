@@ -24,10 +24,14 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
     * **Honest gaps.** A row whose rollout has been reaped, or whose rollout
       carries no `token_count` line at all (a probe that failed before the
       CLI ever reported usage), is *counted*, not silently skipped — see
-      `report/0`'s shape. Those rows are left exactly as they are: `nil`,
-      which is already the correct "unknown" representation
-      (`Arbiter.Usage.Probe.record/3` writes nil, never zero, for a row with
-      no usage payload).
+      `report/0`'s shape. Those rows keep `tokens_in: nil` (already the
+      correct "unknown" representation — `Arbiter.Usage.Probe.record/3`
+      writes nil, never zero, for a row with no usage payload), but under
+      `apply?: true` also get their `cost_note` rewritten from the pre-fix
+      `Probe.@no_usage_note` (which blames the CLI for reporting nothing —
+      disproven by this backfill's own existence) to `@no_rollout_note` /
+      `@no_token_count_note`, so every codex row converges on a note that is
+      actually true.
   """
 
   require Ash.Query
@@ -41,6 +45,21 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
                    "so the live probe wrote no tokens; recovered from the CLI's own session file. " <>
                    "Cost stays unavailable — codex plan usage is metered against the ChatGPT " <>
                    "subscription, not billed per call."
+
+  # bd-96mn8i round 5 finding 2: the two skip branches below used to leave
+  # the pre-fix `Probe.@no_usage_note` in place — a note that blames the CLI
+  # for reporting no result object, which this backfill's own existence
+  # disproves (the CLI DID report one; the live parser just didn't
+  # recognize it before this fix). Give each skip branch a note that says
+  # what's actually true instead, so every codex row converges on an honest
+  # cause rather than 1,182 of them keeping a disproven one forever.
+  @no_rollout_note "usage unrecoverable (bd-96mn8i backfill): pre-fix Probe.parse/1 bug lost " <>
+                     "this probe's tokens, and no on-disk rollout JSONL was found within the " <>
+                     "backfill's match window to recover them from — stays unknown, not zero."
+
+  @no_token_count_note "usage unrecoverable (bd-96mn8i backfill): pre-fix Probe.parse/1 bug lost " <>
+                         "this probe's tokens; the matching on-disk rollout JSONL was found but " <>
+                         "carries no token_count line either — stays unknown, not zero."
 
   @type report :: %{
           scanned: non_neg_integer(),
@@ -106,6 +125,7 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
            find_opts
          ) do
       :not_found ->
+        if apply?, do: note_only(row, @no_rollout_note)
         bump(acc, :no_rollout_file)
 
       {:ok, path} ->
@@ -116,6 +136,7 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
   defp handle_file(row, path, apply?, acc) do
     case CodexSessionFile.read_totals(path) do
       {:ok, %{tokens_in: nil}} ->
+        if apply?, do: note_only(row, @no_token_count_note)
         bump(acc, :no_token_count)
 
       {:ok, totals} ->
@@ -143,6 +164,24 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
       {:error, reason} ->
         Logger.debug("CodexUsageBackfill: update failed for #{row.id}: #{inspect(reason)}")
         :failed
+    end
+  end
+
+  # Re-notes a row this pass can't recover tokens for, without touching its
+  # (already-nil) token columns — `:no_rollout_file`/`:no_token_count` stay
+  # the report bucket either way, this only replaces the disproven pre-fix
+  # note with an honest one.
+  defp note_only(row, note) do
+    case Ash.update(row, %{cost_note: note}, action: :backfill_usage) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug(
+          "CodexUsageBackfill: note-only update failed for #{row.id}: #{inspect(reason)}"
+        )
+
+        :ok
     end
   end
 

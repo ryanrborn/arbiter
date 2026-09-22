@@ -94,7 +94,11 @@ defmodule Arbiter.Usage.Probe do
           optional(:raw) => map()
         }
 
-  @no_usage_note "no structured usage in probe output (CLI returned no `--output-format json` result object)"
+  # bd-96mn8i round 4 finding 2: used to hardcode Claude's own
+  # `--output-format json` flag name, so a codex/gemini row that genuinely
+  # reported nothing carried a note phrased as if it were a Claude-specific
+  # CLI-invocation mistake. Kept provider-agnostic.
+  @no_usage_note "no structured usage in probe output (the CLI returned no parseable result object)"
 
   # Mirrors `Arbiter.Agents.Gemini.Stream`'s note verbatim (bd-481sz7):
   # agy/Antigravity is a subscription metered by quota percentage, not a
