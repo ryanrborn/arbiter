@@ -162,6 +162,72 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
   # The sweep above is called directly; this drives the process the
   # application actually supervises — `init/1` -> a `:poll` call -> the same
   # sweep — so the GenServer wiring is proven, not just the function under it.
+  # bd-8vnuy3: the patrol reads the same live-inclusive figure the issue page
+  # shows, so a runaway pass pages *while it runs*, not after it ends.
+  describe "sweep/1 against live spend" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "patrol-live-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(root) end)
+      %{config_dir: Path.join(root, "claude"), cwd: Path.join(root, "wt")}
+    end
+
+    # A live claude worker whose in-flight session has spent `dollars` so far
+    # (claude-sonnet-5: 100_000 output tokens = $1.00).
+    defp live_pass!(ctx, task_id, dollars) do
+      now = DateTime.utc_now()
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(ctx.cwd)
+      dir = Path.join([ctx.config_dir, "projects", slug])
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "sid-#{task_id}.jsonl"),
+        Jason.encode!(%{
+          "type" => "assistant",
+          "timestamp" => now |> DateTime.add(-60, :second) |> DateTime.to_iso8601(),
+          "message" => %{
+            "id" => "m-#{task_id}",
+            "model" => "claude-sonnet-5",
+            "usage" => %{"input_tokens" => 0, "output_tokens" => round(dollars * 100_000)}
+          }
+        }) <> "\n"
+      )
+
+      %{
+        task_id: task_id,
+        agent_live: true,
+        started_at: DateTime.add(now, -600, :second),
+        status: :running,
+        current_step: :implement,
+        meta: %{config_dir: ctx.config_dir, cwd: ctx.cwd, provider: "claude"}
+      }
+    end
+
+    test "a pass that is still running pages once it is past p90, and only once",
+         %{ws: ws} = ctx do
+      task = open_issue!(ws, %{difficulty: 2, issue_type: :feature, title: "runaway pass"})
+      # Settled: $4 — under p75. The pass in flight has burned $30 more.
+      event!(task.id, ws, %{cost_usd: 4.0})
+      workers = [live_pass!(ctx, task.id, 30.0)]
+
+      assert :ok = BudgetPatrol.sweep(now: @now, workers: workers)
+
+      assert [escalation] = escalations(ws)
+      assert escalation.body =~ "$34.00"
+      assert escalation.body =~ "≈$30.00 of that is an in-flight estimate"
+
+      assert :ok = BudgetPatrol.sweep(now: @now, workers: workers)
+      assert [_only_one] = all_escalations(ws)
+    end
+
+    test "without the live pass the same task is not over", %{ws: ws} do
+      task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      event!(task.id, ws, %{cost_usd: 4.0})
+
+      assert :ok = BudgetPatrol.sweep(now: @now, workers: [])
+      assert [] = escalations(ws)
+    end
+  end
+
   describe "the supervised ticker" do
     test "a poll on the running process escalates the same way", %{ws: ws} do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})

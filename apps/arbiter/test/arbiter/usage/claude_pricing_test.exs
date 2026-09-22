@@ -24,6 +24,46 @@ defmodule Arbiter.Usage.ClaudePricingTest do
       assert_in_delta ClaudePricing.cost_usd("claude-opus-5", buckets), 10.75, 0.0000001
     end
 
+    # bd-8vnuy3: Claude Code writes its prompt cache with the 1-hour TTL
+    # (`usage.cache_creation.ephemeral_1h_input_tokens` on every worker and
+    # coordinator turn), which bills at 2x input, not the 5-minute 1.25x. Pricing
+    # every write at 1.25x is what put the file estimate 12-15% below the CLI's
+    # own `costUSD` for the same sessions.
+    test "a 1-hour-TTL cache write prices at 2x input; the rest of the writes stay 1.25x" do
+      # claude-sonnet-5: $2 input.
+      #   300_000 cw of which 200_000 are 1h:
+      #     200_000 * 4.0 / 1M = 0.8   (1h: 2x input)
+      #     100_000 * 2.5 / 1M = 0.25  (5m: 1.25x input)
+      buckets = %{cache_creation_tokens: 300_000, cache_creation_1h_tokens: 200_000}
+
+      assert_in_delta ClaudePricing.cost_usd("claude-sonnet-5", buckets), 1.05, 0.0000001
+    end
+
+    test "a 1h count larger than the write total is clamped to it, never billed twice" do
+      buckets = %{cache_creation_tokens: 100_000, cache_creation_1h_tokens: 900_000}
+
+      # All 100_000 at the 1h rate: 100_000 * 4.0 / 1M.
+      assert_in_delta ClaudePricing.cost_usd("claude-sonnet-5", buckets), 0.4, 0.0000001
+    end
+
+    # Fitted against the CLI's own `modelUsage["claude-opus-5-5"].costUSD` on
+    # the live ledger (14 sessions, exact to the cent): $4 in, $20 out, $8 cache
+    # write (the 1h tier, 2x), $0.20 cache read. Longest-prefix matching used to
+    # hand it `claude-opus-5`'s $5/$25/$0.50, overstating a live figure by
+    # 1.5-1.9x — enough to page `budget_exceeded` on a pass that is not over.
+    test "claude-opus-5-5 has its own rates rather than inheriting claude-opus-5's" do
+      # Real result event, session 425e331f: CLI costUSD 1.0275132.
+      buckets = %{
+        tokens_in: 36,
+        tokens_out: 8909,
+        cache_creation_tokens: 79_417,
+        cache_creation_1h_tokens: 79_417,
+        cache_read_tokens: 1_069_266
+      }
+
+      assert_in_delta ClaudePricing.cost_usd("claude-opus-5-5", buckets), 1.0275132, 0.0000001
+    end
+
     test "a cheaper model prices the same buckets lower" do
       # claude-haiku-4-5: $1 / $5 per MTok.
       buckets = %{

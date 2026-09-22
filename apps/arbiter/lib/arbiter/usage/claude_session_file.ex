@@ -19,6 +19,14 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   that reader. It is deliberately **Claude-Code-specific** — no multi-provider
   `Provider` behaviour until a second provider actually needs one (bd-au3xrq).
 
+  ## Live reads (bd-8vnuy3)
+
+  The CLI appends to this file *while the session runs*, so it is also the
+  only source of a running pass's spend: `Arbiter.Usage.LiveSpend` reads it
+  for in-flight sessions and adds the result to the settled ledger. That is
+  why `read_totals/2` counts `malformed_lines` — a live reader can catch a
+  line half-written, and must be able to tell that from a clean read.
+
   ## On-disk layout (confirmed against Claude Code 2.1.219)
 
   The CLI writes one file per session at:
@@ -153,6 +161,18 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   genuine absence, never a fabricated zero. `cost_note_for/1` turns that into
   the note a ledger row should carry.
 
+  `cache_creation_1h_tokens` is the 1-hour-TTL *subset* of
+  `cache_creation_tokens` (read off each turn's `usage.cache_creation`
+  breakdown; a turn without one counts as a 5-minute write). It bills at 2×
+  input rather than 1.25×, and every Claude Code worker and coordinator turn
+  observed writes at the 1h TTL (bd-8vnuy3).
+
+  `malformed_lines` counts non-blank lines that did not decode to a JSON
+  object — a torn tail from a crash, or a line still being written. They are
+  skipped either way; the count is how a caller that needs a *complete* read
+  (the live-spend reader, `Arbiter.Usage.LiveSpend`) tells one from a clean
+  file.
+
   `by_day` splits the counted turns into UTC-day buckets, each with its own
   token buckets, message count, `last_at` (the newest turn timestamp in that
   day) and its apportioned share of `cost_usd`. It is `%{}` for a file whose
@@ -162,9 +182,11 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
           tokens_in: non_neg_integer(),
           tokens_out: non_neg_integer(),
           cache_creation_tokens: non_neg_integer(),
+          cache_creation_1h_tokens: non_neg_integer(),
           cache_read_tokens: non_neg_integer(),
           message_count: non_neg_integer(),
           skipped_before_since: non_neg_integer(),
+          malformed_lines: non_neg_integer(),
           model: String.t() | nil,
           cost_usd: float() | nil,
           cost_source: :cost_state | :estimated | nil,
@@ -182,6 +204,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
           tokens_in: non_neg_integer(),
           tokens_out: non_neg_integer(),
           cache_creation_tokens: non_neg_integer(),
+          cache_creation_1h_tokens: non_neg_integer(),
           cache_read_tokens: non_neg_integer(),
           message_count: non_neg_integer(),
           cost_usd: float() | nil,
@@ -409,9 +432,11 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       tokens_in: 0,
       tokens_out: 0,
       cache_creation_tokens: 0,
+      cache_creation_1h_tokens: 0,
       cache_read_tokens: 0,
       message_count: 0,
       skipped_before_since: 0,
+      malformed_lines: 0,
       model: nil,
       cost_usd: nil,
       cost_source: nil,
@@ -436,10 +461,13 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
           acc
         end
 
-      _ ->
-        acc
+      :error ->
+        if String.trim(line) == "", do: acc, else: count_malformed(acc)
     end
   end
+
+  defp count_malformed(acc),
+    do: %{acc | totals: Map.update!(acc.totals, :malformed_lines, &(&1 + 1))}
 
   defp remember_ts(acc, event) do
     case parse_timestamp(Map.get(event, "timestamp")) do
@@ -548,11 +576,19 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
         tokens_out: totals.tokens_out + int(usage["output_tokens"]),
         cache_creation_tokens:
           totals.cache_creation_tokens + int(usage["cache_creation_input_tokens"]),
+        cache_creation_1h_tokens: totals.cache_creation_1h_tokens + long_ttl_writes(usage),
         cache_read_tokens: totals.cache_read_tokens + int(usage["cache_read_input_tokens"]),
         message_count: totals.message_count + 1
     }
     |> maybe_model(msg)
   end
+
+  # The 1-hour-TTL share of this turn's cache writes. Only a turn that says so
+  # counts: no breakdown reads as all 5-minute, the cheaper assumption.
+  defp long_ttl_writes(%{"cache_creation" => %{"ephemeral_1h_input_tokens" => n}}),
+    do: int(n)
+
+  defp long_ttl_writes(_usage), do: 0
 
   # `<synthetic>` is Claude Code's placeholder on locally-generated assistant
   # messages (interrupts, error stand-ins) — it names no model, and letting it
@@ -659,7 +695,13 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       totals
     else
       buckets =
-        Map.take(totals, [:tokens_in, :tokens_out, :cache_creation_tokens, :cache_read_tokens])
+        Map.take(totals, [
+          :tokens_in,
+          :tokens_out,
+          :cache_creation_tokens,
+          :cache_creation_1h_tokens,
+          :cache_read_tokens
+        ])
 
       case ClaudePricing.cost_usd(totals.model, buckets) do
         nil -> totals
@@ -686,6 +728,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
         tokens_out: bucket.tokens_out + int(usage["output_tokens"]),
         cache_creation_tokens:
           bucket.cache_creation_tokens + int(usage["cache_creation_input_tokens"]),
+        cache_creation_1h_tokens: bucket.cache_creation_1h_tokens + long_ttl_writes(usage),
         cache_read_tokens: bucket.cache_read_tokens + int(usage["cache_read_input_tokens"]),
         message_count: bucket.message_count + 1,
         last_at: later(bucket.last_at, at)
@@ -697,6 +740,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       tokens_in: 0,
       tokens_out: 0,
       cache_creation_tokens: 0,
+      cache_creation_1h_tokens: 0,
       cache_read_tokens: 0,
       message_count: 0,
       cost_usd: nil,
