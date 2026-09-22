@@ -19,6 +19,14 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   that reader. It is deliberately **Claude-Code-specific** — no multi-provider
   `Provider` behaviour until a second provider actually needs one (bd-au3xrq).
 
+  ## Live reads (bd-8vnuy3)
+
+  The CLI appends to this file *while the session runs*, so it is also the
+  only source of a running pass's spend: `Arbiter.Usage.LiveSpend` reads it
+  for in-flight sessions and adds the result to the settled ledger. That is
+  why `read_totals/2` counts `malformed_lines` — a live reader can catch a
+  line half-written, and must be able to tell that from a clean read.
+
   ## On-disk layout (confirmed against Claude Code 2.1.219)
 
   The CLI writes one file per session at:
