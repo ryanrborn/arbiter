@@ -267,7 +267,7 @@ defmodule Arbiter.Worker do
   # explicit reason so the row reads as "we looked and found nothing" rather
   # than looking like an unhandled gap.
   @no_terminal_event_note "no usage captured: the session ended before any " <>
-                             "terminal usage event was observed on its stream"
+                            "terminal usage event was observed on its stream"
 
   # bd-96mn8i (round 3 fix): a terminal event CAN arrive and still carry no
   # tokens — a codex `turn.failed`, an upstream gemini error `result`, or a
@@ -281,7 +281,7 @@ defmodule Arbiter.Worker do
   # event was observed, it just reported a failure with no usage. Distinguish
   # the two so the note never lies about which case produced the nil.
   @terminal_event_no_usage_note "no usage captured: a terminal event was observed on the " <>
-                                   "stream but reported no usage (status: "
+                                  "stream but reported no usage (status: "
 
   # ---- public API ---------------------------------------------------------
 
