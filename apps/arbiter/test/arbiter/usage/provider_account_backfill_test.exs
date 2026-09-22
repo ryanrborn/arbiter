@@ -46,6 +46,29 @@ defmodule Arbiter.Usage.ProviderAccountBackfillTest do
     assert Ash.get!(Event, ev.id).provider_account_id == account.id
   end
 
+  # bd-al9qqe review round 1, finding 3: `usage_events.provider` stores the
+  # agent-type alias a spawn ran under ("gemini"), not the canonical
+  # `provider_accounts.provider` code ("gemini_cli" / "antigravity") the
+  # workspace is actually linked under. A raw equality join leaves every
+  # historical Gemini row unresolved; the backfill must match the alias.
+  test "backfills an aliased provider row ('gemini') against either concrete Gemini account link" do
+    ws_cli = workspace!("pab-gemini-alias-cli")
+    cli_account = account!(:gemini_cli, "pab-gemini-cli")
+    link!(ws_cli, :gemini_cli, cli_account)
+
+    ws_agy = workspace!("pab-gemini-alias-agy")
+    agy_account = account!(:antigravity, "pab-gemini-agy")
+    link!(ws_agy, :antigravity, agy_account)
+
+    cli_ev = insert_event!(%{workspace_id: ws_cli.id, provider: "gemini"})
+    agy_ev = insert_event!(%{workspace_id: ws_agy.id, provider: "gemini"})
+
+    ProviderAccountBackfill.run()
+
+    assert Ash.get!(Event, cli_ev.id).provider_account_id == cli_account.id
+    assert Ash.get!(Event, agy_ev.id).provider_account_id == agy_account.id
+  end
+
   test "does not cross providers — a workspace's codex account never backfills a claude row" do
     ws = workspace!("pab-b")
     codex = account!(:codex, "pab-codex")

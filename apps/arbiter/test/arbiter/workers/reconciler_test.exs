@@ -4,6 +4,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
   # WorkerRunPersistenceTest.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -205,6 +206,43 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert ev.provider == "claude"
     assert ev.session_id == session_id
     assert ev.step == :work
+  end
+
+  # bd-al9qqe review round 1, finding 1: this is the crash-recovery twin of
+  # `Worker.record_usage_event/3` — a worker run whose live session exit was
+  # missed must not land a ledger row with real dollars and a NULL account.
+  test "the backfilled Usage.Event carries the workspace's linked provider_account_id" do
+    {:ok, ws} = Ash.create(Workspace, %{name: "recon-account-#{System.unique_integer([:positive])}"})
+    account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "recon-account"})
+
+    Ash.create!(WorkspaceProviderAccount, %{
+      workspace_id: ws.id,
+      provider: :claude,
+      provider_account_id: account.id
+    })
+
+    task_id = "bd-crash-account-#{System.unique_integer([:positive])}"
+    session_id = "crash-account-sess-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("recon-account-cwd")
+    config_dir = tmp_dir!("recon-account-cfg")
+    write_session_jsonl!(config_dir, cwd, session_id)
+
+    run =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: ws.id,
+        status: :running,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        output_lines: []
+      })
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert [ev] = usage_events_for(run.id)
+    assert ev.provider_account_id == account.id
   end
 
   # bd-3j4ch4: the backfilled row has to say what kind of pass it was, exactly

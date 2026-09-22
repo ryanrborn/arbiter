@@ -405,6 +405,35 @@ defmodule Arbiter.Usage.ProbeTest do
       assert ev.provider_account_id == account.id
     end
 
+    # bd-al9qqe review round 1, finding 3: `provider: "gemini"` is the
+    # agent-type alias (`Arbiter.Agents.Gemini.provider/0`), not a canonical
+    # `provider_accounts.provider` code (`:gemini_cli` / `:antigravity`).
+    # `Resolver.provider_atom/1` must normalize the alias — otherwise a
+    # Gemini preflight/probe (exactly what `CredentialWatchdog` issues in the
+    # live fleet) silently fails the seam this test class checks.
+    test "a preflight row for the 'gemini' alias still carries a provider_account_id" do
+      # `Arbiter.Quota.provider_code/1` resolves "gemini" to whichever
+      # concrete CLI is on this host's PATH (`:gemini_cli` or `:antigravity`)
+      # — mint the account under that same code so the test is not tied to a
+      # specific host's installed executables.
+      code = Arbiter.Quota.provider_code("gemini") |> String.to_existing_atom()
+      account = Ash.create!(ProviderAccount, %{provider: code, slug: "probe-seam-gemini"})
+      {usage, _rest} = Probe.parse([@result_json])
+
+      assert :ok = Probe.record(:preflight, usage, provider: "gemini", exit_status: 0)
+
+      [ev] =
+        Event
+        |> Ash.Query.filter(
+          source == :preflight and provider == "gemini" and is_nil(workspace_id)
+        )
+        |> Ash.read!()
+
+      assert ev.workspace_id == nil
+      assert ev.task_id == nil
+      assert ev.provider_account_id == account.id
+    end
+
     # `source: probe` is the historical / RefreshProbe shape (bd-atyrrq
     # deleted its live writer), but `record/3` treats it identically — the
     # seam is about the shape of the row, not which atom names it.

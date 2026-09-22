@@ -64,7 +64,10 @@ defmodule Arbiter.Accounts.Resolver do
   def provider_atom(provider) when is_atom(provider) and not is_nil(provider),
     do: provider_atom(Atom.to_string(provider))
 
-  def provider_atom(provider) when is_binary(provider), do: Map.get(@providers, provider)
+  def provider_atom(provider) when is_binary(provider) do
+    provider |> Arbiter.Quota.provider_code() |> then(&Map.get(@providers, &1))
+  end
+
   def provider_atom(_), do: nil
 
   @doc """
@@ -192,6 +195,8 @@ defmodule Arbiter.Accounts.Resolver do
     else
       _ -> nil
     end
+  rescue
+    _ -> nil
   end
 
   @doc """
@@ -208,6 +213,8 @@ defmodule Arbiter.Accounts.Resolver do
       [%ProviderCredential{id: id}] -> id
       _ -> nil
     end
+  rescue
+    _ -> nil
   end
 
   def credential_id(_), do: nil

@@ -28,6 +28,14 @@ defmodule Arbiter.Usage.ProviderAccountBackfill do
   Plain SQL rather than Ash/Ecto.Query, for the same reason as
   `Arbiter.Usage.WorkspaceBackfill`: this runs from inside an
   `Ecto.Migration`, where only the repo is guaranteed started.
+
+  `usage_events.provider` stores the agent-type alias a spawn ran under
+  (`"anthropic"`, `"openai"`, `"gemini"` — `Arbiter.Quota.provider_code/1`),
+  not always the canonical `provider_accounts.provider` code
+  (`"claude"`, `"codex"`, `"gemini_cli"` / `"antigravity"`). The join below
+  matches both the literal code and the known aliases so historical alias
+  rows are not left unresolved; a `"gemini"` row matches either concrete
+  Gemini surface, since the alias does not distinguish which CLI ran it.
   """
 
   alias Arbiter.Repo
@@ -51,7 +59,12 @@ defmodule Arbiter.Usage.ProviderAccountBackfill do
           SELECT wpa.provider_account_id
           FROM workspace_provider_accounts wpa
           WHERE wpa.workspace_id = usage_events.workspace_id
-            AND wpa.provider = usage_events.provider
+            AND (
+              wpa.provider = usage_events.provider
+              OR (usage_events.provider = 'anthropic' AND wpa.provider = 'claude')
+              OR (usage_events.provider = 'openai' AND wpa.provider = 'codex')
+              OR (usage_events.provider = 'gemini' AND wpa.provider IN ('gemini_cli', 'antigravity'))
+            )
         )
         WHERE provider_account_id IS NULL
           AND workspace_id IS NOT NULL
@@ -59,7 +72,12 @@ defmodule Arbiter.Usage.ProviderAccountBackfill do
           AND EXISTS (
             SELECT 1 FROM workspace_provider_accounts wpa
             WHERE wpa.workspace_id = usage_events.workspace_id
-              AND wpa.provider = usage_events.provider
+              AND (
+                wpa.provider = usage_events.provider
+                OR (usage_events.provider = 'anthropic' AND wpa.provider = 'claude')
+                OR (usage_events.provider = 'openai' AND wpa.provider = 'codex')
+                OR (usage_events.provider = 'gemini' AND wpa.provider IN ('gemini_cli', 'antigravity'))
+              )
           )
         """,
         []
