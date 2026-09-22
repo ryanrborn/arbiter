@@ -486,13 +486,21 @@ defmodule Arbiter.Agents.Gemini.Stream do
   def agy_tool_params(_name, params) when is_map(params), do: params
   def agy_tool_params(_name, _params), do: %{}
 
-  # The denial/failure detail on an ERROR-state tool step. The exact key agy
-  # uses for this was never captured live (like the ERROR state itself,
-  # bd-25ivqe) — `tool_info.error` mirrors the shape its DONE sibling uses for
-  # `tool_info.output`, so it's tried first; falling back to `output` covers
-  # a build that reuses the same key for both outcomes.
-  defp tool_step_error_reason(step) do
-    get_in(step, ["tool_info", "error"]) || get_in(step, ["tool_info", "output"])
+  # The denial/failure detail on an ERROR-state tool step, as plain text.
+  # `tool_info.error` is an object shaped `%{"type" => ..., "message" => ...}`
+  # on the real installed agy (1.2.8) — confirmed live while re-verifying
+  # bd-25ivqe's post-merge failure — not the bare string this code originally
+  # assumed from an uncaptured guess. `error_message/1` unwraps that shape;
+  # a bare string (an older/other build, or a synthetic fixture) passes
+  # through unchanged. Falls back to `output` for a build that reuses the
+  # same key for both outcomes.
+  @spec tool_step_error_reason(map()) :: String.t() | nil
+  def tool_step_error_reason(step) do
+    case get_in(step, ["tool_info", "error"]) do
+      nil -> get_in(step, ["tool_info", "output"])
+      error when is_binary(error) -> error
+      error -> error_message(error) || inspect(error)
+    end
   end
 
   @doc """

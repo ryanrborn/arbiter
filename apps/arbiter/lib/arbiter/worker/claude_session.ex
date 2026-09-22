@@ -835,7 +835,7 @@ defmodule Arbiter.Worker.ClaudeSession do
        }) do
     params = get_in(step, ["tool_info", "parameters"])
     input = Arbiter.Agents.Gemini.Stream.agy_tool_params(step["tool_name"], params)
-    error = get_in(step, ["tool_info", "error"]) || get_in(step, ["tool_info", "output"])
+    error = Arbiter.Agents.Gemini.Stream.tool_step_error_reason(step)
 
     write_step(session, %{
       run_id: Map.get(session, :run_id),
@@ -877,10 +877,16 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   # bd-25ivqe finding 2: an agy `ERROR` tool step isn't always a permission
   # denial — it's also how agy reports an ordinary tool failure (a malformed
-  # call, a missing path). Only agy's own denial signature, verbatim on
-  # `tool_info.error`, justifies attributing the run's eventual notes-gate
-  # trip to a strict-policy bootstrap failure instead of the generic
-  # `:blank_notes_at_completion`.
+  # call, a missing path). Only agy's own denial signature justifies
+  # attributing the run's eventual notes-gate trip to a strict-policy
+  # bootstrap failure instead of the generic `:blank_notes_at_completion`.
+  # `error` here has already been unwrapped to plain text by
+  # `Gemini.Stream.tool_step_error_reason/1` — on the real installed agy
+  # (1.2.8) `tool_info.error` is an object (`%{"type" => ..., "message" =>
+  # ...}`), not the bare string this predicate originally assumed; confirmed
+  # live re-verifying this ticket's post-merge failure that the unwrapped
+  # message carries this exact substring for both the `:strict`-allowlist
+  # auto-denial (the AC4 scenario) and an explicit `permissions.deny` hit.
   defp permission_denial?(error) when is_binary(error),
     do: String.contains?(error, "permission check failed")
 

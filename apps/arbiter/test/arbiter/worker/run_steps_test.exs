@@ -242,7 +242,17 @@ defmodule Arbiter.Worker.RunStepsTest do
     assert steps_for(task_id) == []
   end
 
+  # `error` defaults to the object shape (`%{"type" => ..., "message" => ...}`)
+  # the real installed agy (1.2.8) actually sends — confirmed live
+  # re-verifying bd-25ivqe's post-merge failure — not the bare string an
+  # earlier version of this helper guessed before the ERROR state was ever
+  # captured live.
   defp agy_tool_error_event(step_index, opts \\ []) do
+    default_error = %{
+      "type" => "TOOL_ERROR",
+      "message" => "permission check failed for unsandboxed \"arb inbox\""
+    }
+
     %{
       "event" => "step_update",
       "step_update" => %{
@@ -256,8 +266,7 @@ defmodule Arbiter.Worker.RunStepsTest do
           "parameters" => %{
             "CommandLine" => Keyword.get(opts, :command, "arb inbox bd-ci0y74")
           },
-          "error" =>
-            Keyword.get(opts, :error, "permission check failed for unsandboxed \"arb inbox\"")
+          "error" => Keyword.get(opts, :error, default_error)
         }
       }
     }
@@ -299,7 +308,7 @@ defmodule Arbiter.Worker.RunStepsTest do
       |> feed([
         agy_tool_error_event(3,
           command: "rm -rf ./tmp",
-          error: "no such file or directory"
+          error: %{"type" => "TOOL_ERROR", "message" => "no such file or directory"}
         )
       ])
 
