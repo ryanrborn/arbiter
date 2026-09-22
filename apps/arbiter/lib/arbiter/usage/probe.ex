@@ -75,6 +75,7 @@ defmodule Arbiter.Usage.Probe do
 
   require Logger
 
+  alias Arbiter.Accounts.Resolver
   alias Arbiter.Agents.Codex.Stream, as: CodexStream
   alias Arbiter.Agents.Gemini.Stream, as: GeminiStream
   alias Arbiter.Usage.Event
@@ -260,17 +261,22 @@ defmodule Arbiter.Usage.Probe do
   @spec record(atom(), usage() | nil, keyword()) :: :ok | :error
   def record(source, usage, opts \\ []) when is_atom(source) and is_list(opts) do
     usage = usage || %{}
+    workspace_id = Keyword.get(opts, :workspace_id)
+    provider = Keyword.get(opts, :provider)
+    account_id = probe_account_id(workspace_id, provider)
 
     attrs = %{
       task_id: Keyword.get(opts, :task_id),
       source: source,
-      workspace_id: Keyword.get(opts, :workspace_id),
+      workspace_id: workspace_id,
       repo: Keyword.get(opts, :repo),
+      provider_account_id: account_id,
+      provider_credential_id: Resolver.credential_id(account_id),
       # Probes are not authoring/reviewing/implementing work — `:other` is the
       # step enum's existing escape hatch for exactly this.
       step: :other,
       model: Map.get(usage, :model) || Keyword.get(opts, :model),
-      provider: Keyword.get(opts, :provider),
+      provider: provider,
       tokens_in: Map.get(usage, :tokens_in),
       tokens_out: Map.get(usage, :tokens_out),
       cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
@@ -300,6 +306,19 @@ defmodule Arbiter.Usage.Probe do
   end
 
   # ---- internals ---------------------------------------------------------
+
+  # P9 (§8): a probe is issued *as* a credential, so it always has an account
+  # — even the fleet-wide `CredentialWatchdog` probe, which carries no
+  # `workspace_id` at all (`Preflight.check(adapter, [])`). Try the workspace
+  # hop first (an operator may still pass `usage_workspace_id`); fall back to
+  # `Resolver.account_id_for_probe/1`'s "sole enabled account, else the
+  # shared default" rule for the common workspace-less case.
+  defp probe_account_id(workspace_id, provider) do
+    case Resolver.account_id(workspace_id, provider) do
+      id when is_binary(id) -> id
+      nil -> Resolver.account_id_for_probe(provider)
+    end
+  end
 
   defp cost_note(usage) do
     cond do

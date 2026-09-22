@@ -237,6 +237,17 @@ defmodule Arbiter.Worker.ReviewGate do
   @commit_gate_uncommitted_marker "ReviewGate fix round: implementer left uncommitted work"
   @commit_gate_no_changes_marker "ReviewGate fix round: fix round produced no changes"
 
+  # bd-cb7wpq: the literal line an implementer prints (see `revise_prompt/2`)
+  # to declare a finding resolved through something other than a file change
+  # on this branch — a PR title/description edit, a label, a comment reply.
+  # HEAD not moving is otherwise indistinguishable from a worker that did
+  # nothing; this marker is the one thing `commit_gate_outcome/3` trusts to
+  # tell the two apart, and even then only for ONE round in a row (see
+  # `non_file_fix_used`) — a false claim is still caught because the very next
+  # reviewer round re-checks the live PR for real, exactly as it would any
+  # other REQUEST_CHANGES disposition.
+  @non_file_fix_marker "NO-FILE-CHANGE:"
+
   # StopReason categories that mean the reviewer/implementer subprocess died for
   # an infrastructure reason (expired credentials, exhausted credits/quota, rate
   # limiting, a gateway blip, an exec failure, or an unrecognized stream schema)
@@ -285,6 +296,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | :verdict_guard_exhausted
           | :no_changes_after_approval_gap
           | :commit_gate_no_changes
+          | :commit_gate_no_changes_after_non_file_fix
           | :commit_gate_uncommitted
           | :empty_diff
           | :head_not_pushed
@@ -773,6 +785,14 @@ defmodule Arbiter.Worker.ReviewGate do
       # round genuinely advances (finish_revise/1's dispatch_next_review/1) so
       # each new round gets its own one-shot nudge budget.
       commit_nudge_used: false,
+      # bd-cb7wpq: whether the PRIOR revise round already advanced on a
+      # no-commit resolution (see `non_file_fix_declared?/1`) rather than a
+      # real commit. A single such round is honored — the next reviewer
+      # re-checks the live PR for real, so a false claim is still caught —
+      # but two in a row with nothing to show for either is indistinguishable
+      # from an idle worker and escalates. Reset to false the moment a round
+      # produces a genuine commit (`finish_revise/1`'s `:advanced` branch).
+      non_file_fix_used: false,
       # bd-bq8c8a: the sha this round is re-reviewing BECAUSE a third party
       # pushed it, not because an implementer addressed anything
       # (`restart_on_remote_head/3`). nil on every ordinary round. Read only by
@@ -1717,7 +1737,19 @@ defmodule Arbiter.Worker.ReviewGate do
     # left real work uncommitted" (resume it once, then escalate if it's still
     # dirty) from "nothing changed at all" (escalate immediately; there is no
     # new diff to re-review).
-    {outcome, commit_gate} = commit_gate_outcome(state, new_head_sha)
+    {outcome, commit_gate} = commit_gate_outcome(state, new_head_sha, response)
+
+    # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
+    # commits" system entry (HEAD didn't move). On the path that advances to a
+    # real re-review that entry is wrong AND actively harmful — the implementer
+    # did not rebut anything, it declared the finding(s) resolved through a
+    # non-file channel, and the whole safety case for trusting that claim is
+    # that the next reviewer re-checks the live PR for real. Swap in an entry
+    # that says so and tells the reviewer to verify before accepting it.
+    state =
+      if outcome == :advance_non_file_fix,
+        do: replace_non_file_fix_thread_entry(state, response),
+        else: state
 
     record_round(state, :impl, nil, response, converged: false, commit_gate: commit_gate)
     state = record_thread(state, :implementer, "Round #{state.round} response", response)
@@ -1727,7 +1759,20 @@ defmodule Arbiter.Worker.ReviewGate do
 
     case outcome do
       :advanced ->
-        dispatch_next_review(%{state | head_sha: new_head_sha, commit_nudge_used: false})
+        dispatch_next_review(%{
+          state
+          | head_sha: new_head_sha,
+            commit_nudge_used: false,
+            non_file_fix_used: false
+        })
+
+      :advance_non_file_fix ->
+        dispatch_next_review(%{
+          state
+          | head_sha: new_head_sha,
+            commit_nudge_used: false,
+            non_file_fix_used: true
+        })
 
       :reprompt ->
         nudge_uncommitted_implementer(%{state | head_sha: new_head_sha})
@@ -1737,6 +1782,10 @@ defmodule Arbiter.Worker.ReviewGate do
 
       :escalate_no_changes ->
         {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
+
+      :escalate_no_changes_after_non_file_fix ->
+        {:done,
+         escalate_commit_gate(%{state | head_sha: new_head_sha}, :no_changes_after_non_file_fix)}
     end
   end
 
@@ -1755,29 +1804,100 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp escalate_no_changes(state), do: escalate_commit_gate(state, :no_changes)
 
+  defp approval_gap_pending?(%{approval_gap_pending: %{gap: gap}}), do: not is_nil(gap)
+  defp approval_gap_pending?(_state), do: false
+
   # Decide what the commit gate does with this revise round, and what to
   # record on its `Arbiter.ReviewGate.Round` row. HEAD advancing (or being
   # unknowable — no worktree/git) always proceeds exactly as before this
   # fix; only an UNCHANGED head is gated. `state.head_sha` here is still the
   # SHA from BEFORE this round (note_head_change/1 returns it separately).
-  defp commit_gate_outcome(%{head_sha: old_sha}, new_sha)
+  defp commit_gate_outcome(%{head_sha: old_sha}, new_sha, _response)
        when is_nil(old_sha) or is_nil(new_sha) or old_sha != new_sha do
     {:advanced, nil}
   end
 
-  defp commit_gate_outcome(%{worktree_path: wt} = state, _new_sha) when is_binary(wt) do
+  defp commit_gate_outcome(%{worktree_path: wt} = state, _new_sha, response)
+       when is_binary(wt) do
     if uncommitted_worktree_changes?(wt) do
       if state.commit_nudge_used,
         do: {:escalate_uncommitted, :escalated_uncommitted},
         else: {:reprompt, :reprompted}
     else
-      {:escalate_no_changes, :escalated_no_changes}
+      cond do
+        # bd-cb7wpq: a guard-rejected APPROVE (`approval_gap_pending`) has its
+        # own escalation that names the open findings for a human to judge
+        # (`escalate_no_changes/1`'s `approval_gap_pending` clause,
+        # `ReviewFindings.gap_findings/1`). That must win over a bare
+        # `NO-FILE-CHANGE:` claim — otherwise this round short-circuits
+        # straight to a re-review (or the generic non-file-fix escalation),
+        # and the gap-specific finding list a human is supposed to judge is
+        # never produced.
+        approval_gap_pending?(state) ->
+          {:escalate_no_changes, :escalated_no_changes}
+
+        not non_file_fix_declared?(response) ->
+          {:escalate_no_changes, :escalated_no_changes}
+
+        state.non_file_fix_used ->
+          {:escalate_no_changes_after_non_file_fix, :escalated_no_changes_after_non_file_fix}
+
+        true ->
+          {:advance_non_file_fix, :advanced_non_file_fix}
+      end
     end
   end
 
   # No worktree to inspect — can't tell dirty from clean, so fall back to the
   # pre-bd-2eyf9y behavior (proceed) rather than escalate on a guess.
-  defp commit_gate_outcome(_state, _new_sha), do: {:advanced, nil}
+  defp commit_gate_outcome(_state, _new_sha, _response), do: {:advanced, nil}
+
+  # bd-cb7wpq: called only on the `:advance_non_file_fix` outcome, where
+  # `commit_gate_outcome/3` has already established HEAD is unchanged and the
+  # worktree is clean — so `note_head_change/1`'s last thread entry is always
+  # the "rebuttal only, no new commits" one (`head_unchanged_entry/2`'s clean
+  # branch). Replace it: this was not a rebuttal, and telling the re-reviewer
+  # "the diff is the same as the previous round, evaluate the argument" is
+  # exactly wrong when what actually needs checking is the live PR.
+  @spec replace_non_file_fix_thread_entry(map(), String.t()) :: map()
+  defp replace_non_file_fix_thread_entry(state, response) do
+    entry = %{
+      round: state.round,
+      role: :system,
+      subject: "Round #{state.round} — resolved without a file change (declared)",
+      body:
+        "HEAD did not move this round, but the implementer declared the finding(s) resolved " <>
+          "through something other than a file change on this branch (a PR title/description " <>
+          "edit, a label, a comment reply) — not a rebuttal. It declared:\n\n" <>
+          non_file_fix_declaration_lines(response) <>
+          "\nVerify this claim against the LIVE PR (title, description, labels, comments — " <>
+          "e.g. `gh pr view`) before accepting it; do not assume it from this text alone. " <>
+          "If the claimed change is not actually there, REQUEST_CHANGES."
+    }
+
+    %{state | thread: List.replace_at(state.thread, -1, entry)}
+  end
+
+  defp non_file_fix_declaration_lines(response) do
+    response
+    |> String.split("\n")
+    |> Enum.filter(&String.contains?(&1, @non_file_fix_marker))
+    |> Enum.join("\n")
+  end
+
+  # bd-cb7wpq: has the implementer explicitly declared that every finding this
+  # round was resolved through something other than a file change on this
+  # branch (a PR title/description edit, a label, a comment reply)? A bare
+  # "FIXED" claim is NOT enough — the reviewer re-prompt guidance elsewhere in
+  # this module (`verdict_reprompt_prompt/2`, `:unaddressed_findings`) already
+  # treats that as unverifiable prose. The explicit marker line is what
+  # `revise_prompt/2` asks for precisely so this check has something concrete
+  # to grep, and a false claim still gets caught: the next reviewer round reads
+  # the live PR for real, exactly as it would any other disposition.
+  @spec non_file_fix_declared?(String.t()) :: boolean()
+  defp non_file_fix_declared?(response) when is_binary(response) do
+    String.contains?(response, @non_file_fix_marker)
+  end
 
   # `opts[:restarted_on_remote_head]` is the new remote sha when this round
   # exists because the branch moved under us rather than because an implementer
@@ -1917,6 +2037,28 @@ defmodule Arbiter.Worker.ReviewGate do
         escalation_payload(state)
 
     finish(state, {:parked, :commit_gate_no_changes, msg})
+  end
+
+  # bd-cb7wpq: this round (and the one before it) both left HEAD unmoved on a
+  # clean tree, and both times the implementer declared every finding resolved
+  # through a non-file channel (`non_file_fix_declared?/1`). One such round is
+  # honored — it advances to a real re-review, see `:advance_non_file_fix`
+  # above — but two in a row with nothing new for the reviewer to check is the
+  # same liveness question the plain no-changes gate asks, so it parks too.
+  # Distinct reason from `:commit_gate_no_changes` so a human reading `arb
+  # prime` / the escalation does not read this as an idle worker: the
+  # implementer DID act, just not on a file.
+  defp escalate_commit_gate(state, :no_changes_after_non_file_fix) do
+    msg =
+      "#{@commit_gate_no_changes_marker} (task #{state.task_id}, round #{state.round}). " <>
+        "HEAD did not move and the worktree is clean, and this is the SECOND round in a row " <>
+        "where the implementer declared every finding resolved through something other than " <>
+        "a file change (a PR title/description edit, a label, a comment) rather than a code " <>
+        "change. The first such round was honored and re-reviewed; this one was not, since " <>
+        "the reviewer still has nothing new to check. No further review round was " <>
+        "dispatched.\n\n" <> escalation_payload(state)
+
+    finish(state, {:parked, :commit_gate_no_changes_after_non_file_fix, msg})
   end
 
   defp escalate_commit_gate(state, {:no_changes_after_approval_gap, gap}) do
@@ -4549,10 +4691,20 @@ defmodule Arbiter.Worker.ReviewGate do
         (`git add -A && git commit -m "..."`), so the reviewer can see it in the
         diff on re-review; or
       * REBUT it — if you believe the finding is mistaken, leave the code as-is
-        and explain, concretely, why it is not a problem.
+        and explain, concretely, why it is not a problem; or
+      * RESOLVE IT WITHOUT A FILE CHANGE — some findings are legitimately fixed
+        through something other than an edit to this branch (a PR title or
+        description via `gh pr edit`, a label, a comment reply). If that is
+        genuinely how you addressed a finding, say so and include, on its own
+        line, `NO-FILE-CHANGE: <finding> — <exactly what you changed and how>`.
+        Do not use this for anything you actually edited a file for, and do not
+        use it as a way to avoid a fix a finding actually calls for — the next
+        review round re-checks the live PR for real, so a false claim here will
+        be caught, not accepted.
 
-    State clearly, for each finding, whether you FIXED or REBUTTED it and why —
-    your reply here is forwarded back to the reviewer as your side of the record.
+    State clearly, for each finding, whether you FIXED, REBUTTED, or resolved it
+    without a file change, and why — your reply here is forwarded back to the
+    reviewer as your side of the record.
 
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`:
 

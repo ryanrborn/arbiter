@@ -546,17 +546,42 @@ defmodule Arbiter.Workflows.Conductor do
     end
   end
 
+  # The gate is keyed by the **provider account** since P7
+  # (`docs/provider-account-design.md` §4.2): the budget belongs to the
+  # account, so a hold has to cover every workspace metered under it. The
+  # workspace rides along in `opts` as policy context only — it supplies the
+  # `:continue`-mode check and the workspace half of `min(account, workspace)`
+  # threshold resolution, never the key.
   defp safe_quota_headroom(gate, workspace_id) do
-    gate.quota_headroom(workspace_id)
+    workspace = safe_workspace(workspace_id)
+    provider = Arbiter.Quota.default_provider(workspace || workspace_id)
+    account_id = Arbiter.Quota.account_id(workspace_id, provider)
+
+    gate.quota_headroom(account_id,
+      workspace_id: workspace_id,
+      workspace: workspace,
+      provider: provider
+    )
   rescue
     e ->
-      Logger.warning("QuotaGate.quota_headroom/1 raised: #{Exception.message(e)}; allowing")
+      Logger.warning("QuotaGate.quota_headroom/2 raised: #{Exception.message(e)}; allowing")
       :unlimited
   catch
     :exit, reason ->
-      Logger.warning("QuotaGate.quota_headroom/1 exited: #{inspect(reason)}; allowing")
+      Logger.warning("QuotaGate.quota_headroom/2 exited: #{inspect(reason)}; allowing")
       :unlimited
   end
+
+  defp safe_workspace(ws_id) when is_binary(ws_id) and ws_id != "" do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp safe_workspace(_), do: nil
 
   # ---- drain loop ---------------------------------------------------------
 

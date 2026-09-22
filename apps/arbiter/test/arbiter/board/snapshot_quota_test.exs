@@ -47,7 +47,7 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
 
       {:ok, _quota} =
         Ash.create(CodexQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id, "codex"),
           provider: "codex",
           session_used_percent: 93.0,
           session_reset_at: DateTime.utc_now() |> DateTime.add(3600, :second),
@@ -62,7 +62,7 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
 
       {:ok, _quota} =
         Ash.create(CodexQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id, "codex"),
           provider: "codex",
           session_used_percent: 93.0,
           session_reset_at: DateTime.utc_now() |> DateTime.add(3600, :second),
@@ -93,7 +93,7 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
 
       {:ok, _quota} =
         Ash.create(CodexQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id, "codex"),
           provider: "codex",
           session_used_percent: 99.0,
           session_reset_at: DateTime.utc_now() |> DateTime.add(3600, :second),

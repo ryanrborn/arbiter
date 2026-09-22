@@ -3239,6 +3239,160 @@ defmodule Arbiter.Worker.DispatchTest do
       routing = Worker.state(result.worker_pid).meta[:routing_config]
       assert routing.provider == "gemini"
     end
+
+    # bd-b7e33c post-merge finding (2026-09-19), corrected 2026-09-21 per
+    # round-1 review finding 1: the provider and the session_id used to come
+    # from two INDEPENDENT "newest row" queries, so a task whose most recent
+    # signal recorded a different provider than the row that actually
+    # captured the resumable session_id could pin `:agent_type` to the wrong
+    # provider while still threading the OTHER session's conversation id —
+    # exactly the "spawn handed a conversation UUID that belongs to a
+    # different provider" shape the AC5 fix was meant to close.
+    #
+    # The provider half of that pin is NOT resolved off the usage ledger —
+    # `resolve_session_resume_provider/3` only falls through to
+    # `resolve_resume_provider/2` -> `Agents.resolve_revision_provider/2` ->
+    # `Run.latest_authoring_provider/1`, which reads `worker_run` rows FIRST
+    # and only consults the usage ledger when no run carries a provider. So
+    # the mismatch has to be a newer **Run** row, not a newer usage-event row
+    # (a usage-event-only fixture resolves to the same provider before and
+    # after the fix, and would pass even with the fix reverted). Reproduce it
+    # directly: an OLDER usage row carries the real, resumable `session_id`
+    # under `provider: "gemini"`, while a NEWER **Run** row (a claude fallback
+    # attempt that failed before capturing a session) records `provider:
+    # "claude"`.
+    test "resume_session/2 pins the provider to the SAME row the session_id came from",
+         %{ws: ws, tmp: tmp} do
+      gemini_file = Path.join(tmp, "gemini-resume-mismatch-argv.txt")
+      claude_file = Path.join(tmp, "claude-resume-mismatch-argv.txt")
+      :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+      :ok = stub_sleeping_on_path(tmp, "claude", claude_file)
+
+      {:ok, task} = Ash.create(Issue, %{title: "agy resume mismatch", workspace_id: ws.id})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+      {:ok, older} =
+        Ash.create(UsageEvent, %{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "rs/repo",
+          step: :work,
+          provider: "gemini",
+          session_id: "agy-conv-mismatch",
+          occurred_at: DateTime.add(DateTime.utc_now(), -600, :second)
+        })
+
+      # A newer FAILED claude attempt that never captured a session_id — this
+      # is what Run.latest_authoring_provider/1 actually reads, so it is what
+      # would steal the resume without resolve_session_resume_provider/3.
+      {:ok, _claude_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "rs/repo",
+          workspace_id: ws.id,
+          worker_type: :main,
+          status: :failed,
+          provider: "claude",
+          started_at: DateTime.utc_now()
+        })
+
+      # sanity: the two independent lookups really do disagree, so this test
+      # actually exercises the mismatch rather than a scenario that can't occur.
+      refute older.session_id == nil
+      assert Run.latest_authoring_provider(task.id) == :claude
+
+      File.rm!(gemini_file)
+
+      {:ok, result} =
+        Dispatch.resume_session(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          preflight: false
+        )
+
+      resumed_args = wait_for_argv!(gemini_file)
+      assert "--conversation" in resumed_args
+      conv_idx = Enum.find_index(resumed_args, &(&1 == "--conversation"))
+      assert Enum.at(resumed_args, conv_idx + 1) == "agy-conv-mismatch"
+
+      routing = Worker.state(result.worker_pid).meta[:routing_config]
+      assert routing.provider == "gemini"
+    end
+
+    # bd-b7e33c finding 2 (round 1 re-review): the mismatch guard in
+    # `maybe_put_resume_session_id/9` also has to fire when the CALLER forces
+    # a different provider via an explicit `agent_type:` opt — not just when
+    # the resolver falls through on its own. Reproduce that path directly: the
+    # prior session captured a resumable id under gemini, but the caller
+    # overrides to claude. The override must win (routing.provider == claude)
+    # and the foreign gemini conversation id must NOT be threaded into the
+    # claude spawn — it degrades to a real `ResumeContext.build/3` git-derived
+    # briefing instead (bd-b7e33c round-2 finding 1: the fallback used to drop
+    # the session id but never build a briefing either, so it silently
+    # produced a fresh, un-briefed dispatch).
+    test "resume_session/2 with an explicit agent_type override does not thread the other provider's session_id",
+         %{ws: ws, tmp: tmp} do
+      gemini_file = Path.join(tmp, "gemini-resume-override-argv.txt")
+      claude_file = Path.join(tmp, "claude-resume-override-argv.txt")
+      :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+      :ok = stub_sleeping_on_path(tmp, "claude", claude_file)
+
+      {:ok, task} = Ash.create(Issue, %{title: "agy resume override", workspace_id: ws.id})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+      {:ok, _event} =
+        Ash.create(UsageEvent, %{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "rs/repo",
+          step: :work,
+          provider: "gemini",
+          session_id: "agy-conv-override",
+          occurred_at: DateTime.utc_now()
+        })
+
+      {:ok, result} =
+        Dispatch.resume_session(task.id,
+          repo: "rs/repo",
+          start_driver: false,
+          preflight: false,
+          agent_type: :claude
+        )
+
+      resumed_args = wait_for_argv!(claude_file)
+      refute "--resume" in resumed_args
+      refute "agy-conv-override" in resumed_args
+
+      # The dropped session id must be replaced with a real git-derived
+      # briefing (ResumeContext.build/3), not a silently un-briefed fresh
+      # dispatch — the prompt argument carries the distinctive framing text.
+      assert Enum.any?(resumed_args, &String.contains?(&1, "RESUMING work on task"))
+
+      routing = Worker.state(result.worker_pid).meta[:routing_config]
+      assert routing.provider == "claude"
+    end
   end
 
   describe "review dispatch (review: true)" do

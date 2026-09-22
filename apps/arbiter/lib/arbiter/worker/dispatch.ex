@@ -366,6 +366,12 @@ defmodule Arbiter.Worker.Dispatch do
   7. Delegate to `dispatch/2` with `:resume_session_id` set — the worker injects
      `--resume <session_id>` into its first spawn and stashes the *pristine*
      argv, so the bd-t9uq25 auto-resume keeps working correctly on top.
+     If the resolved provider doesn't match the provider that captured the
+     session id (bd-b7e33c AC5 — e.g. an explicit `--agent` override that
+     lands on a different CLI than the one owning the conversation), the
+     foreign session id is dropped and `dispatch/2` gets a git-derived
+     `ResumeContext.build/3` briefing instead, the same one `resume/2` uses —
+     never a silent fresh start with no continuity at all.
 
   Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
   `dispatch/2`. Session-resume-specific errors: `{:error, :no_outpost}`,
@@ -379,8 +385,8 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
-         {:ok, _worktree_path} <- resume_worktree(task, repo),
-         {:ok, session_id} <- latest_session_id(task_id) do
+         {:ok, worktree_path} <- resume_worktree(task, repo),
+         {:ok, session_id, session_provider} <- latest_session_id(task_id) do
       prior_run_id = latest_run_id(task_id)
 
       # Free the registry slot the same way resume/2 does: a stopped worker
@@ -389,16 +395,55 @@ defmodule Arbiter.Worker.Dispatch do
       # Stopping it never touches the worktree, so it stays preserved.
       _ = stop_prior_worker(task_id)
 
-      {provider, fallback_reason} = resolve_resume_provider(task, opts)
+      {provider, fallback_reason} = resolve_session_resume_provider(task, opts, session_provider)
 
-      resume_opts =
+      base_opts =
         opts
         |> Keyword.put(:agent_type, provider)
         |> put_opt_if_present(:provider_fallback, fallback_reason)
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
-        |> Keyword.put(:resume_session_id, session_id)
+
+      # bd-b7e33c finding 2 (round 1 re-review) / finding 1 (round 2): only
+      # carry resume_session_id when the resolved provider still matches the
+      # one that captured it — otherwise it's a bogus invocation, e.g.
+      # `claude --resume <agy-conversation-uuid>`. Degrade to resume/2's real
+      # git-derived briefing instead of silently dropping both (round-2 fix:
+      # the old fallback dropped resume_session_id but never built the
+      # briefing it claimed to fall back to).
+      resume_opts =
+        if provider == session_provider do
+          Keyword.put(base_opts, :resume_session_id, session_id)
+        else
+          require Logger
+
+          target_branch = resolve_target_branch(task, Keyword.put(opts, :repo, repo))
+
+          case ResumeContext.build(task, worktree_path, target_branch) do
+            {:ok, context} ->
+              Logger.info(
+                "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
+                  "provider #{inspect(session_provider)} does not match resolved provider " <>
+                  "#{inspect(provider)}; degrading to a git-derived resume briefing instead"
+              )
+
+              Keyword.put(base_opts, :resume_context, context)
+
+            {:error, reason} ->
+              Logger.warning(
+                "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
+                  "provider #{inspect(session_provider)} does not match resolved provider " <>
+                  "#{inspect(provider)}; failed to build a git-derived resume briefing " <>
+                  "(#{inspect(reason)}), proceeding with no briefing"
+              )
+
+              base_opts
+          end
+        end
+
+      resume_opts =
+        resume_opts
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
@@ -594,14 +639,23 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> nil
   end
 
-  # The most-recent captured upstream session id for the task, newest first.
-  # Drawn from the usage ledger (`Arbiter.Usage.Event`), where the worker
-  # persists each Claude session's `session_id` on its terminal `result` event.
-  # The task_id filter is exact, so ReviewGate reviewer rows (which carry a
-  # `#review` suffix) are excluded — we resume the author's session, not a
-  # reviewer's. `{:error, :no_session}` when none was ever captured: the task
-  # was never worked by a session-capable agent, so there is nothing to resume
-  # at the session level (the caller must dispatch fresh).
+  # The most-recent captured upstream session id for the task, newest first,
+  # PLUS the provider recorded on that SAME row. Drawn from the usage ledger
+  # (`Arbiter.Usage.Event`), where the worker persists each session's
+  # `session_id` on its terminal `result` event. The task_id filter is exact,
+  # so ReviewGate reviewer rows (which carry a `#review` suffix) are excluded
+  # — we resume the author's session, not a reviewer's. `{:error, :no_session}`
+  # when none was ever captured: the task was never worked by a
+  # session-capable agent, so there is nothing to resume at the session level
+  # (the caller must dispatch fresh).
+  #
+  # bd-b7e33c post-merge finding (2026-09-19): this used to return only the
+  # session_id, and callers paired it with a SEPARATE `latest_provider/1`
+  # query. The two queries can pick different rows — e.g. a newer row from a
+  # failed attempt on a different provider that never got far enough to
+  # capture a session_id — pinning `:agent_type` to a provider that doesn't
+  # own the conversation id being resumed. Returning the provider off the
+  # exact row the session_id came from makes that mismatch impossible.
   defp latest_session_id(task_id) when is_binary(task_id) do
     Event
     |> Ash.Query.filter(task_id == ^task_id and not is_nil(session_id))
@@ -610,12 +664,23 @@ defmodule Arbiter.Worker.Dispatch do
     |> Ash.read!()
     |> List.first()
     |> case do
-      %Event{session_id: sid} when is_binary(sid) and sid != "" -> {:ok, sid}
-      _ -> {:error, :no_session}
+      %Event{session_id: sid, provider: p} when is_binary(sid) and sid != "" ->
+        {:ok, sid, safe_provider_atom(p)}
+
+      _ ->
+        {:error, :no_session}
     end
   rescue
     _ -> {:error, :no_session}
   end
+
+  defp safe_provider_atom(p) when is_binary(p) do
+    String.to_existing_atom(p)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp safe_provider_atom(_), do: nil
 
   # bd-2exkl0: resume passes inherit the provider of the authoring run being
   # resumed via Agents.resolve_revision_provider/2, with escalation to the
@@ -641,6 +706,31 @@ defmodule Arbiter.Worker.Dispatch do
         end
 
         {provider, fallback_reason}
+    end
+  end
+
+  # bd-b7e33c AC5 post-merge finding: `resolve_resume_provider/2` picks the
+  # provider off the most recent AUTHORING run, which is a separate query from
+  # `latest_session_id/1`'s "most recent row with a session_id" — a newer row
+  # on a different provider (e.g. a failed fallback attempt that never
+  # captured a session) would win there and pin `:agent_type` to a provider
+  # that doesn't own the `--resume`/`--conversation` id being threaded through
+  # resume_session/2. Prefer the provider carried on the SAME row the
+  # session_id came from when it's still available; only fall through to the
+  # general authoring-provider/fallback resolution (with its escalation) when
+  # the caller forced a provider, or the session's own provider is unknown or
+  # no longer usable.
+  defp resolve_session_resume_provider(%Issue{} = task, opts, session_provider) do
+    case Keyword.get(opts, :agent_type) do
+      p when is_atom(p) and not is_nil(p) ->
+        {p, nil}
+
+      _ ->
+        if not is_nil(session_provider) and Agents.provider_available?(session_provider) do
+          {session_provider, nil}
+        else
+          resolve_resume_provider(task, opts)
+        end
     end
   end
 
@@ -853,7 +943,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp record_quota_gate_bypass(%Issue{id: task_id, workspace_id: ws_id} = task, opts) do
     workspace = load_workspace(task)
     provider = quota_gate_provider(task, workspace, opts)
-    quota = safe_quota_latest(ws_id, provider)
+    quota = safe_quota_latest(safe_gate_account(ws_id, provider), provider)
 
     payload = %{
       "task_id" => task_id,
@@ -965,15 +1055,32 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> :claude
   end
 
+  # The provider account this dispatch is metered under (P7,
+  # `docs/provider-account-design.md` §4.2 / §5 rows 4, 9). It is both the key
+  # the snapshot is read by and the account half of the gate's threshold
+  # policy, so it is resolved once. `nil` when the workspace has no link —
+  # the gate then reads no snapshot and fails open, exactly as it did before.
+  defp safe_gate_account(ws_id, provider) do
+    Arbiter.Accounts.Resolver.get(Arbiter.Quota.account_id(ws_id, provider))
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   defp apply_quota_gate(%Issue{} = task, workspace, provider, ws_id, opts) do
     gate = Arbiter.Quota.gate_for_workspace(workspace)
-    quota = safe_quota_latest(ws_id, provider)
+    account = safe_gate_account(ws_id, provider)
+    quota = safe_quota_latest(account, provider)
     # The model hint (bd-7qj58o AC4) is scoped to this `gate.check/4` call
     # only — `opts` itself (used below for `DispatchQueue.hold/5`, replayed
     # verbatim on drain) must stay exactly what the caller passed, or a
     # best-effort Antigravity bucket guess would silently override the real
     # dispatch's model resolution later.
-    gate_opts = maybe_add_gemini_model_hint(provider, task, workspace, opts)
+    gate_opts =
+      provider
+      |> maybe_add_gemini_model_hint(task, workspace, opts)
+      |> Keyword.put(:account, account)
 
     case gate.check(task, quota, workspace, gate_opts) do
       :allow ->
@@ -1002,8 +1109,10 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp safe_quota_latest(ws_id, provider) do
-    Arbiter.Quota.latest_for_provider(ws_id, provider)
+  defp safe_quota_latest(nil, _provider), do: nil
+
+  defp safe_quota_latest(%{id: account_id}, provider) do
+    Arbiter.Quota.latest_for_provider(account_id, provider)
   rescue
     _ -> nil
   catch

@@ -119,7 +119,7 @@ defmodule ArbiterWeb.LiveHooks do
   def on_mount(:quota, _params, _session, socket) do
     case Arbiter.Quota.default_workspace_id() do
       {:ok, ws_id} ->
-        quotas = Arbiter.Quota.list_latest(ws_id) |> filter_hidden_providers()
+        quotas = Arbiter.Quota.list_latest_for_workspace(ws_id) |> filter_hidden_providers()
 
         socket =
           socket

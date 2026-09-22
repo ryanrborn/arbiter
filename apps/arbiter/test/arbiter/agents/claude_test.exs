@@ -326,12 +326,25 @@ defmodule Arbiter.Agents.ClaudeTest do
       prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
       System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
+      # `worker_env` as the token's source is the pre-P3 behaviour (bd-aiodva
+      # acceptance 2); the provider-account read behind
+      # `:provider_accounts_enabled` is covered by
+      # `arbiter/accounts/read_flip_test.exs`. Pin the flag off so the
+      # `ARBITER_PROVIDER_ACCOUNTS=1` matrix leg does not reinterpret these.
+      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
+      Application.put_env(:arbiter, :provider_accounts_enabled, false)
+
       on_exit(fn ->
         Claude.Config.clear()
 
         case prev_oauth_token do
           nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
           v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+
+        case prev_flag do
+          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
+          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
         end
       end)
 
@@ -372,12 +385,22 @@ defmodule Arbiter.Agents.ClaudeTest do
       prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
       System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
+      # Pre-P3 source (see the bd-2zigo1 block above): pin the flag off so the
+      # `ARBITER_PROVIDER_ACCOUNTS=1` matrix leg does not reinterpret these.
+      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
+      Application.put_env(:arbiter, :provider_accounts_enabled, false)
+
       on_exit(fn ->
         Claude.Config.clear()
 
         case prev_oauth_token do
           nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
           v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+
+        case prev_flag do
+          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
+          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
         end
       end)
 

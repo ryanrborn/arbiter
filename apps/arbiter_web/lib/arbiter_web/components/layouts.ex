@@ -139,12 +139,14 @@ defmodule ArbiterWeb.Layouts do
       </:right>
     </.top_nav>
 
-    <%!-- The room a Side-panel session window is taking on the right
-          (bd-covojz), zero at every other size. The panel is `position:
-          fixed`, so without this the page would simply slide underneath it —
-          and reading a page while talking to a session is the whole reason the
-          preset exists. --%>
-    <main class="pr-[var(--session-dock-page-inset)]">
+    <%!-- The room the page's two fixed edges are taking, each zero unless
+          something is actually occupying it (bd-2qqqbp): on the right a
+          Side-panel session window (bd-covojz), zero at every other dock size;
+          on the left the nav rail. Both are `position: fixed`, so without
+          these the page would simply slide underneath them — and reading a
+          page while talking to a session is the whole reason the Side preset
+          exists. --%>
+    <main class="pl-[var(--nav-rail-page-inset)] pr-[var(--session-dock-page-inset)]">
       {render_slot(@inner_block)}
     </main>
 

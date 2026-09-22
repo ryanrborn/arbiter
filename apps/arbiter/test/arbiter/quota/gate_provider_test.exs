@@ -5,7 +5,7 @@ defmodule Arbiter.Quota.GateProviderTest do
   Before this, `Arbiter.Quota.Gate` read only the Anthropic snapshot, so a
   Codex / Gemini / Antigravity worker was dispatched even when that provider was
   out of quota. These specs pin the normalized snapshot (`Gate.Snapshot`), the
-  per-provider snapshot lookup (`Quota.latest_for_provider/2`), and the
+  per-provider snapshot lookup (`Quota.latest_for_workspace/2`), and the
   end-to-end hold through `Dispatch.dispatch/2` for an over-quota Codex account.
   """
   use Arbiter.DataCase, async: false
@@ -32,12 +32,12 @@ defmodule Arbiter.Quota.GateProviderTest do
   defp behind(secs), do: ahead(-secs)
 
   defp codex_quota(attrs) do
-    %CodexQuota{workspace_id: "ws-x", provider: "codex", captured_at: now()}
+    %CodexQuota{provider_account_id: "acct-x", provider: "codex", captured_at: now()}
     |> struct(attrs)
   end
 
   defp google_quota(attrs) do
-    %GoogleQuota{workspace_id: "ws-x", provider: "gemini_cli", captured_at: now()}
+    %GoogleQuota{provider_account_id: "acct-x", provider: "gemini_cli", captured_at: now()}
     |> struct(attrs)
   end
 
@@ -45,7 +45,7 @@ defmodule Arbiter.Quota.GateProviderTest do
   # the same shape `Arbiter.Quota.CloudCode.antigravity/1` writes (bd-7qj58o).
   defp antigravity_quota(models) do
     %GoogleQuota{
-      workspace_id: "ws-x",
+      provider_account_id: "acct-x",
       provider: "antigravity",
       captured_at: now(),
       reset_at: ahead(3600),
@@ -71,7 +71,7 @@ defmodule Arbiter.Quota.GateProviderTest do
 
       s =
         Snapshot.normalize(%AnthropicQuota{
-          workspace_id: "ws-x",
+          provider_account_id: "acct-x",
           provider: "claude",
           status_5h: "allowed",
           utilization_5h: 0.42,
@@ -341,7 +341,7 @@ defmodule Arbiter.Quota.GateProviderTest do
     end
   end
 
-  describe "Quota.latest_for_provider/2" do
+  describe "Quota.latest_for_workspace/2 (P5: resolves the workspace to its account)" do
     setup do
       {:ok, workspace} =
         Ash.create(Workspace, %{
@@ -354,14 +354,14 @@ defmodule Arbiter.Quota.GateProviderTest do
 
     test "reads each provider from its own table", %{workspace: workspace} do
       Ash.create!(AnthropicQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "claude"),
         provider: "claude",
         utilization_5h: 0.1,
         captured_at: now()
       })
 
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 91.0,
         captured_at: now()
@@ -374,23 +374,23 @@ defmodule Arbiter.Quota.GateProviderTest do
       gemini_code = Quota.provider_code(:gemini)
 
       Ash.create!(GoogleQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, gemini_code),
         provider: gemini_code,
         used_percent: 77.0,
         captured_at: now()
       })
 
-      assert %AnthropicQuota{} = Quota.latest_for_provider(workspace.id, :claude)
+      assert %AnthropicQuota{} = Quota.latest_for_workspace(workspace.id, :claude)
 
       assert %CodexQuota{session_used_percent: 91.0} =
-               Quota.latest_for_provider(workspace.id, :codex)
+               Quota.latest_for_workspace(workspace.id, :codex)
 
       assert %GoogleQuota{used_percent: 77.0} =
-               Quota.latest_for_provider(workspace.id, :gemini)
+               Quota.latest_for_workspace(workspace.id, :gemini)
 
       other_code = if gemini_code == "gemini_cli", do: :antigravity, else: :gemini_cli
-      assert Quota.latest_for_provider(workspace.id, other_code) == nil
-      assert Quota.latest_for_provider(workspace.id, :nonesuch) == nil
+      assert Quota.latest_for_workspace(workspace.id, other_code) == nil
+      assert Quota.latest_for_workspace(workspace.id, :nonesuch) == nil
     end
   end
 
@@ -422,7 +422,7 @@ defmodule Arbiter.Quota.GateProviderTest do
 
     test "holds the dispatch and queues the intent", %{workspace: workspace, task: task} do
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 99.0,
         session_reset_at: ahead(3600),
@@ -446,7 +446,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       task: task
     } do
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 4.0,
         session_reset_at: ahead(3600),
@@ -466,7 +466,7 @@ defmodule Arbiter.Quota.GateProviderTest do
     } do
       # Anthropic is blown, Codex has headroom — the Codex worker must still run.
       Ash.create!(AnthropicQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "claude"),
         provider: "claude",
         status_5h: "rejected",
         utilization_5h: 0.99,
@@ -475,7 +475,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 4.0,
         session_reset_at: ahead(3600),
@@ -496,7 +496,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       {:ok, gtask} = Ash.create(Issue, %{title: "gemini work", workspace_id: workspace.id})
 
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 1.0,
         session_reset_at: ahead(3600),
@@ -504,7 +504,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       Ash.create!(GoogleQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, Quota.provider_code(:gemini)),
         provider: Quota.provider_code(:gemini),
         used_percent: 99.0,
         reset_at: ahead(3600),
@@ -582,7 +582,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       # has headroom while Claude/GPT is blown — a hint that only looked at
       # model_tier would fail open here.
       Ash.create!(GoogleQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "antigravity"),
         provider: "antigravity",
         captured_at: now(),
         reset_at: ahead(3600),
@@ -634,7 +634,7 @@ defmodule Arbiter.Quota.GateProviderTest do
         Ash.create(Issue, %{title: "agy override work", workspace_id: ws.id, priority: 4})
 
       Ash.create!(GoogleQuota, %{
-        workspace_id: ws.id,
+        provider_account_id: quota_account_id!(ws.id, "antigravity"),
         provider: "antigravity",
         captured_at: now(),
         reset_at: ahead(3600),
@@ -659,6 +659,18 @@ defmodule Arbiter.Quota.GateProviderTest do
   describe "Workflows.QuotaGate.Default — provider-aware cap clamp" do
     alias Arbiter.Workflows.QuotaGate
 
+    # P7: the gate is keyed by the provider account; the workspace rides
+    # along as policy context. This mirrors what `Conductor` now passes.
+    defp headroom(workspace) do
+      provider = Arbiter.Quota.default_provider(workspace)
+
+      QuotaGate.Default.quota_headroom(
+        Arbiter.Quota.account_id(workspace.id, provider),
+        workspace: workspace,
+        provider: provider
+      )
+    end
+
     defp provider_workspace(type) do
       {:ok, workspace} =
         Ash.create(Workspace, %{
@@ -674,42 +686,42 @@ defmodule Arbiter.Quota.GateProviderTest do
       workspace = provider_workspace("codex")
 
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 93.0,
         session_reset_at: ahead(3600),
         captured_at: now()
       })
 
-      assert QuotaGate.Default.quota_headroom(workspace.id) == 0
+      assert headroom(workspace) == 0
     end
 
     test "allows when the codex workspace has headroom" do
       workspace = provider_workspace("codex")
 
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 20.0,
         session_reset_at: ahead(3600),
         captured_at: now()
       })
 
-      assert QuotaGate.Default.quota_headroom(workspace.id) == :unlimited
+      assert headroom(workspace) == :unlimited
     end
 
     test "a blown Anthropic snapshot does not clamp a codex workspace" do
       workspace = provider_workspace("codex")
 
       Ash.create!(AnthropicQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "claude"),
         provider: "claude",
         utilization_5h: 0.99,
         status_5h: "rejected",
         captured_at: now()
       })
 
-      assert QuotaGate.Default.quota_headroom(workspace.id) == :unlimited
+      assert headroom(workspace) == :unlimited
     end
   end
 
@@ -739,7 +751,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       {:ok, task} = Ash.create(Issue, %{title: "codex drain", workspace_id: workspace.id})
 
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 99.0,
         session_reset_at: ahead(3600),
@@ -754,7 +766,7 @@ defmodule Arbiter.Quota.GateProviderTest do
 
       # Codex frees up — the drain must re-check the CODEX table, not Anthropic.
       Ash.create!(CodexQuota, %{
-        workspace_id: workspace.id,
+        provider_account_id: quota_account_id!(workspace.id, "codex"),
         provider: "codex",
         session_used_percent: 5.0,
         session_reset_at: ahead(3600),

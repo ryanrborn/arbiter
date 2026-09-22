@@ -34,23 +34,30 @@ defmodule Arbiter.Quota.CloudProbe do
       only thing that keeps Claude's snapshot current for a fleet making no
       proxied traffic, so it is no longer merely a garnish riding along
       (best-effort; its own 429 cooldown protects it). This endpoint is
-      account-wide, and this install has exactly one account credential — the
-      operator's `~/.claude/.credentials.json` — so it is fetched **once per
-      cycle for every workspace**, not fanned out per workspace like the rest
-      of this module. Its 5 min cadence is the endpoint's own budget; the gate
-      absorbs a missed poll by trusting a polled row for 600s
-      (`Arbiter.Quota.Gate.staleness_threshold_seconds/1`) rather than by
-      polling harder.
+      account-wide, so it is fetched **once per distinct provider account**
+      represented among this cycle's workspaces (P6,
+      `docs/provider-account-design.md` §5 row 10 / §9) — not once per
+      workspace, and (since bd-4fbpto) not once for the whole install either:
+      three workspaces sharing one plan still produce one fetch, but two
+      workspaces on two different accounts now produce two, each
+      authenticated with that account's own credential. Its 5 min cadence is
+      the endpoint's own per-account budget; the gate absorbs a missed poll by
+      trusting a polled row for 600s (`Arbiter.Quota.Gate.staleness_threshold_seconds/1`)
+      rather than by polling harder.
 
-      bd-5xuneh de-duplicated this call by grouping workspaces on
+      bd-5xuneh originally de-duplicated this call by grouping workspaces on
       `ConfigDir.oauth_token/1` and passing that token explicitly, on the
-      theory that workspaces sharing a token could safely share one fetch.
-      bd-4fbpto found that theory backwards: a workspace's `worker_env` token
-      is scope/rate-limited for this endpoint (empirically confirmed — see the
-      status codes recorded in PR #1607) while the operator's
-      credentials-file token succeeds. This module no longer resolves or passes a
-      per-workspace token at all: `Arbiter.Quota.OAuthUsage.fetch/1`'s own
-      default (read `.credentials.json`) is always used.
+      theory that workspaces sharing a `worker_env` token could safely share
+      one fetch. bd-4fbpto found that theory backwards: a workspace's
+      `worker_env` token is scope/rate-limited for this endpoint (empirically
+      confirmed — see the status codes recorded in PR #1607) and cannot
+      authenticate it at all, so bd-4fbpto deleted that grouping outright
+      rather than re-keying it. P6 is the account iteration that replaces it:
+      each account's own `cli_credentials_file` credential
+      (`Arbiter.Accounts.Credentials.account_oauth_usage_token/1`) — never a
+      workspace's `worker_env` token — authenticates its fetch, falling back
+      to `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
+      `.credentials.json` on disk) for an account with no credential row yet.
 
   The other three providers each degrade to a no-op (no row written, no
   broadcast) when their CLI isn't authenticated on this host, so a logged-out
@@ -233,11 +240,12 @@ defmodule Arbiter.Quota.CloudProbe do
     %{state | probe_count: state.probe_count + 1}
   end
 
-  # `/api/oauth/usage` is account-wide, and this install has exactly one
-  # account credential — the operator's `~/.claude/.credentials.json` — behind
-  # every workspace, so it is fetched exactly once per cycle for the whole
-  # fleet and the result is written to every workspace (see the moduledoc for
-  # why this no longer groups by, or passes, a per-workspace token — bd-4fbpto).
+  # `/api/oauth/usage` is account-wide: `Quota.capture_oauth_usage_for_group/2`
+  # resolves each workspace to the account it meters under and fetches once
+  # per *distinct account* represented here (P6, §9), not once for the whole
+  # fleet — see the moduledoc for why this no longer groups by, or passes, a
+  # per-workspace token (bd-4fbpto) and how each account's own credential
+  # authenticates its fetch (P6).
   defp spawn_oauth_usage_refresh(workspaces, oauth_opts) do
     workspace_ids = Enum.map(workspaces, & &1.id)
     parent = self()
@@ -288,6 +296,14 @@ defmodule Arbiter.Quota.CloudProbe do
       for {workspace_id, {:error, reason}} <- Enum.zip(workspace_ids, results),
           do: {workspace_id, reason}
 
+    # `Quota.write_once_per_account/4` tags each per-account failure with
+    # the stage it came from: `{:fetch, reason}` when that account's own
+    # `/api/oauth/usage` call itself failed (401, transport error,
+    # unresolvable account), `{:write, reason}` when the fetch succeeded and
+    # only the DB write failed.
+    fetch_failed = Enum.filter(failed, fn {_ws, reason} -> match?({:fetch, _}, reason) end)
+    write_failed = Enum.filter(failed, fn {_ws, reason} -> match?({:write, _}, reason) end)
+
     cond do
       failed == [] ->
         if state.oauth_consecutive_401s > 0 do
@@ -296,40 +312,69 @@ defmodule Arbiter.Quota.CloudProbe do
 
         %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
 
-      failed != [] and length(failed) == length(results) ->
-        # Every per-workspace write failed even though the fetch itself
+      fetch_failed != [] ->
+        # At least one account's own fetch failed this cycle, even though
+        # other accounts succeeded. A mixed cycle like this must not look
+        # like a clean one — pre-P6, the fetch ran once for the whole
+        # group, so any fetch error was necessarily a whole-cycle failure;
+        # post-P6 each account fetches independently, so this is the exact
+        # case the HIGH finding on bd-3j92yv covers: a broken account's 401s
+        # must keep tripping `CredentialWatchdog`/the escalation mailbox
+        # even while a healthy sibling account keeps polling fine. Prefer a
+        # 401 among the failures so the streak that matters most doesn't
+        # get starved by an unrelated transport error on another account.
+        {_ws, reason} =
+          Enum.find(fetch_failed, fn {_ws, {:fetch, r}} -> match?({:http_error, 401}, r) end) ||
+            hd(fetch_failed)
+
+        Logger.warning(
+          "Arbiter.Quota.CloudProbe: oauth usage fetch failed for #{length(fetch_failed)} account(s) this cycle: #{inspect(fetch_failed)}"
+        )
+
+        note_oauth_result(state, workspace_ids, {:error, reason})
+
+      length(write_failed) == length(results) ->
+        # Every per-workspace write failed even though every fetch
         # succeeded (e.g. the DB was locked) — this is the ticket's exact
         # symptom ("polls every 5 min and writes nothing") wearing a
         # different cause, so it must count as a failed cycle rather than
         # reset the counter.
         Logger.warning(
-          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but every write failed: #{inspect(failed)}"
+          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but every write failed: #{inspect(write_failed)}"
         )
 
-        note_oauth_result(state, workspace_ids, {:error, {:all_writes_failed, failed}})
+        note_oauth_result(state, workspace_ids, {:error, {:all_writes_failed, write_failed}})
 
       true ->
         Logger.warning(
-          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(failed)}"
+          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(write_failed)}"
         )
 
         %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
     end
   end
 
-  defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason} = error) do
+  defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason}) do
     failures = state.oauth_consecutive_failures + 1
 
     if failures == @oauth_failure_escalation_threshold do
       escalate_oauth_failure(workspace_ids, failures, reason)
     end
 
-    state = note_oauth_401(state, workspace_ids, error)
+    # `reason` may still carry a `Quota.write_once_per_account/4` stage tag
+    # here — this clause also handles the bare `{:error, reason}` a whole-
+    # cycle failure collapses to (`Quota.capture_oauth_usage_for_group/2`'s
+    # uniform-failure shortcut), which keeps the tag. Unwrap it so 401
+    # detection doesn't care whether it arrived tagged or not.
+    state = note_oauth_401(state, workspace_ids, {:error, unwrap_stage(reason)})
 
     %{state | oauth_consecutive_failures: failures}
   end
 
   defp note_oauth_result(%State{} = state, _workspace_ids, _other), do: state
+
+  defp unwrap_stage({stage, reason}) when stage in [:fetch, :write], do: reason
+  defp unwrap_stage(reason), do: reason
 
   defp escalate_oauth_failure([ws_id | _], failures, reason) when is_binary(ws_id) do
     safe_escalate(fn ->

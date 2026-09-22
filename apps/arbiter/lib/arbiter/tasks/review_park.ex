@@ -64,6 +64,7 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :verdict_guard_exhausted
           | :no_changes_after_approval_gap
           | :commit_gate_no_changes
+          | :commit_gate_no_changes_after_non_file_fix
           | :commit_gate_uncommitted
           | :empty_diff
           | :head_not_pushed
@@ -82,6 +83,10 @@ defmodule Arbiter.Tasks.ReviewPark do
     no_changes_after_approval_gap:
       "the fix round that stood in for a guard-rejected APPROVE made no code change (G16)",
     commit_gate_no_changes: "a fix round left HEAD unmoved and the worktree clean (G15/G16)",
+    commit_gate_no_changes_after_non_file_fix:
+      "a fix round left HEAD unmoved twice in a row after resolving findings through a " <>
+        "non-file channel (a PR title/description/label edit, a comment) rather than a " <>
+        "code change — distinct from an idle worker (G15/G16/bd-cb7wpq)",
     commit_gate_uncommitted:
       "the implementer left uncommitted work and HEAD did not move, twice (G15/G16)",
     empty_diff: "the target branch has already absorbed this branch's commits (G2)",
@@ -108,6 +113,8 @@ defmodule Arbiter.Tasks.ReviewPark do
     no_changes_after_approval_gap:
       "fix round produced no changes after an approval-gap rejection",
     commit_gate_no_changes: "fix round produced no changes",
+    commit_gate_no_changes_after_non_file_fix:
+      "fix round produced no changes after resolving findings without a file change",
     commit_gate_uncommitted: "implementer left uncommitted work",
     empty_diff: "the target branch already absorbed these commits",
     head_not_pushed: "the branch is not pushed and could not be",

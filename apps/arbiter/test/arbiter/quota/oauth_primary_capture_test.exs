@@ -73,7 +73,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
     stub_body(overrides)
 
     {:ok, quota} =
-      Quota.capture_oauth_usage(ws.id,
+      Quota.capture_oauth_usage(quota_account_id!(ws.id),
         token: "test-token",
         plug: {Req.Test, Quota.OAuthUsage.HTTP}
       )
@@ -112,7 +112,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
     test "a body with no aggregate 5h figure leaves the existing primary row alone" do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
-      before = Quota.latest(ws.id)
+      before = Quota.latest(quota_account_id!(ws.id))
 
       quota = poll!(ws, %{"five_hour" => nil, "seven_day" => nil, "limits" => nil})
 
@@ -132,19 +132,19 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       Req.Test.stub(Quota.OAuthUsage.HTTP, fn conn -> Plug.Conn.send_resp(conn, 429, "") end)
 
       assert {:error, :rate_limited} =
-               Quota.capture_oauth_usage(ws.id,
+               Quota.capture_oauth_usage(quota_account_id!(ws.id),
                  token: "test-token",
                  plug: {Req.Test, Quota.OAuthUsage.HTTP}
                )
 
       # second call is short-circuited by the cooldown — still no write
       assert {:error, {:backoff, 429}} =
-               Quota.capture_oauth_usage(ws.id,
+               Quota.capture_oauth_usage(quota_account_id!(ws.id),
                  token: "test-token",
                  plug: {Req.Test, Quota.OAuthUsage.HTTP}
                )
 
-      after_429 = Quota.latest(ws.id)
+      after_429 = Quota.latest(quota_account_id!(ws.id))
       assert after_429.utilization_5h == polled.utilization_5h
       assert after_429.status_5h == polled.status_5h
       assert after_429.reset_5h_at == polled.reset_5h_at
@@ -251,7 +251,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       ws = workspace!()
 
       Ash.create!(AnthropicQuota, %{
-        workspace_id: ws.id,
+        provider_account_id: quota_account_id!(ws.id, "claude"),
         provider: "claude",
         utilization_5h: 0.23,
         status_5h: "allowed",
@@ -265,7 +265,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
           DateTime.utc_now() |> DateTime.add(-600, :second) |> DateTime.truncate(:second)
       })
 
-      held = Quota.latest(ws.id)
+      held = Quota.latest(quota_account_id!(ws.id))
       assert Gate.stale?(held), "the primary window is age-stale"
 
       assert %{window: "7d"} = Gate.gating_window(held, nil),
@@ -289,7 +289,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       # with no RefreshProbe (or any other probe) in the tree, cleared the
       # sticky hold.
       assert Gate.gating_window(quota, nil) == nil
-      assert Gate.gating_window(Quota.latest(ws.id), nil) == nil
+      assert Gate.gating_window(Quota.latest(quota_account_id!(ws.id)), nil) == nil
     end
   end
 
@@ -308,12 +308,12 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       ws = workspace!()
       _ = poll!(ws)
 
-      serialized = Quota.serialize(ws.id)
+      serialized = Quota.serialize(quota_account_id!(ws.id))
       assert serialized.representative_claim == "five_hour"
       assert serialized.capture_source == "oauth_poll"
       assert serialized.stale == false
 
-      view = Quota.list_latest(ws.id) |> Enum.find(&(&1.provider == "claude"))
+      view = Quota.list_latest_for_workspace(ws.id) |> Enum.find(&(&1.provider == "claude"))
       assert view.representative_claim == "five_hour"
       assert view.capture_source == "oauth_poll"
     end

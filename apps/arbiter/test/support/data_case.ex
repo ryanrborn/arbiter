@@ -33,6 +33,21 @@ defmodule Arbiter.DataCase do
   end
 
   @doc """
+  The provider account `workspace_id` is metered under for `provider`,
+  provisioning one if the test has not created it (P5,
+  `docs/provider-account-design.md` §6).
+
+  The quota tables are keyed `(provider_account_id, provider)`, so a test
+  that seeds a quota row for a workspace needs the account that workspace
+  resolves to. This is the same hop `Arbiter.Quota.capture/3` makes.
+  """
+  @spec quota_account_id!(String.t(), String.t()) :: String.t()
+  def quota_account_id!(workspace_id, provider \\ "claude") do
+    {:ok, id} = Arbiter.Quota.ensure_account_id(workspace_id, provider)
+    id
+  end
+
+  @doc """
   Sets up the sandbox based on the test tags.
   """
   def setup_sandbox(tags) do

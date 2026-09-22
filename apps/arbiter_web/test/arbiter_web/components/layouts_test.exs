@@ -175,6 +175,19 @@ defmodule ArbiterWeb.LayoutsTest do
     end
   end
 
+  describe "app/1 — page inset" do
+    # bd-2qqqbp: the page-inset contract is two-sided. `<main>` gives up room on
+    # the right for a side-panel session window and on the left for the nav
+    # rail, and each side is its own variable so the page only pays for an edge
+    # something is actually occupying.
+    test "main is inset from both edges, not just the dock's" do
+      html = render_app()
+
+      assert html =~ "pl-[var(--nav-rail-page-inset)]"
+      assert html =~ "pr-[var(--session-dock-page-inset)]"
+    end
+  end
+
   describe "app/1 — flash" do
     test "renders flash via the toast group, not the old flash_group" do
       html = render_app(%{flash: %{"info" => "Saved"}})

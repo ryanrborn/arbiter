@@ -264,6 +264,34 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert Doctor.green?() == true
   end
 
+  test "dev/source install with version mismatch hints to restart, not reinstall from release" do
+    # When the CLI is a dev/source install (has git access), a version mismatch hint
+    # should say "restart the server" instead of "reinstall the CLI from a release asset".
+    # This test only runs if git is available.
+    {_, git_rc} = System.cmd("git", ["describe"], stderr_to_stdout: true)
+
+    if git_rc == 0 do
+      mismatched_version_resp = %{
+        "version" => "0.1.64",
+        "sha" => "eb0c8690",
+        "built_at" => "2024-01-01T00:00:00Z",
+        "booted_at" => "2024-01-01T00:01:00Z"
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {mismatched_version_resp, 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[fail] version"
+      refute out =~ "reinstall the CLI from"
+      assert out =~ "restart"
+    end
+  end
+
   test "workspace resolution failure is an operator-actionable exit 1, but must not block deploy readiness" do
     prev = System.get_env("ARB_WORKSPACE")
     System.delete_env("ARB_WORKSPACE")
