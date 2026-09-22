@@ -359,11 +359,13 @@ defmodule Arbiter.Quota.CloudCode do
       snapshot ->
         provider = Map.fetch!(@provider_codes, which)
 
-        case upsert(workspace_id, provider, snapshot) do
-          {:ok, row} ->
-            broadcast(workspace_id, row)
-            snapshot
-
+        # P5 (§6): the row is keyed by the provider account this workspace
+        # meters under, resolved here so the probe's call site is unchanged.
+        with {:ok, account_id} <- Arbiter.Quota.ensure_account_id(workspace_id, provider),
+             {:ok, row} <- upsert(account_id, provider, snapshot) do
+          broadcast(account_id, row)
+          snapshot
+        else
           {:error, reason} ->
             Logger.debug("Arbiter.Quota.CloudCode: #{provider} upsert failed: #{inspect(reason)}")
             snapshot
@@ -378,15 +380,15 @@ defmodule Arbiter.Quota.CloudCode do
   defp fetch_snapshot(:gemini, opts), do: gemini(opts)
   defp fetch_snapshot(:antigravity, opts), do: antigravity(opts)
 
-  defp upsert(workspace_id, provider, snapshot) do
+  defp upsert(account_id, provider, snapshot) do
     {used_percent, reset_at, stored_snapshot} =
       case representative(snapshot) do
-        {nil, nil} -> preserve_last_good(workspace_id, provider, snapshot)
+        {nil, nil} -> preserve_last_good(account_id, provider, snapshot)
         {used_percent, reset_at} -> {used_percent, reset_at, stringify(snapshot)}
       end
 
     attrs = %{
-      workspace_id: workspace_id,
+      provider_account_id: account_id,
       provider: provider,
       plan: snapshot[:plan],
       message: snapshot[:message],
@@ -408,8 +410,8 @@ defmodule Arbiter.Quota.CloudCode do
   # `serialize_latest/2` (and therefore `arb quota`/the MCP quota tool) reads
   # back verbatim. Falls back to writing the empty snapshot as-is when there
   # is no previous row to preserve.
-  defp preserve_last_good(workspace_id, provider, snapshot) do
-    case latest(workspace_id, provider) do
+  defp preserve_last_good(account_id, provider, snapshot) do
+    case latest(account_id, provider) do
       %GoogleQuota{used_percent: used_percent, reset_at: reset_at, snapshot: prior}
       when not is_nil(prior) ->
         merged =
@@ -459,21 +461,17 @@ defmodule Arbiter.Quota.CloudCode do
     term |> Jason.encode!() |> Jason.decode!()
   end
 
-  defp broadcast(workspace_id, %GoogleQuota{} = row) do
-    Phoenix.PubSub.broadcast(
-      Arbiter.PubSub,
-      "quota:#{workspace_id}",
-      {:quota_updated, workspace_id, view(row)}
-    )
+  defp broadcast(account_id, %GoogleQuota{} = row) do
+    Arbiter.Quota.Broadcast.quota_updated(account_id, view(row))
   rescue
     _ -> :error
   end
 
-  @doc "Latest stored Google snapshot row for `workspace_id` + `provider`, or `nil`."
+  @doc "Latest stored Google snapshot row for `provider_account_id` + `provider`, or `nil`."
   @spec latest(String.t(), String.t()) :: GoogleQuota.t() | nil
-  def latest(workspace_id, provider) when is_binary(workspace_id) and is_binary(provider) do
+  def latest(account_id, provider) when is_binary(account_id) and is_binary(provider) do
     GoogleQuota
-    |> Ash.Query.filter(workspace_id == ^workspace_id and provider == ^provider)
+    |> Ash.Query.filter(provider_account_id == ^account_id and provider == ^provider)
     |> Ash.read_one()
     |> case do
       {:ok, %GoogleQuota{} = row} -> row
@@ -483,10 +481,13 @@ defmodule Arbiter.Quota.CloudCode do
     _ -> nil
   end
 
-  @doc "Serialize the latest stored snapshot for `workspace_id` + `provider`, or `nil`."
+  # A workspace with no Google account yet reads as "nothing captured".
+  def latest(_account_id, _provider), do: nil
+
+  @doc "Serialize the latest stored snapshot for `provider_account_id` + `provider`, or `nil`."
   @spec serialize_latest(String.t(), String.t()) :: map() | nil
-  def serialize_latest(workspace_id, provider) do
-    case latest(workspace_id, provider) do
+  def serialize_latest(account_id, provider) do
+    case latest(account_id, provider) do
       nil -> nil
       %GoogleQuota{snapshot: snapshot} -> snapshot
     end
@@ -506,7 +507,7 @@ defmodule Arbiter.Quota.CloudCode do
   def view(%GoogleQuota{} = row) do
     Arbiter.Quota.blank_view(row.provider)
     |> Map.merge(%{
-      workspace_id: row.workspace_id,
+      provider_account_id: row.provider_account_id,
       utilization_5h: fraction(row.used_percent),
       reset_5h_at: row.reset_at,
       captured_at: row.captured_at,

@@ -1,9 +1,19 @@
 # Workspace-Config Reload Across Long-Lived GenServers — Design Note
 
 **Status:** proposed (investigation + design; implementation deferred to a follow-up epic)
-**Last updated:** 2026-07-06
+**Last updated:** 2026-09-22
 **Task:** bd-hxom55
 **Related:** PR #635 (`2d27c05`, PR-patrol per-tick refetch), PR #610 (`2b0ef62`, follow-up `source_pr`), bd-a8gxbj (investigate-then-propose precedent)
+
+> **Amended 2026-09-22 (bd-a14qd1).** The audit below originally named
+> `workflows/conductor.ex` as the worst offender and the motivating bug: it
+> resolved `config["conductor"]["max_concurrent"]` once at `init` and never
+> again. That module is gone — the board scheduler is now the only dispatcher,
+> and it re-reads the same config key on every snapshot load
+> (`Arbiter.Board.Snapshot.workspace_config_max/1`), so the per-workspace
+> concurrency cap is already fresh per tick with no reload signal needed.
+> The two remaining init-only modules (`merged_pr_finalizer`, `merge_queue`)
+> are unchanged, and so is the recommendation.
 
 ---
 
@@ -46,7 +56,7 @@ Line numbers are against the tree at the time of writing. All modules under
 | `workflows/review_patrol.ex` | seed only | **yes — every tick** (`do_tick/1` ~222) | periodic tick | one tick (interval); `interval_ms` itself init-only |
 | `workflows/dispatch_queue.ex` | yes (~177) | **yes — every drain** (`reload_workspace/1` ~251) | hold/release/quota-reset drive a drain | one drain when active; **indefinite while idle** (nothing to gate) |
 | `worker/review_gate.ex` | no | **yes — on demand** (`load_workspace/1` ~1455) | per reviewer/implementer spawn | always fresh at point of use |
-| **`workflows/conductor.ex`** | **yes (~490)** | **no** | — | **never — needs restart** (`max_concurrent`) |
+| `board/snapshot.ex` (not a GenServer) | — | **yes — every snapshot** (`workspace_config_max/1`) | scheduler tick | always fresh at point of use (`max_concurrent`) |
 | **`workflows/merged_pr_finalizer.ex`** | **yes (~108)** | **no** | — | **never — needs restart** (merger adapter) |
 | **`workflows/merge_queue.ex`** | yes (~1269) | **partial — per enqueue only** (~425) | on new task enqueue; **not** on the periodic `:tick` | `poll_interval_ms` never; merge/adapter config stale until next enqueue, **indefinite if queue idle** |
 | `worker/watchdog.ex` | yes, passed-in struct (~296) | no | — | never for the process, but **per-PR short-lived** — each new watch gets a fresh workspace, so harmless |
@@ -64,22 +74,14 @@ scope): `agents/credential_watchdog.ex` (enumerates workspaces via
 `quota/refresh_probe.ex` (enumerates IDs / base URLs), `single_instance.ex`
 (no config).
 
-### The three that are actually broken
+### The two that are actually broken
 
-1. **`conductor.ex` — the real bug.** `workspace_max_concurrent` is computed
-   once in `init` (`resolve_workspace_max/3` → `workspace_config_max/1`, the
-   sole `Ash.get(Workspace)` at ~490) and stored in `state`. It is never
-   recomputed. An operator raising or lowering
-   `config["conductor"]["max_concurrent"]` via `arb config set` has **no
-   effect until the Conductor restarts.** This is the same class of bug PR
-   patrol used to have.
-
-2. **`merged_pr_finalizer.ex`.** `state.workspace` is loaded once in `init`
+1. **`merged_pr_finalizer.ex`.** `state.workspace` is loaded once in `init`
    (~108) and every `do_tick/1` reuses it. Lower stakes — it only reads the
    merger adapter, which rarely changes — but it is genuinely
    restart-to-reload.
 
-3. **`merge_queue.ex` — partial.** The periodic `:tick`/`poll_all` path never
+2. **`merge_queue.ex` — partial.** The periodic `:tick`/`poll_all` path never
    reloads; only a *new enqueue* refreshes `state.workspace`/`state.adapter`.
    So merge-strategy / adapter changes are picked up "eventually" but can hang
    stale indefinitely on an idle-but-not-empty queue, and `poll_interval_ms`
@@ -133,17 +135,17 @@ the primary mechanism.**
 
 It is the obvious simpler option, so it deserves a fair hearing — and it loses:
 
-- It means adding a **bespoke 20s timer + refetch to `conductor` and
-  `merged_pr_finalizer`, and reworking `merge_queue`'s tick** — three more
-  independent polling loops, each re-reading the DB every 20s per workspace,
-  forever, for config that changes maybe once a day.
+- It means adding a **bespoke 20s timer + refetch to `merged_pr_finalizer`,
+  and reworking `merge_queue`'s tick** — more independent polling loops, each
+  re-reading the DB every 20s per workspace, forever, for config that changes
+  maybe once a day.
 - It is *still* up to 20s laggy by construction, and it never converges: the
   next module added will invent its own interval again (exactly the "every
   GenServer inventing its own ad hoc polling interval" problem this ticket was
   opened to stop).
 - It is, counter-intuitively, **more code than the shared hook**, because the
-  three affected long-lived GenServers (`conductor`, `dispatch_queue`,
-  `merge_queue`) *already* `Phoenix.PubSub.subscribe/2` in their `init` and
+  affected long-lived GenServers (`dispatch_queue`, `merge_queue`)
+  *already* `Phoenix.PubSub.subscribe/2` in their `init` and
   already run `handle_info` loops. Adding one subscribe line + one
   `handle_info` clause is smaller than standing up a timer.
 
@@ -181,9 +183,8 @@ Rationale: config-reload is an internal server-side concern with a different
 payload contract and audience than the coordinator-facing event stream;
 coupling them would drag `Arbiter.Events`' `{:event, map}` envelope and topic
 filtering into an unrelated path. The 2-line subscribe cost per module is
-trivial. (`conductor` happens to already subscribe to `events:<ws_id>`, but the
-other consumers subscribe to `quota:<id>` / `merge_queue:<id>`, so no single
-existing topic reaches all of them anyway.)
+trivial. (The consumers subscribe to `quota:<id>` / `merge_queue:<id>`, so no
+single existing topic reaches all of them anyway.)
 
 Centralize the topic string and broadcast in a small helper module (mirroring
 `Arbiter.Events` / `Message.topic/1`), e.g. `Arbiter.Workspaces.ConfigEvents`:
@@ -276,7 +277,6 @@ Per-module `reload_workspace_config/1`:
 
 | Module | What it recomputes on the signal |
 |---|---|
-| `conductor.ex` | `state.workspace_max_concurrent` via `resolve_workspace_max/3` (re-reads `Workspace.max_concurrent/1`) — **the core fix** |
 | `merged_pr_finalizer.ex` | `state.workspace` via `Ash.get(Workspace, id)` (refreshes the merger adapter) |
 | `merge_queue.ex` | `state.workspace` + `state.adapter` (and `poll_interval_ms`) via its existing `load_adapter_for/1` |
 
@@ -323,11 +323,10 @@ Land in reviewable slices so each is independently verifiable:
    + `BroadcastConfigChange` change wired into `:patch_config` and `:update`,
    with a test asserting a broadcast fires on `arb config set` and does **not**
    fire on a name-only `:update`. No subscriber yet — pure, safe to merge.
-2. **Conductor** (the actual bug) — subscribe + `reload_workspace_config/1`
-   recomputing `workspace_max_concurrent`. Test: change `max_concurrent`, assert
-   the effective cap moves without a restart.
-3. **merged_pr_finalizer** and **merge_queue** — same pattern.
-4. **Optional convergence** — subscribe `pr_patrol` / `review_patrol` (+ the
+2. **merged_pr_finalizer** and **merge_queue** — subscribe +
+   `reload_workspace_config/1`. Test: change the merger adapter, assert it
+   moves without a restart.
+3. **Optional convergence** — subscribe `pr_patrol` / `review_patrol` (+ the
    LiveView) for uniform <1s propagation.
 
 Each slice is small, mirrors an idiom already in the tree, and is independently

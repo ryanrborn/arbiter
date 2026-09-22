@@ -17,7 +17,7 @@ defmodule Arbiter.Quota.GateTest do
 
   defp quota(attrs) do
     %AnthropicQuota{
-      workspace_id: "ws-x",
+      provider_account_id: "acct-x",
       provider: "claude",
       captured_at: DateTime.utc_now()
     }
@@ -29,7 +29,7 @@ defmodule Arbiter.Quota.GateTest do
     past = DateTime.utc_now() |> DateTime.add(-3600, :second)
 
     %AnthropicQuota{
-      workspace_id: "ws-x",
+      provider_account_id: "acct-x",
       provider: "claude",
       captured_at: DateTime.utc_now(),
       reset_5h_at: past

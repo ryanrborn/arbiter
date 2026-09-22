@@ -1,6 +1,7 @@
 defmodule Arbiter.Quota.CodexQuota do
   @moduledoc """
-  Per-workspace snapshot of Codex's (OpenAI) rate-limit / quota state (bd-cqfn5i).
+  Per-**account** snapshot of Codex's (OpenAI) rate-limit / quota state
+  (bd-cqfn5i; re-keyed to the account by P5, bd-3yokey).
 
   Unlike `Arbiter.Quota.AnthropicQuota`, which is updated by explicit fetch
   (`Arbiter.Quota.OAuthUsage`) and header capture from worker responses, this
@@ -16,10 +17,12 @@ defmodule Arbiter.Quota.CodexQuota do
   Each carries a used-percent (0–100) and a reset timestamp, mirroring the
   `{used, total: 100, remaining, resetAt}` shape 9router normalizes to.
 
-  One row per `{workspace_id, provider}` — the `:upsert` action overwrites the
-  prior snapshot in place, so this stays a cache of the latest reading, not a
-  time series. Every window field is optional: a response carrying only the
-  session window still writes a row with the weekly columns left `nil`.
+  One row per `{provider_account_id, provider}` — the `:upsert` action
+  overwrites the prior snapshot in place, so this stays a cache of the latest
+  reading, not a time series. Every window field is optional: a response
+  carrying only the session window still writes a row with the weekly columns
+  left `nil`. The OpenAI limit is per account, so workspaces sharing a Codex
+  plan share one row (`docs/provider-account-design.md` §6).
   """
 
   use Ash.Resource,
@@ -38,10 +41,10 @@ defmodule Arbiter.Quota.CodexQuota do
     create :upsert do
       primary? true
       upsert? true
-      upsert_identity :workspace_provider
+      upsert_identity :account_provider
 
       accept [
-        :workspace_id,
+        :provider_account_id,
         :provider,
         :plan,
         :session_used_percent,
@@ -57,11 +60,10 @@ defmodule Arbiter.Quota.CodexQuota do
   attributes do
     uuid_primary_key :id
 
-    attribute :workspace_id, :string do
+    attribute :provider_account_id, :uuid do
       allow_nil? false
       public? true
-      constraints max_length: 255, trim?: true
-      description "Workspace these quota figures were captured for."
+      description "Provider account these quota figures were captured for (§6)."
     end
 
     attribute :provider, :string do
@@ -95,7 +97,7 @@ defmodule Arbiter.Quota.CodexQuota do
   end
 
   identities do
-    # One snapshot per workspace+provider; fetch/2 upserts onto this.
-    identity :workspace_provider, [:workspace_id, :provider]
+    # One snapshot per account+provider; fetch/2 upserts onto this.
+    identity :account_provider, [:provider_account_id, :provider]
   end
 end

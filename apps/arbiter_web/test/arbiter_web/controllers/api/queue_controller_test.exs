@@ -90,32 +90,28 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     end
   end
 
-  describe "POST /api/queue/:task_id/resume — dispatch guardrail (bd-5b5hq7)" do
-    # Same shape as WorkerController's dispatch guardrail: this route
-    # re-dispatches a worker, so a bearer token with can_dispatch: false must
-    # be refused before ever reaching Conductor.resume_task/1 — otherwise a
-    # session denied dispatch over MCP could curl this loopback route
-    # instead. Refused before task/graph lookup, so a bogus task_id is fine.
-    test "a bearer token with can_dispatch: false is refused, even over loopback", %{
-      conn: conn
-    } do
-      token = Arbiter.MCP.Scope.mint_coordinator(nil, can_dispatch: false)
+  # bd-a14qd1: `POST /api/queue/:task_id/resume` is gone with the Conductor —
+  # it re-dispatched a graph branch, and there are no graphs. The guardrail it
+  # carried (bd-5b5hq7) is still exercised by WorkerController's own test.
+  describe "POST /api/queue/:task_id/resume (removed, bd-a14qd1)" do
+    test "the route and its action are gone" do
+      assert Phoenix.Router.route_info(
+               ArbiterWeb.Router,
+               "POST",
+               "/api/queue/bd-1/resume",
+               "localhost"
+             ) == :error
 
-      conn =
-        conn
-        |> put_req_header("authorization", "Bearer #{token}")
-        |> post(~p"/api/queue/nonexistent-task/resume", %{})
+      refute function_exported?(ArbiterWeb.Api.QueueController, :resume, 2)
 
-      body = json_response(conn, 403)
-      assert body["error"]["message"] =~ "can_dispatch"
-    end
-
-    test "no token at all (anonymous loopback) is unaffected by the guardrail", %{conn: conn} do
-      conn = post(conn, ~p"/api/queue/nonexistent-task/resume", %{})
-
-      # Falls through to Conductor.resume_task/1, which 404s for an unknown
-      # task — proof the guardrail didn't intercept an anonymous caller.
-      assert json_response(conn, 404)
+      # The sibling queue routes are untouched.
+      assert %{plug_opts: :restart_watchdog} =
+               Phoenix.Router.route_info(
+                 ArbiterWeb.Router,
+                 "POST",
+                 "/api/queue/bd-1/restart_watchdog",
+                 "localhost"
+               )
     end
   end
 

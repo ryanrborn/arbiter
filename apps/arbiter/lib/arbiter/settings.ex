@@ -4,8 +4,8 @@ defmodule Arbiter.Settings do
 
   Backs a small persisted singleton (`Arbiter.Settings.Installation`) so
   settings that used to require editing `config/*.exs` and redeploying — e.g.
-  the Conductor's system-wide `max_concurrent` ceiling
-  (`Arbiter.Workflows.Conductor`), or which adapters
+  the system-wide `max_concurrent` worker ceiling
+  (`Arbiter.Board.Snapshot`), or which adapters
   `Arbiter.Agents.CredentialWatchdog` probes — can be read and changed at
   runtime, taking effect on the next drain / poll cycle with no restart.
 
@@ -28,7 +28,7 @@ defmodule Arbiter.Settings do
   end
 
   @doc """
-  The install-wide Conductor concurrency ceiling override, or `nil` if unset
+  The install-wide worker concurrency ceiling override, or `nil` if unset
   (caller should fall back to app env / hardcoded default). Never raises —
   any read failure is treated as "unset".
   """
@@ -36,7 +36,7 @@ defmodule Arbiter.Settings do
   def conductor_system_max_concurrent, do: read_setting(:conductor_system_max_concurrent)
 
   @doc """
-  Set the install-wide Conductor concurrency ceiling. `nil` clears the
+  Set the install-wide worker concurrency ceiling. `nil` clears the
   override (falls back to app env / hardcoded default). Returns the updated
   value (or `nil` when cleared).
   """

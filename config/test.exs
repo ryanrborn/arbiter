@@ -110,6 +110,14 @@ config :arbiter, :auto_start_refineries, false
 # dir of their own.
 config :arbiter, :worker_isolate_config, false
 
+# Provider accounts (P3, bd-aiodva): the read flip is a *matrix*, not a single
+# run — acceptance 5 is "the suite passes with the flag both on and off". The
+# default `mix test` run keeps the production default (off, the pre-P3 read
+# paths); `ARBITER_PROVIDER_ACCOUNTS=1 mix test` runs the same suite with the
+# accounts tables as the credential source. Tests that pin one side explicitly
+# (Application.put_env in their own setup) are unaffected by either leg.
+config :arbiter, :provider_accounts_enabled, System.get_env("ARBITER_PROVIDER_ACCOUNTS") == "1"
+
 # Arbiter.MCP (bd-dem49g): the server stays enabled (Plug tests exercise it), but
 # per-spawn `.mcp.json` injection into worktrees is off by default so existing
 # Sling tests don't write config files or mint tokens. Tests that exercise

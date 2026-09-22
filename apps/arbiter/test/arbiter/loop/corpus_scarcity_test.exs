@@ -70,7 +70,11 @@ defmodule Arbiter.Loop.CorpusScarcityTest do
       Ash.create(
         AnthropicQuota,
         Map.merge(
-          %{workspace_id: ws.id, provider: "claude", captured_at: DateTime.utc_now()},
+          %{
+            provider_account_id: quota_account_id!(ws.id),
+            provider: "claude",
+            captured_at: DateTime.utc_now()
+          },
           attrs
         )
       )

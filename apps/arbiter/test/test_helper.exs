@@ -49,7 +49,17 @@ systemd_user_reason =
     {:unavailable, reason} -> reason
   end
 
-ExUnit.start(exclude: [:live_systemd, :live_claude, :systemd_user] ++ tmux_exclude)
+# bd-96mn8i round 5 finding 1: `:live_codex_cli` spawns the REAL `codex exec`
+# CLI (a live one-word round trip) to prove criterion 3 — that the fixed
+# `Usage.Probe` parses codex's actual `turn.completed` wire shape, not only a
+# replayed fixture. Same opt-in reason as `:live_claude`: it spends real quota
+# against a live account, so it stays out of `mix precommit`. Run it
+# deliberately:
+#
+#     mix test --include live_codex_cli test/arbiter/agents/preflight_usage_test.exs
+ExUnit.start(
+  exclude: [:live_systemd, :live_claude, :live_codex_cli, :systemd_user] ++ tmux_exclude
+)
 
 # `mix test` applies its `--include`/`--exclude` before loading this file, so
 # the filters here are the run's real ones.

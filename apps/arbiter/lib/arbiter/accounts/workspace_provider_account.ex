@@ -5,7 +5,9 @@ defmodule Arbiter.Accounts.WorkspaceProviderAccount do
   because the provider set grows (Antigravity is recent) and this is the
   natural home for `share` (§4).
 
-  **Nothing reads this resource yet** (P1 scope).
+  Read by `Arbiter.Accounts.Credentials` since P3 (bd-aiodva) — it is the
+  join hop between a spawn's workspace and the credential it carries — but
+  only when `Arbiter.Accounts.enabled?/0` is true.
 
   Cardinality (§3.4): one account per provider per workspace, enforced by the
   `identity` below. A workspace may have `claude` on one account and `codex`

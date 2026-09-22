@@ -60,10 +60,11 @@ defmodule Arbiter.Board.Scheduler do
 
   ## The mutex (bd-6bax7s)
 
-  `:conflicts_with` used to be the Graph Conductor's alone, so a coordinator
-  who set the edge on two board cards got both dispatched anyway. Both
-  schedulers now ask `Arbiter.Tasks.EdgeGate.gate/1` the same question; this
-  module only supplies the inputs and phrases the answer.
+  `:conflicts_with` used to be honoured only by the since-removed graph
+  engine, so a coordinator who set the edge on two board cards got both
+  dispatched anyway. The board now asks `Arbiter.Tasks.EdgeGate.gate/1` the
+  same question; this module only supplies the inputs and phrases the
+  answer.
 
   Two of those inputs are the caller's to compute, because purity forbids this
   module from going and looking: `card.conflicts_with` is the card's
@@ -238,8 +239,8 @@ defmodule Arbiter.Board.Scheduler do
   defp board_hold(_paused, _quota, slots) when is_integer(slots) and slots > 0, do: nil
   defp board_hold(_paused, _quota, _slots), do: @no_slot_reason
 
-  # The edge question is `EdgeGate`'s (shared with the Conductor); the file
-  # overlap is the board's alone, and only gets asked once the edges are clear.
+  # The edge question is `EdgeGate`'s; the file overlap is the board's alone,
+  # and only gets asked once the edges are clear.
   defp card_block(card, claimed, mutex) do
     gate =
       EdgeGate.gate(%{

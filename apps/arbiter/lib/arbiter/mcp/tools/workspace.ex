@@ -163,7 +163,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # ---- installation_config_get --------------------------------------------
 
   @doc """
-  Read an install-wide runtime setting (bd-2ogep0) — the Conductor's system-wide
+  Read an install-wide runtime setting (bd-2ogep0) — the system-wide
   concurrency ceiling and the `Arbiter.Agents.CredentialWatchdog` knobs
   (bd-ajgve2). Returns the full settings map when `key` is omitted. Available to
   both tiers (read-only, no workspace scoping — this is installation-wide).
@@ -198,8 +198,9 @@ defmodule Arbiter.MCP.Tools.Workspace do
   in `Arbiter.MCP.Catalog`). `null` always clears an override, falling back to
   the application env / hardcoded default. Settable keys:
 
-    * `conductor_system_max_concurrent` — positive integer. Takes effect on the
-      next Conductor drain cycle across every running graph.
+    * `conductor_system_max_concurrent` — positive integer, the install-wide
+      worker ceiling. Takes effect on the board scheduler's next tick. (The
+      `conductor_` prefix is historical; see `Arbiter.Settings`.)
     * `credential_watchdog_adapters` — list of agent-type names
       (`Arbiter.Agents.valid_agent_types/0`) the Watchdog should probe; `[]`
       probes nothing.

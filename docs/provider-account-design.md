@@ -364,8 +364,16 @@ account_headroom(a, ws) =
 
 ```
 arb account set personal-max --max-concurrent 4
-arb workspace set-account vstim claude personal-max --share 2
+arb account attach vstim claude personal-max --share 2
 ```
+
+> **As shipped (P8, bd-1k6pgv).** The share's write surface is P11's
+> `arb account attach`, not a second workspace-side verb — P11 already owned
+> the `workspace_provider_accounts` row, and two commands writing one column
+> is how a config surface starts disagreeing with itself. P8 added
+> `arb account set <ref> --max-concurrent N|none` and the semantics below;
+> the ceiling and the share are read by
+> `Arbiter.Accounts.Concurrency.account_headroom/2`.
 
 `share` is a **cap, not a reservation**. Shares may sum to more than the ceiling
 — that is the useful configuration, because it lets a quiet workspace's slots be
@@ -486,6 +494,21 @@ keep working. `--json` gains `account` and `workspaces` keys and retains
 that was asked for), so the LiveView and any operator scripts do not break
 mid-sequence.
 
+**What P5 actually shipped (bd-3yokey).** As written above, plus one decision
+the section does not spell out: **what happens to a quota row whose workspace
+has no account.** An install that has never run `mix arbiter.accounts.migrate`
+has no join rows at all, and a snapshot keyed by nothing cannot be written —
+so both the migration and the runtime write path resolve through
+`Arbiter.Accounts.Resolver`, which takes the join row, else the provider's
+**sole enabled** account (the same "unambiguous install-wide" rule
+`ConfigDir.oauth_token/1` already applies to credentials), else a single
+shared `default` account minted per provider. One account per provider, never
+one per workspace — minting per workspace would reproduce exactly the
+duplication this phase removes. A minted account carries no
+`provider_credentials`, so it supplies nothing to any spawn; the link it
+writes is metering identity only, and `arb account attach` / `merge` (§2.5,
+P11) is the correction when the guess is wrong.
+
 ---
 
 ## 7. Migrating the encrypted credential material
@@ -591,6 +614,29 @@ way:
   worker from the blob. `mix arbiter.accounts.migrate` says so in its own
   output and prints the rollback command. Run it on an install only when P3 is
   close behind, or when the credential reaches workers by another route.
+
+**What P3 actually shipped (bd-aiodva).** The read flip landed as written —
+`ConfigDir.oauth_token/1`, `ConfigDir.env/1` and `WorkerEnv.resolve/1` source
+provider credentials from `Arbiter.Accounts.Credentials` (one join hop:
+`workspace_provider_accounts` → the account's active `provider_credentials`
+row) when `:provider_accounts_enabled` is true, and are untouched when it is
+false. Two decisions the rows above do not spell out:
+
+* **A dropped credential is loud, not silent.** If a workspace's blob still
+  carries an allowlisted credential key and no account supplies it, the read
+  raises `Arbiter.Accounts.MissingCredentialError` rather than handing a
+  worker an environment with the credential quietly missing — which would
+  401 minutes later and burn the run. So the operator order is "migrate every
+  workspace that carries a credential, *then* flip the flag", and the two
+  undos (flip the flag back, or `mix arbiter.accounts.rollback`) both stay
+  cheap.
+* **Install-level sources are not what P3 moved.** `oauth_token/1`'s steps 2
+  and 3 (the server process env, and the unambiguous install-wide value) are
+  install configuration, not workspace configuration, so a workspace that
+  never carried a token of its own still falls through to them, and a spawn
+  with no workspace in hand — the fleet-wide watchdog and quota probes — takes
+  the unambiguous install-wide *account* credential with those steps beneath
+  it as a floor. P4 deletes them; P3 does not.
 
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
@@ -731,15 +777,15 @@ Each phase is sized to be one child ticket.
 | **P0** | `mix arbiter.accounts.census` — read-only; fingerprints and key names only; emits the candidate plan | — | P2 | D2 |
 | **P1** | `ProviderAccount` / `ProviderCredential` / `WorkspaceProviderAccount` resources + migration. Tables only; nothing reads them | P0 | P2 | D2 |
 | **P2** | Plan-driven extraction: move allowlisted keys, encrypted backup row, `mix arbiter.accounts.rollback`. Flag off; workspace blob still authoritative | P1 | P2 | D3 |
-| **P3** | Read-path flip behind `:provider_accounts_enabled` — `ConfigDir.oauth_token/1`, `ConfigDir.env/1`, `WorkerEnv.resolve/1` source from the account | P2 | P2 | D3 |
+| **P3** | Read-path flip behind `:provider_accounts_enabled` — `ConfigDir.oauth_token/1`, `ConfigDir.env/1`, `WorkerEnv.resolve/1` source from the account (**shipped**, bd-aiodva; see §7.5) | P2 | P2 | D3 |
 | **P4** | Destructive step: remove moved keys from `worker_env`; delete `ConfigDir`'s server-env and install-wide-unambiguous fallbacks | P3 | P2 | D2 |
-| **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
+| **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) (**shipped**, bd-3yokey) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
 | **P6** | Build account iteration in the probes: `CloudProbe` fetches `/api/oauth/usage` once per account (bd-4fbpto deleted bd-5xuneh's per-token grouping; this is new code, not a re-key of it — §9); `OAuthUsage` cooldown keyed by account | P5 | P2 | D2 |
 | **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` | P5 | **P1** | D3 |
-| **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in | P7 | P2 | D3 |
+| **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in (**shipped**, bd-1k6pgv) | P7 | P2 | D3 |
 | **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill | bd-adyhvn, P2 | P2 | D2 |
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces | P9, P5 | P3 | D2 |
-| **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) | P2 | P2 | D2 |
+| **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |
 
 P5 and P7 are P1 because they are the correctness fixes — the gate is only sound

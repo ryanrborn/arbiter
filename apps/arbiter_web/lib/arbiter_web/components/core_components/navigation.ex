@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.CoreComponents.Navigation do
   @moduledoc """
   Navigation primitives from the operator-console design handoff: TopNav,
-  FilterTabs, SegmentedControl, Pager, SeeAllLink, BackLink.
+  SidebarNav, FilterTabs, SegmentedControl, Pager, SeeAllLink, BackLink.
 
   Colors and spacing are drawn from the `--arb-*`/semantic design tokens in
   `assets/css/app.css` via Tailwind arbitrary values (`bg-[var(--...)]`)
@@ -14,10 +14,12 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
   `except:` — call them fully qualified (e.g.
   `ArbiterWeb.CoreComponents.Navigation.pager/1`) until a follow-up ticket
   migrates call sites. `top_nav/1` and `segmented_control/1` have no such
-  collision and resolve normally as `<.top_nav>` / `<.segmented_control>`.
+  collision and resolve normally as `<.top_nav>` / `<.segmented_control>`;
+  so does `sidebar_nav/1`.
   """
   use Phoenix.Component
 
+  alias ArbiterWeb.Nav
   alias Phoenix.LiveView.JS
 
   import ArbiterWeb.CoreComponents.Brandmark, only: [brandmark: 1]
@@ -132,7 +134,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
   defp nav_badge(assigns) do
     ~H"""
     <span
-      :if={is_integer(@count) and @count > 0}
+      :if={nav_badge?(@count)}
       data-role="nav-badge"
       class="ml-1.5 inline-block min-w-[16px] px-1 rounded-[var(--radius-pill)] bg-[var(--surface-raised)] text-[9.5px] leading-[15px] text-center font-[family-name:var(--font-mono)] text-[var(--text-secondary)] align-middle"
     >
@@ -140,6 +142,8 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
     </span>
     """
   end
+
+  defp nav_badge?(count), do: is_integer(count) and count > 0
 
   defp item_active?(active_href, _current, href) when not is_nil(active_href),
     do: href == active_href
@@ -154,6 +158,159 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
 
   defp nav_active?(current, target),
     do: current == target or String.starts_with?(current, target <> "/")
+
+  @doc """
+  The persistent left icon rail (bd-2pezqm): a `var(--nav-rail-width)` icon
+  column that widens to `var(--nav-rail-width-expanded)` and grows labels
+  when `expanded` is set.
+
+  It renders the shared nav model — pass `ArbiterWeb.Nav.groups/1` straight
+  in — and resolves its single active item with `ArbiterWeb.Nav.active_href/2`,
+  which is longest-match-wins, so `/workers/history/abc123` lights up
+  `Run history` and leaves `Workers` alone (a plain prefix match would light
+  up both).
+
+  Three visual states, one markup tree:
+
+  * **collapsed** (`expanded={false}`) — icons only. Each item carries
+    `aria-label` and `title` equal to its label, so the label stays reachable
+    by screen reader and by hover when no text is drawn; group boundaries are
+    hairline separators instead of headers.
+  * **expanded** (`expanded={true}`) — labels beside the icons and uppercase
+    mono group headers. The leading ungrouped group (`label: nil`) gets no
+    header.
+  * **floated on hover** — the same expanded markup, driven by whoever renders
+    the rail. This component only takes `expanded`; the hover float and the
+    page-inset contract belong to the layout (bd-d63b1c / bd-2qqqbp).
+
+  The pin button emits the `"toggle-nav-pin"` event and reports its state
+  through `aria-pressed`. Handling that event is the caller's job — this
+  component is stateless.
+
+  Sizing comes from the two custom properties only, never from pixel
+  literals, so the rail and the page inset can never disagree.
+
+  ## Examples
+
+      <.sidebar_nav groups={ArbiterWeb.Nav.groups(@open_epic_count)} current_path={@current_path}>
+        <:footer><.theme_toggle /></:footer>
+      </.sidebar_nav>
+  """
+  attr :groups, :list,
+    required: true,
+    doc:
+      "`ArbiterWeb.Nav.group/0` list — `%{label: string | nil, items: [%{label, href, icon, badge}]}`; a nil label marks the leading ungrouped group"
+
+  attr :current_path, :string,
+    default: nil,
+    doc: "request path, resolved to one active item by `ArbiterWeb.Nav.active_href/2`"
+
+  attr :expanded, :boolean,
+    default: false,
+    doc: "labels and group headers instead of bare icons; also drives the pin's `aria-pressed`"
+
+  attr :id, :string, default: "sidebar-nav"
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  slot :footer, doc: "pinned to the bottom of the rail, below the last group"
+
+  def sidebar_nav(assigns) do
+    assigns =
+      assign(assigns, :active_href, Nav.active_href(assigns.groups, assigns.current_path))
+
+    ~H"""
+    <nav
+      id={@id}
+      aria-label="Primary"
+      class={[
+        "flex flex-col h-full font-[family-name:var(--font-sans)]",
+        "bg-[var(--surface-chrome)] border-r border-solid border-[var(--border-default)]",
+        @expanded && "w-[var(--nav-rail-width-expanded)]",
+        !@expanded && "w-[var(--nav-rail-width)]",
+        @class
+      ]}
+      {@rest}
+    >
+      <div class={[
+        "flex flex-none items-center h-[var(--nav-height)] px-2",
+        @expanded && "justify-end",
+        !@expanded && "justify-center"
+      ]}>
+        <button
+          type="button"
+          phx-click="toggle-nav-pin"
+          aria-pressed={to_string(@expanded)}
+          aria-label="Pin navigation"
+          title="Pin navigation"
+          class="flex cursor-pointer items-center justify-center size-7 rounded-[var(--radius-field)] border-0 bg-transparent text-[var(--text-label)] transition-colors duration-150 hover:bg-[var(--arb-raised-hover)] hover:text-[var(--text-title)]"
+        >
+          <.icon
+            name={if(@expanded, do: "hero-chevron-double-left", else: "hero-chevron-double-right")}
+            size={14}
+          />
+        </button>
+      </div>
+
+      <div class="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overflow-x-hidden pb-2 [scrollbar-width:thin]">
+        <div :for={{group, index} <- Enum.with_index(@groups)} class="flex flex-col">
+          <div
+            :if={!@expanded && index > 0}
+            role="separator"
+            data-role="nav-group-separator"
+            class="mx-3 my-1.5 h-0 border-t border-solid border-[var(--border-default)]"
+          >
+          </div>
+          <div
+            :if={@expanded && group.label}
+            data-role="nav-group-header"
+            class="px-3 pt-3 pb-1 text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+          >
+            {group.label}
+          </div>
+
+          <.link
+            :for={item <- group.items}
+            navigate={item.href}
+            aria-current={item.href == @active_href && "page"}
+            aria-label={!@expanded && item.label}
+            title={!@expanded && item.label}
+            class={[
+              "relative mx-2 flex items-center rounded-[var(--radius-field)] text-xs transition-colors duration-150",
+              @expanded && "gap-2.5 px-2.5 py-[6px]",
+              !@expanded && "justify-center py-[7px]",
+              item.href == @active_href &&
+                "bg-[var(--surface-card)] font-medium text-[var(--text-title)]",
+              item.href != @active_href &&
+                "font-normal text-[var(--text-secondary)] hover:bg-[var(--arb-raised-hover)] hover:text-[var(--text-title)]"
+            ]}
+          >
+            <.icon :if={item[:icon]} name={item[:icon]} size={16} class="flex-none" />
+            <span :if={@expanded} class="min-w-0 truncate">{item.label}</span>
+            <.nav_badge :if={@expanded} count={item[:badge]} />
+            <span
+              :if={!@expanded && nav_badge?(item[:badge])}
+              class="absolute top-0.5 right-1 leading-none"
+            >
+              <.nav_badge count={item[:badge]} />
+            </span>
+          </.link>
+        </div>
+      </div>
+
+      <div
+        :if={@footer != []}
+        class={[
+          "flex flex-none items-center border-t border-solid border-[var(--border-default)] p-2",
+          @expanded && "justify-start gap-2",
+          !@expanded && "justify-center"
+        ]}
+      >
+        {render_slot(@footer)}
+      </div>
+    </nav>
+    """
+  end
 
   @doc """
   The status filter on an index page. Counts live inside the tab; a tab only

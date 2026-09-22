@@ -80,7 +80,7 @@ defmodule Arbiter.Quota.CodexTest do
 
       assert result.codex == nil
       assert result.message =~ "not authenticated"
-      assert Codex.latest(ws.id) == nil
+      assert Codex.latest(quota_account_id!(ws.id, "codex")) == nil
     end
   end
 
@@ -111,7 +111,7 @@ defmodule Arbiter.Quota.CodexTest do
       assert is_binary(result.codex.session.reset_at)
 
       # persisted, readable back
-      row = Codex.latest(ws.id)
+      row = Codex.latest(quota_account_id!(ws.id, "codex"))
       assert row.session_used_percent == 42.5
       assert row.weekly_used_percent == 8.0
     end
@@ -155,7 +155,7 @@ defmodule Arbiter.Quota.CodexTest do
 
       assert result.codex == nil
       assert result.message =~ "401"
-      assert Codex.latest(ws.id) == nil
+      assert Codex.latest(quota_account_id!(ws.id, "codex")) == nil
     end
   end
 

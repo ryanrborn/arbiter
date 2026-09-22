@@ -33,6 +33,7 @@ defmodule Arbiter.Workers.Reconciler do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -451,6 +452,8 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   defp write_reconciled_usage(%Run{} = run, totals) do
+    provider_account_id = AccountResolver.account_id(run.workspace_id, "claude")
+
     attrs = %{
       task_id: run.task_id,
       workspace_id: run.workspace_id,
@@ -458,6 +461,8 @@ defmodule Arbiter.Workers.Reconciler do
       step: usage_step_for(run.worker_type),
       model: run.model || totals.model,
       provider: "claude",
+      provider_account_id: provider_account_id,
+      provider_credential_id: AccountResolver.credential_id(provider_account_id),
       tokens_in: totals.tokens_in,
       tokens_out: totals.tokens_out,
       cache_creation_tokens: totals.cache_creation_tokens,

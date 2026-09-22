@@ -23,6 +23,23 @@ defmodule ArbiterCli.Cmd.Quota do
   Each provider also shows its recent spend (last 30 days, actual dollars from
   the usage ledger) when any is recorded.
 
+  ## Keyed by provider account (P5, `docs/provider-account-design.md` §6)
+
+  Every provider's rate limit is enforced per account, so a snapshot belongs
+  to an account, not a workspace — three workspaces on one Claude plan share
+  one budget and now share one row. Each block is therefore headed by the
+  account, the provider it is metered under, and the workspaces on it:
+
+      Anthropic quota (account personal-max · claude · 3 workspaces: default, emricare, vstim):
+
+  and `recent spend (30d)` is the **account** total, with the per-workspace
+  breakdown on the line beneath it.
+
+  `--workspace` is kept as a lookup shorthand: it resolves to that
+  workspace's account and adds a `via workspace X` line, so existing scripts
+  and muscle memory keep working. `--json` gains `account` / `workspaces`
+  keys and retains `workspace_id` for one release as a deprecated alias.
+
   Usage:
 
       arb quota [--workspace <id|name>] [--json]
@@ -52,7 +69,7 @@ defmodule ArbiterCli.Cmd.Quota do
         end
 
       case Client.get("/api/quota", params) do
-        {:ok, %{"data" => data}} -> emit(data, mode)
+        {:ok, %{"data" => data}} -> emit(data, mode, params)
         {:error, err} -> Output.die(err)
       end
     end
@@ -60,9 +77,10 @@ defmodule ArbiterCli.Cmd.Quota do
 
   # ---- render ------------------------------------------------------------
 
-  defp emit(data, :json), do: IO.puts(Jason.encode!(data))
+  defp emit(data, :json, _params), do: IO.puts(Jason.encode!(data))
 
-  defp emit(data, :text) do
+  defp emit(data, :text, params) do
+    emit_via_workspace(data, params)
     emit_claude(data)
     IO.puts("")
     emit_codex(data)
@@ -70,22 +88,104 @@ defmodule ArbiterCli.Cmd.Quota do
     emit_google(data["antigravity"], "Antigravity", provider_cost(data, "antigravity"))
   end
 
-  # Recent-spend line, sourced from the multi-provider `quotas` list each entry
-  # of which carries `cost_usd` (30-day actual spend from the usage ledger).
-  defp emit_spend(data, provider) do
-    case provider_cost(data, provider) do
-      cost when is_number(cost) ->
-        IO.puts("  recent spend (30d): $#{:erlang.float_to_binary(cost / 1, decimals: 2)}")
+  # §6: `--workspace` is a lookup shorthand for "the account this workspace
+  # meters under". Say so, so a reader is never left thinking the figures
+  # below are that workspace's alone.
+  defp emit_via_workspace(data, params) do
+    case Keyword.get(params, :workspace) do
+      ref when is_binary(ref) and ref != "" ->
+        IO.puts("via workspace #{workspace_label(data, ref)}")
+        IO.puts("")
 
       _ ->
         :ok
     end
   end
 
+  defp workspace_label(%{"workspace" => %{"name" => name}}, _ref) when is_binary(name), do: name
+  defp workspace_label(_data, ref), do: ref
+
+  # ---- account header (§6) -----------------------------------------------
+
+  # `Anthropic quota (account personal-max · claude · 3 workspaces: a, b, c)`,
+  # falling back to the pre-P5 `(workspace <id>)` form when the server reports
+  # no account for this provider — an install whose backfill has not run, or
+  # an older coordinator.
+  defp scope_label(data, provider) do
+    case provider_account(data, provider) do
+      %{"slug" => slug} = account ->
+        "account #{slug} · #{account["provider"] || provider}" <>
+          workspaces_clause(provider_workspaces(data, provider))
+
+      _ ->
+        "workspace #{data["workspace_id"]}"
+    end
+  end
+
+  defp workspaces_clause([]), do: ""
+
+  defp workspaces_clause(workspaces) do
+    names = Enum.map(workspaces, &(&1["name"] || &1["id"]))
+    noun = if length(names) == 1, do: "workspace", else: "workspaces"
+    " · #{length(names)} #{noun}: #{Enum.join(names, ", ")}"
+  end
+
+  defp provider_entry(data, provider) do
+    Enum.find(data["quotas"] || [], &(&1["provider"] == provider))
+  end
+
+  defp provider_account(data, provider) do
+    case provider_entry(data, provider) do
+      %{"account" => %{} = account} -> account
+      _ -> nil
+    end
+  end
+
+  defp provider_workspaces(data, provider) do
+    case provider_entry(data, provider) do
+      %{"workspaces" => workspaces} when is_list(workspaces) -> workspaces
+      _ -> []
+    end
+  end
+
+  # Recent-spend line, sourced from the multi-provider `quotas` list each entry
+  # of which carries `cost_usd` (30-day actual spend from the usage ledger).
+  defp emit_spend(data, provider) do
+    case provider_cost(data, provider) do
+      cost when is_number(cost) ->
+        IO.puts("  recent spend (30d): $#{money(cost)}")
+        emit_workspace_breakdown(data, provider)
+
+      _ ->
+        :ok
+    end
+  end
+
+  # The account total above is the headline; this says where it went. Only
+  # printed when the account has more than the one workspace the total
+  # already accounts for — a single-workspace account (the common install)
+  # would otherwise get a breakdown line restating the total verbatim — and
+  # only for workspaces with recorded spend.
+  defp emit_workspace_breakdown(data, provider) do
+    workspaces = provider_workspaces(data, provider)
+    priced = Enum.filter(workspaces, &is_number(&1["cost_usd"]))
+
+    if length(workspaces) > 1 and priced != [] do
+      IO.puts(
+        "    " <>
+          Enum.map_join(priced, " · ", fn ws ->
+            "#{ws["name"] || ws["id"]} $#{money(ws["cost_usd"])}"
+          end)
+      )
+    else
+      :ok
+    end
+  end
+
+  defp money(n), do: :erlang.float_to_binary(n / 1, decimals: 2)
+
   defp provider_cost(data, provider) do
-    (data["quotas"] || [])
-    |> Enum.find(&(&1["provider"] == provider))
-    |> case do
+    case provider_entry(data, provider) do
       %{"cost_usd" => c} when is_number(c) -> c
       _ -> nil
     end
@@ -93,12 +193,12 @@ defmodule ArbiterCli.Cmd.Quota do
 
   # Anthropic (Claude): utilization headers stored as a 0..1 fraction.
   defp emit_claude(%{"claude" => nil} = data) do
-    IO.puts("Anthropic quota (workspace #{data["workspace_id"]}):")
+    IO.puts("Anthropic quota (#{scope_label(data, "claude")}):")
     IO.puts("  (no quota captured yet — dispatch a Claude worker to populate it)")
   end
 
   defp emit_claude(%{"claude" => q} = data) do
-    IO.puts("Anthropic quota (workspace #{data["workspace_id"]}):")
+    IO.puts("Anthropic quota (#{scope_label(data, "claude")}):")
     emit_credentials_expired(q)
     IO.puts("  representative window: #{q["representative_claim"] || "—"}")
     IO.puts("  overage status:        #{q["overage_status"] || "—"}")
@@ -172,12 +272,12 @@ defmodule ArbiterCli.Cmd.Quota do
 
   # Codex (OpenAI): windows already normalized to a 0..100 used-percent.
   defp emit_codex(%{"codex" => nil} = data) do
-    IO.puts("Codex quota (workspace #{data["workspace_id"]}):")
+    IO.puts("Codex quota (#{scope_label(data, "codex")}):")
     IO.puts("  #{data["codex_message"] || "(no Codex quota available)"}")
   end
 
   defp emit_codex(%{"codex" => c} = data) do
-    IO.puts("Codex quota (workspace #{data["workspace_id"]}):")
+    IO.puts("Codex quota (#{scope_label(data, "codex")}):")
     IO.puts("  plan:        #{c["plan"] || "—"}")
     IO.puts("  captured at: #{c["captured_at"] || "—"}")
     IO.puts("")
@@ -187,7 +287,7 @@ defmodule ArbiterCli.Cmd.Quota do
   end
 
   defp emit_codex(data) do
-    IO.puts("Codex quota (workspace #{data["workspace_id"]}):")
+    IO.puts("Codex quota (#{scope_label(data, "codex")}):")
     IO.puts("  (no Codex quota available)")
   end
 
@@ -220,7 +320,7 @@ defmodule ArbiterCli.Cmd.Quota do
     end
 
     if is_number(cost) do
-      IO.puts("  recent spend (30d): $#{:erlang.float_to_binary(cost / 1, decimals: 2)}")
+      IO.puts("  recent spend (30d): $#{money(cost)}")
     end
   end
 

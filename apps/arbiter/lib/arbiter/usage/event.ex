@@ -77,6 +77,8 @@ defmodule Arbiter.Usage.Event do
       index [:task_id, :occurred_at]
       index [:base_task_id, :occurred_at]
       index [:source, :occurred_at]
+      # P9 (bd-al9qqe): powers `arb usage --by account` / `arb quota --account`.
+      index [:provider_account_id, :occurred_at]
       # bd-be804c: the ingest's idempotency lookup ("what have I already billed
       # this session?") runs once per session file per cycle, and `--by session`
       # groups on it. `task_id` is nil for session rows, so this is the only key
@@ -113,7 +115,9 @@ defmodule Arbiter.Usage.Event do
         :raw,
         :cost_note,
         :base_task_id,
-        :role
+        :role,
+        :provider_account_id,
+        :provider_credential_id
       ]
     end
 
@@ -271,6 +275,25 @@ defmodule Arbiter.Usage.Event do
       description "The role this session played: 'base' for main authoring, 'review' for " <>
                     "review-gate reviewer, 'impl' for review-gate implementer, etc. Replaces " <>
                     "suffix-encoded task_id hierarchy."
+    end
+
+    attribute :provider_account_id, :uuid do
+      public? true
+
+      description "P9 (bd-al9qqe, docs/provider-account-design.md §8): the ProviderAccount " <>
+                    "whose plan this spend counts against. Written wherever workspace_id is " <>
+                    "written. Non-nil for source: probe | preflight even when workspace_id " <>
+                    "and task_id are both nil — a probe is issued as a credential, so it " <>
+                    "always has an account (§8's falsifiable seam statement with bd-adyhvn)."
+    end
+
+    attribute :provider_credential_id, :uuid do
+      public? true
+
+      description "The specific ProviderCredential used, when known (§2.5: this is the only " <>
+                    "thing that can tell a late-discovered split apart after the fact). Nil " <>
+                    "whenever the account has more than one active credential and which one " <>
+                    "carried this spend isn't recorded."
     end
 
     create_timestamp :inserted_at

@@ -55,16 +55,11 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.MCP.Scope
   alias Arbiter.Tasks.Claim
-  alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
-  alias Arbiter.Tasks.Graph
-  alias Arbiter.Tasks.GraphMember
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
   alias Arbiter.Usage
-  alias Arbiter.Workflows.Conductor
-  alias Arbiter.Workflows.ConductorSupervisor
 
   require Ash.Query
   require Logger
@@ -94,15 +89,19 @@ defmodule Arbiter.MCP.Tools do
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      codex = Arbiter.Quota.Codex.serialize_latest(ws_id)
+      # P5: quota rows are keyed by provider account; the workspace is the
+      # lookup shorthand that resolves to one account per provider (§6).
+      accounts = Arbiter.Quota.account_ids(ws_id)
+      codex = Arbiter.Quota.Codex.serialize_latest(accounts["codex"])
 
       {:ok,
        %{
-         claude: Arbiter.Quota.serialize(ws_id),
+         claude: Arbiter.Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id),
          codex: codex,
          codex_message: Arbiter.Quota.codex_absence_message(codex),
-         gemini: Arbiter.Quota.CloudCode.serialize_latest(ws_id, "gemini_cli"),
-         antigravity: Arbiter.Quota.CloudCode.serialize_latest(ws_id, "antigravity")
+         gemini: Arbiter.Quota.CloudCode.serialize_latest(accounts["gemini_cli"], "gemini_cli"),
+         antigravity:
+           Arbiter.Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity")
        }}
     end
   end
@@ -683,45 +682,6 @@ defmodule Arbiter.MCP.Tools do
     {:ok, %{workspaces: workspaces, count: length(workspaces)}}
   end
 
-  # ---- queue_resume -------------------------------------------------------
-
-  @doc """
-  Resume a paused graph branch by re-dispatching the failed task that blocked
-  it (C5 of #482). Coordinator only.
-
-  Searches all running Conductors for one that has `task_id` in its failed
-  set and calls `Conductor.resume/2` on it. On success the task is
-  re-dispatched and its downstream branch is unpaused.
-
-  Returns `%{resumed: true, task_id: task_id}` on success, or an error if no
-  conductor holds the task as failed.
-  """
-  @spec queue_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def queue_resume(%Scope{} = scope, args) do
-    with :ok <- ensure_can_dispatch(scope),
-         {:ok, task_id} <- require_string(args, "task_id") do
-      case Arbiter.Workflows.Conductor.resume_task(task_id) do
-        :ok ->
-          {:ok, %{resumed: true, task_id: task_id}}
-
-        {:error, :not_found} ->
-          {:error, {:not_found, "task #{task_id} is not in any running conductor's failed set"}}
-
-        {:error, :not_member} ->
-          {:error, {:not_found, "task #{task_id} is not a member of a running graph"}}
-
-        {:error, :not_failed} ->
-          {:error, {:invalid, "task #{task_id} has not failed — nothing to resume"}}
-
-        {:error, :dispatch_failed} ->
-          {:error, {:invalid, "dispatch of #{task_id} failed — check worker logs"}}
-
-        {:error, reason} ->
-          {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
-      end
-    end
-  end
-
   # ---- queue_retry_auto_resolve --------------------------------------------
 
   @doc """
@@ -1139,271 +1099,6 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  # ======================================================================
-  # Graph CRUD + lifecycle tools (C7 of #482)
-  # ======================================================================
-
-  # ---- graph_create -------------------------------------------------------
-
-  @doc "Create a Graph in the scope's workspace. Coordinator only."
-  @spec graph_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_create(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, name} <- require_string(args, "name") do
-      attrs =
-        %{"name" => name, "workspace_id" => ws_id}
-        |> maybe_put("description", fetch_string(args, "description"))
-
-      case Ash.create(Graph, attrs) do
-        {:ok, graph} ->
-          Logger.info("[graph_create] graph #{graph.id} created in workspace #{ws_id}")
-          {:ok, serialize_graph(graph)}
-
-        {:error, err} ->
-          {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- graph_add_directive ------------------------------------------------
-
-  @doc "Add a directive (Issue) to a Graph. Coordinator only."
-  @spec graph_add_directive(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_add_directive(%Scope{} = scope, args) do
-    with {:ok, graph_id} <- require_string(args, "graph_id"),
-         {:ok, issue_id} <- require_string(args, "issue_id"),
-         {:ok, graph} <- fetch_graph(scope, graph_id),
-         {:ok, _issue} <- fetch_task_in_workspace(graph.workspace_id, issue_id) do
-      attrs = %{"graph_id" => graph_id, "issue_id" => issue_id}
-      attrs = if repo = fetch_string(args, "repo"), do: Map.put(attrs, "repo", repo), else: attrs
-
-      case Ash.create(GraphMember, attrs) do
-        {:ok, member} ->
-          Logger.info("[graph_add_directive] directive #{issue_id} added to graph #{graph_id}")
-          {:ok, %{graph_id: graph_id, issue_id: issue_id, member_id: member.id}}
-
-        {:error, err} ->
-          {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- graph_remove_directive ---------------------------------------------
-
-  @doc "Remove a directive (Issue) from a Graph. Idempotent. Coordinator only."
-  @spec graph_remove_directive(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_remove_directive(%Scope{} = scope, args) do
-    with {:ok, graph_id} <- require_string(args, "graph_id"),
-         {:ok, issue_id} <- require_string(args, "issue_id"),
-         {:ok, _graph} <- fetch_graph(scope, graph_id) do
-      members =
-        GraphMember
-        |> Ash.Query.filter(graph_id == ^graph_id and issue_id == ^issue_id)
-        |> Ash.read!()
-
-      _ = Enum.each(members, &Ash.destroy!/1)
-
-      Logger.info(
-        "[graph_remove_directive] directive #{issue_id} removed from graph #{graph_id}, " <>
-          "removed: #{length(members)}"
-      )
-
-      {:ok, %{graph_id: graph_id, issue_id: issue_id, removed: length(members)}}
-    end
-  end
-
-  # ---- graph_add_edge -----------------------------------------------------
-
-  @doc """
-  Add a dependency edge between two directives for graph ordering / mutual
-  exclusion. Coordinator only. `type` is one of `depends_on`, `blocks`,
-  `conflicts_with`.
-
-  The write goes through `Arbiter.Tasks.Dependencies.add/4` (bd-apj0gq), so a
-  gating edge that would close a cycle is refused here rather than surviving to
-  `graph_start`.
-  """
-  @spec graph_add_edge(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_add_edge(%Scope{} = scope, args) do
-    graph_edge_types = [:depends_on, :blocks, :conflicts_with]
-
-    with {:ok, graph_id} <- require_string(args, "graph_id"),
-         {:ok, from_id} <- require_string(args, "from_issue_id"),
-         {:ok, to_id} <- require_string(args, "to_issue_id"),
-         {:ok, type} <- require_enum(args, "type", graph_edge_types),
-         {:ok, graph} <- fetch_graph(scope, graph_id),
-         {:ok, _from} <- fetch_task_in_workspace(graph.workspace_id, from_id),
-         {:ok, _to} <- fetch_task_in_workspace(graph.workspace_id, to_id) do
-      opts = maybe_put_kw([], :notes, fetch_string(args, "notes"))
-
-      case Dependencies.add(from_id, to_id, type, opts) do
-        {:ok, dep} ->
-          Logger.info(
-            "[graph_add_edge] #{type} edge #{from_id}→#{to_id} added for graph #{graph_id}"
-          )
-
-          {:ok, serialize_dependency(dep)}
-
-        {:error, reason} ->
-          dependency_error(reason)
-      end
-    end
-  end
-
-  # ---- graph_start --------------------------------------------------------
-
-  @doc """
-  Start a Graph: validate acyclicity, transition `:draft → :running`, and start
-  the Conductor. Rejects cyclic graphs with the named cycle. Coordinator only.
-  """
-  @spec graph_start(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_start(%Scope{} = scope, args) do
-    with {:ok, graph_id} <- require_string(args, "graph_id"),
-         {:ok, _graph} <- fetch_graph(scope, graph_id) do
-      Logger.info("[graph_start] starting graph #{graph_id}")
-
-      case Conductor.kickoff(graph_id) do
-        {:ok, _pid} ->
-          {:ok, graph} = Ash.get(Graph, graph_id)
-          Logger.info("[graph_start] graph #{graph_id} transitioned to #{graph.run_state}")
-          {:ok, serialize_graph(graph)}
-
-        {:error, :graph_not_found} ->
-          {:error, {:not_found, "graph #{graph_id} not found"}}
-
-        {:error, {:not_draft, state}} ->
-          {:error, {:invalid, "graph #{graph_id} is not in draft state (current: #{state})"}}
-
-        {:error, {:cyclic, cycle}} ->
-          cycle_str = Enum.join(cycle, " → ")
-          {:error, {:invalid, "graph #{graph_id} contains a cycle: #{cycle_str}"}}
-
-        {:error, reason} ->
-          {:error, {:invalid, "graph start failed: #{inspect(reason)}"}}
-      end
-    end
-  end
-
-  # ---- graph_pause --------------------------------------------------------
-
-  @doc """
-  Pause a running Graph: transition `:running → :paused` and stop its Conductor.
-  No new directives are dispatched while paused. Coordinator only.
-  """
-  @spec graph_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_pause(%Scope{} = scope, args) do
-    with {:ok, graph_id} <- require_string(args, "graph_id"),
-         {:ok, graph} <- fetch_graph(scope, graph_id) do
-      if graph.run_state != :running do
-        {:error, {:invalid, "graph #{graph_id} is not running (current: #{graph.run_state})"}}
-      else
-        case Ash.update(graph, %{run_state: :paused}) do
-          {:ok, updated} ->
-            ConductorSupervisor.stop_conductor(graph_id)
-            Logger.info("[graph_pause] graph #{graph_id} paused")
-            {:ok, serialize_graph(updated)}
-
-          {:error, err} ->
-            {:error, {:invalid, ash_error_message(err)}}
-        end
-      end
-    end
-  end
-
-  # ---- graph_resume -------------------------------------------------------
-
-  @doc """
-  Resume a paused Graph: transition `:paused → :running` and start a new
-  Conductor to continue dispatching. Coordinator only.
-  """
-  @spec graph_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_resume(%Scope{} = scope, args) do
-    with {:ok, graph_id} <- require_string(args, "graph_id"),
-         {:ok, graph} <- fetch_graph(scope, graph_id) do
-      if graph.run_state != :paused do
-        {:error, {:invalid, "graph #{graph_id} is not paused (current: #{graph.run_state})"}}
-      else
-        case Ash.update(graph, %{run_state: :running}) do
-          {:ok, updated} ->
-            ConductorSupervisor.start_conductor(graph_id)
-            Logger.info("[graph_resume] graph #{graph_id} resumed")
-            {:ok, serialize_graph(updated)}
-
-          {:error, err} ->
-            {:error, {:invalid, ash_error_message(err)}}
-        end
-      end
-    end
-  end
-
-  # ---- graph_status -------------------------------------------------------
-
-  @doc """
-  Return the running/ready/paused/blocked breakdown of a Graph's members.
-  Coordinator only.
-  """
-  @spec graph_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def graph_status(%Scope{} = scope, args) do
-    with {:ok, graph_id} <- require_string(args, "graph_id"),
-         {:ok, graph} <- fetch_graph(scope, graph_id) do
-      member_ids =
-        GraphMember
-        |> Ash.Query.filter(graph_id == ^graph_id)
-        |> Ash.read!()
-        |> Enum.map(& &1.issue_id)
-
-      member_set = MapSet.new(member_ids)
-
-      member_issues =
-        case member_ids do
-          [] ->
-            []
-
-          ids ->
-            Issue
-            |> Ash.Query.filter(id in ^ids)
-            |> Ash.read!()
-        end
-
-      total = length(member_issues)
-      by_status = Enum.group_by(member_issues, & &1.status)
-
-      closed_count = length(Map.get(by_status, :closed, []))
-      running_count = length(Map.get(by_status, :in_progress, []))
-
-      open_ids =
-        by_status
-        |> Map.get(:open, [])
-        |> Enum.map(& &1.id)
-        |> MapSet.new()
-
-      ready_ids =
-        [workspace_id: graph.workspace_id]
-        |> Issue.ready()
-        |> Enum.filter(&MapSet.member?(member_set, &1.id))
-        |> Enum.map(& &1.id)
-        |> MapSet.new()
-
-      ready_count = MapSet.size(ready_ids)
-      blocked_count = MapSet.size(MapSet.difference(open_ids, ready_ids))
-
-      {failed_count, paused_count} = conductor_failure_counts(graph_id, member_set)
-
-      {:ok,
-       %{
-         graph_id: graph_id,
-         run_state: to_str(graph.run_state),
-         total: total,
-         running: running_count,
-         ready: ready_count,
-         blocked: blocked_count,
-         paused: paused_count,
-         failed: failed_count,
-         closed: closed_count
-       }}
-    end
-  end
-
   # ---- scheduler (autopilot) pause/resume --------------------------------
 
   @doc """
@@ -1591,42 +1286,6 @@ defmodule Arbiter.MCP.Tools do
 
   defp subtree_denial(%Scope{issue_id: bound}, detail) do
     "a refine session may only write inside the parent_of subtree of #{bound}: #{detail}"
-  end
-
-  # Fetch a graph, enforcing workspace isolation for the scope.
-  defp fetch_graph(%Scope{} = scope, graph_id) when is_binary(graph_id) do
-    case Ash.get(Graph, graph_id) do
-      {:ok, %Graph{} = graph} ->
-        if Scope.same_workspace?(scope, graph.workspace_id),
-          do: {:ok, graph},
-          else: {:error, {:not_found, "graph #{graph_id} not found"}}
-
-      _ ->
-        {:error, {:not_found, "graph #{graph_id} not found"}}
-    end
-  end
-
-  # Read failed/paused task counts from the running Conductor, if any. A
-  # freshly-started Conductor can be mid-dispatch (handle_continue) and
-  # unable to service a :state call promptly, so this uses a short timeout
-  # and degrades to {0, 0} rather than let a slow/stale Conductor turn
-  # graph_status into an unhandled `:exit` (GenServer.call raises `:exit` on
-  # timeout, which `rescue` alone does not catch).
-  defp conductor_failure_counts(graph_id, member_set) do
-    pid = ConductorSupervisor.whereis(graph_id)
-
-    if is_pid(pid) do
-      snap = GenServer.call(pid, :state, 1_000)
-      failed = snap.failed_ids |> MapSet.intersection(member_set) |> MapSet.size()
-      paused = snap.paused_ids |> MapSet.intersection(member_set) |> MapSet.size()
-      {failed, paused}
-    else
-      {0, 0}
-    end
-  rescue
-    _ -> {0, 0}
-  catch
-    :exit, _ -> {0, 0}
   end
 
   # Fetch a task and enforce workspace isolation. Honors an optional `workspace`
@@ -2084,18 +1743,6 @@ defmodule Arbiter.MCP.Tools do
   end
 
   def put_progress(map, _i), do: map
-
-  defp serialize_graph(%Graph{} = g) do
-    %{
-      id: g.id,
-      name: g.name,
-      description: g.description,
-      run_state: to_str(g.run_state),
-      workspace_id: g.workspace_id,
-      created_at: iso(g.created_at),
-      updated_at: iso(g.updated_at)
-    }
-  end
 
   def serialize_dependency(%Dependency{} = d) do
     %{

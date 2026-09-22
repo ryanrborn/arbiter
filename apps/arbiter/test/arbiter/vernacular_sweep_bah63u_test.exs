@@ -31,7 +31,6 @@ defmodule Arbiter.VernacularSweepBah63uTest do
     lib/arbiter/worker.ex
     lib/arbiter/workflows/merge_queue/conflict_resolver.ex
     lib/arbiter/workflows/merge_queue/fix_pass_dispatcher.ex
-    lib/arbiter/workflows/conductor.ex
     lib/arbiter/workflows/work.ex
     lib/arbiter/workflows/merge_queue.ex
     lib/arbiter/workflows/pr_patrol.ex
@@ -108,8 +107,11 @@ defmodule Arbiter.VernacularSweepBah63uTest do
       assert content =~ "Read the coordinator escalation mailbox for the workspace",
              "catalog.ex coordinator_inbox description should read 'coordinator escalation mailbox'"
 
-      assert content =~ "conductor failure escalation in the coordinator inbox",
-             "catalog.ex resume_paused_branch description should say 'coordinator inbox'"
+      # bd-a14qd1: the second assertion here pinned `queue_resume`'s
+      # description, which went with the Conductor. `coordinator_inbox_clear`
+      # is the surviving mailbox tool whose wording this sweep still owns.
+      assert content =~ "Soft-clear specific coordinator-mailbox messages",
+             "catalog.ex coordinator_inbox_clear description should say 'coordinator-mailbox'"
     end
 
     test "tools/messaging.ex: coordinator_inbox doc uses coordinator, not Admiral" do

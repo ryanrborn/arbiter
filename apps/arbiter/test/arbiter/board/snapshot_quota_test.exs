@@ -1,10 +1,10 @@
 defmodule Arbiter.Board.SnapshotQuotaTest do
   @moduledoc """
   Regression coverage for bd-5j6nmn: Autopilot's quota gate
-  (`Snapshot.quota_hold/1`) and the Conductor's quota gate
-  (`Arbiter.Workflows.QuotaGate.Default`) must read the same underlying
-  data for a given workspace + provider — same provider resolution, same
-  over-cap decision, same threshold config.
+  (`Snapshot.quota_hold/1`) and the `dispatch/2` quota seam must read the same
+  underlying data for a given workspace + provider — same provider resolution,
+  same over-cap decision, same threshold config. (bd-5j6nmn's third reader,
+  the graph engine's own cap-clamp, was removed with it in bd-a14qd1.)
   """
   use Arbiter.DataCase, async: false
 
@@ -47,7 +47,7 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
 
       {:ok, _quota} =
         Ash.create(CodexQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id, "codex"),
           provider: "codex",
           session_used_percent: 93.0,
           session_reset_at: DateTime.utc_now() |> DateTime.add(3600, :second),
@@ -62,7 +62,7 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
 
       {:ok, _quota} =
         Ash.create(CodexQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id, "codex"),
           provider: "codex",
           session_used_percent: 93.0,
           session_reset_at: DateTime.utc_now() |> DateTime.add(3600, :second),
@@ -93,7 +93,7 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
 
       {:ok, _quota} =
         Ash.create(CodexQuota, %{
-          workspace_id: ws.id,
+          provider_account_id: quota_account_id!(ws.id, "codex"),
           provider: "codex",
           session_used_percent: 99.0,
           session_reset_at: DateTime.utc_now() |> DateTime.add(3600, :second),

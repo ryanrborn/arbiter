@@ -172,13 +172,19 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         }
 
       true ->
+        hint =
+          if dev_install?() do
+            "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart arbiter`)."
+          else
+            "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
+              "the #{server_vsn} release asset to match the server."
+          end
+
         %Result{
           name: "version",
           status: :fail,
           detail: "server #{server_vsn} @ #{server_sha}, CLI #{cli_vsn} @ #{cli_sha}",
-          hint:
-            "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
-              "the #{server_vsn} release asset to match the server.",
+          hint: hint,
           fatal: false,
           blocks_readiness: false
         }
@@ -190,6 +196,13 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:ok, %Version{major: major}} -> major
       :error -> nil
     end
+  end
+
+  # True if the CLI was built from a source checkout (has git available at build time).
+  # A dev/source install's version mismatch hint should point to the stale
+  # compile-time value, not to reinstalling from a release asset.
+  defp dev_install? do
+    ArbiterCli.Version.dev_build?()
   end
 
   # `fatal: true` — this is still an operator-actionable misconfiguration

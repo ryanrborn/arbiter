@@ -176,6 +176,16 @@ defmodule ArbiterWeb.Router do
     put("/skills/:id", SkillController, :update)
     delete("/skills/:id", SkillController, :delete)
 
+    # Provider accounts (P11, `docs/provider-account-design.md` §2.5) —
+    # backs `arb account list|show|create|attach|rotate|merge`.
+    get("/accounts", AccountController, :index)
+    post("/accounts", AccountController, :create)
+    get("/accounts/:ref", AccountController, :show)
+    patch("/accounts/:ref", AccountController, :update)
+    post("/accounts/:ref/attach", AccountController, :attach)
+    post("/accounts/:ref/rotate", AccountController, :rotate)
+    post("/accounts/:ref/merge", AccountController, :merge)
+
     # Workspaces
     get("/workspaces", WorkspaceController, :index)
     post("/workspaces", WorkspaceController, :create)
@@ -237,8 +247,7 @@ defmodule ArbiterWeb.Router do
     get("/workers/:task_id/run_log_list", WorkerController, :run_log_list)
     post("/workers/:task_id/stop", WorkerController, :stop)
 
-    # Graph queue operations (C5 of #482)
-    post("/queue/:task_id/resume", QueueController, :resume)
+    # Task queue operations
     post("/queue/:task_id/retry_auto_resolve", QueueController, :retry_auto_resolve)
     post("/queue/:task_id/restart_watchdog", QueueController, :restart_watchdog)
     post("/queue/:task_id/rerun_ci", QueueController, :rerun_ci)

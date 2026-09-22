@@ -10,10 +10,11 @@ defmodule Arbiter.Settings.Installation do
 
   ## Fields
 
-    * `:conductor_system_max_concurrent` — install-wide Conductor concurrency
-      ceiling (`Arbiter.Workflows.Conductor`). `nil` means "fall back to the
-      `:arbiter, :conductor_system_max_concurrent` application env, else the
-      hardcoded default".
+    * `:conductor_system_max_concurrent` — install-wide worker concurrency
+      ceiling, read by the board scheduler (`Arbiter.Board.Snapshot`). `nil`
+      means "fall back to the `:arbiter, :conductor_system_max_concurrent`
+      application env, else the hardcoded default". The `conductor_` prefix is
+      historical (bd-a14qd1); renaming it would need a column migration.
     * `:credential_watchdog_adapters` — agent-type names
       (`Arbiter.Agents.valid_agent_types/0`) the
       `Arbiter.Agents.CredentialWatchdog` should probe. `nil` means "probe
@@ -78,7 +79,7 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
       constraints min: 1
 
-      description "Install-wide Conductor concurrency ceiling; nil falls back to app env / default."
+      description "Install-wide worker concurrency ceiling read by the board scheduler."
     end
 
     attribute :credential_watchdog_adapters, {:array, :string} do

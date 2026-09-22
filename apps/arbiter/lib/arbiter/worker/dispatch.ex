@@ -943,7 +943,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp record_quota_gate_bypass(%Issue{id: task_id, workspace_id: ws_id} = task, opts) do
     workspace = load_workspace(task)
     provider = quota_gate_provider(task, workspace, opts)
-    quota = safe_quota_latest(ws_id, provider)
+    quota = safe_quota_latest(safe_gate_account(ws_id, provider), provider)
 
     payload = %{
       "task_id" => task_id,
@@ -1055,15 +1055,32 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> :claude
   end
 
+  # The provider account this dispatch is metered under (P7,
+  # `docs/provider-account-design.md` §4.2 / §5 rows 4, 9). It is both the key
+  # the snapshot is read by and the account half of the gate's threshold
+  # policy, so it is resolved once. `nil` when the workspace has no link —
+  # the gate then reads no snapshot and fails open, exactly as it did before.
+  defp safe_gate_account(ws_id, provider) do
+    Arbiter.Accounts.Resolver.get(Arbiter.Quota.account_id(ws_id, provider))
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   defp apply_quota_gate(%Issue{} = task, workspace, provider, ws_id, opts) do
     gate = Arbiter.Quota.gate_for_workspace(workspace)
-    quota = safe_quota_latest(ws_id, provider)
+    account = safe_gate_account(ws_id, provider)
+    quota = safe_quota_latest(account, provider)
     # The model hint (bd-7qj58o AC4) is scoped to this `gate.check/4` call
     # only — `opts` itself (used below for `DispatchQueue.hold/5`, replayed
     # verbatim on drain) must stay exactly what the caller passed, or a
     # best-effort Antigravity bucket guess would silently override the real
     # dispatch's model resolution later.
-    gate_opts = maybe_add_gemini_model_hint(provider, task, workspace, opts)
+    gate_opts =
+      provider
+      |> maybe_add_gemini_model_hint(task, workspace, opts)
+      |> Keyword.put(:account, account)
 
     case gate.check(task, quota, workspace, gate_opts) do
       :allow ->
@@ -1092,8 +1109,10 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp safe_quota_latest(ws_id, provider) do
-    Arbiter.Quota.latest_for_provider(ws_id, provider)
+  defp safe_quota_latest(nil, _provider), do: nil
+
+  defp safe_quota_latest(%{id: account_id}, provider) do
+    Arbiter.Quota.latest_for_provider(account_id, provider)
   rescue
     _ -> nil
   catch

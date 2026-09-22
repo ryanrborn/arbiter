@@ -6,17 +6,22 @@ defmodule Arbiter.Accounts.ProviderCredential do
   keeps every `usage_events` row's `provider_credential_id` meaningful across
   a rotation.
 
-  **Nothing reads this resource yet** (P1 scope). The secret is encrypted at
-  rest with the same `Arbiter.Vault` cloak already used for
+  Read by `Arbiter.Accounts.Credentials` since P3 (bd-aiodva), behind
+  `Arbiter.Accounts.enabled?/0`. The secret is encrypted at rest with the
+  same `Arbiter.Vault` cloak already used for
   `workspaces.encrypted_worker_env`.
 
   ## Append-only enforcement
 
-  There is no `:update` action. The only actions are `:create` (§7.2's
-  "rotation inserts a new credential row") and `:retire`, which flips `active`
-  to `false` and stamps `retired_at` — it never touches `encrypted_secret`,
-  `fingerprint`, `kind`, or `env_var`. A partial unique index enforces at most
-  one active credential per `(provider_account_id, kind)`.
+  There is no general-purpose `:update` action. The actions are `:create`
+  (§7.2's "rotation inserts a new credential row"), `:retire`, which flips
+  `active` to `false` and stamps `retired_at` — it never touches
+  `encrypted_secret`, `fingerprint`, `kind`, or `env_var` — and
+  `:reassign_account` (P11, `arb account merge`), which accepts only
+  `provider_account_id` and re-points a credential row to the surviving
+  account without touching any of the append-only secret material either. A
+  partial unique index enforces at most one active credential per
+  `(provider_account_id, kind)`.
   """
 
   use Ash.Resource,
@@ -68,6 +73,16 @@ defmodule Arbiter.Accounts.ProviderCredential do
       accept []
       change set_attribute(:active, false)
       change set_attribute(:retired_at, &DateTime.utc_now/0)
+    end
+
+    # `arb account merge` (§2.5, P11): "provider_credentials rows move across
+    # and stay distinct." Re-pointing the owning account is the one field a
+    # merge legitimately changes; it never touches the append-only
+    # secret/kind/fingerprint fields the moduledoc's append-only enforcement
+    # is actually about.
+    update :reassign_account do
+      require_atomic? false
+      accept [:provider_account_id]
     end
   end
 
@@ -145,8 +160,9 @@ defmodule Arbiter.Accounts.ProviderCredential do
 
   Reads the stored `encrypted_secret` column (always selected, since it is a
   plain attribute) and decrypts it with `Arbiter.Vault`. Mirrors
-  `Arbiter.Tasks.Workspace.secrets_map/1`. Not called anywhere yet (P1) —
-  provided so P2+ extraction has a ready decrypt path.
+  `Arbiter.Tasks.Workspace.secrets_map/1`. The read path
+  (`Arbiter.Accounts.Credentials`) decrypts through here on every spawn that
+  runs with provider accounts enabled.
   """
   @spec secret(t()) :: String.t() | nil
   def secret(credential) do

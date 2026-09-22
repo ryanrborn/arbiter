@@ -21,6 +21,14 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
 
   See `Arbiter.Usage.CodexUsageBackfill` for the matching/recovery logic and
   `Arbiter.Usage.CodexSessionFile` for the on-disk rollout format.
+
+  ## It starts the Repo, not the application
+
+  Deliberately no `Mix.Task.run("app.start")`: booting the full application
+  next to a live coordinator would start a second endpoint on the same port,
+  a second Autopilot and a second set of patrols against the same database.
+  Like `mix arbiter.backfill_issue_repos`, this starts only what it needs —
+  the Ecto repo — so it is safe to run whether or not the server is up.
   """
 
   use Mix.Task
@@ -48,7 +56,7 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
       |> put_opt(:since, date(opts[:since], "--since"))
       |> put_opt(:until, date(opts[:until], "--until"))
 
-    Mix.Task.run("app.start")
+    start_repo!()
 
     Mix.shell().info(banner(apply?))
 
@@ -56,6 +64,19 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
     |> CodexUsageBackfill.backfill()
     |> report(apply?)
     |> Mix.shell().info()
+  end
+
+  # No-op when the repo is already running (an attached node / an iex session
+  # that started the app), so this is safe to call either way.
+  defp start_repo! do
+    Mix.Task.run("app.config")
+    {:ok, _} = Application.ensure_all_started(:ash)
+    {:ok, _} = Application.ensure_all_started(:ash_sqlite)
+
+    case Arbiter.Repo.start_link(pool_size: 1) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
   end
 
   defp banner(true), do: "Backfilling codex usage from on-disk rollout JSONL (writing)…"

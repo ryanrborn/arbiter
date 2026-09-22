@@ -1,6 +1,6 @@
 defmodule Arbiter.Quota.GoogleQuota do
   @moduledoc """
-  Per-workspace snapshot of a Google Cloud Code Assist provider's quota state —
+  Per-**account** snapshot of a Google Cloud Code Assist provider's quota state —
   **Gemini CLI** (`provider: "gemini_cli"`) or **Antigravity**
   (`provider: "antigravity"`) — persisted for the web dashboard and history
   (bd-ajh7bd).
@@ -9,8 +9,9 @@ defmodule Arbiter.Quota.GoogleQuota do
   every `/api/quota` call and threw the result away, so Gemini CLI / Antigravity
   could never appear on the topbar or `/usage` page (which only ever read the
   persisted quota tables). `Arbiter.Quota.CloudProbe` now refreshes these on a
-  timer and upserts one row per `{workspace_id, provider}` here — mirroring
-  `Arbiter.Quota.CodexQuota`.
+  timer and upserts one row per `{provider_account_id, provider}` here —
+  mirroring `Arbiter.Quota.CodexQuota` (re-keyed off the workspace by P5,
+  `docs/provider-account-design.md` §6).
 
   Google's API reports a *per-model* `remainingFraction` rather than time
   windows, so this row stores:
@@ -23,8 +24,9 @@ defmodule Arbiter.Quota.GoogleQuota do
       render a utilization bar — have one number to draw without unpacking the
       per-model list.
 
-  One row per `{workspace_id, provider}` — the `:upsert` action overwrites the
-  prior snapshot in place, so this stays a cache of the latest reading.
+  One row per `{provider_account_id, provider}` — the `:upsert` action
+  overwrites the prior snapshot in place, so this stays a cache of the latest
+  reading.
   """
 
   use Ash.Resource,
@@ -43,10 +45,10 @@ defmodule Arbiter.Quota.GoogleQuota do
     create :upsert do
       primary? true
       upsert? true
-      upsert_identity :workspace_provider
+      upsert_identity :account_provider
 
       accept [
-        :workspace_id,
+        :provider_account_id,
         :provider,
         :plan,
         :message,
@@ -61,11 +63,10 @@ defmodule Arbiter.Quota.GoogleQuota do
   attributes do
     uuid_primary_key :id
 
-    attribute :workspace_id, :string do
+    attribute :provider_account_id, :uuid do
       allow_nil? false
       public? true
-      constraints max_length: 255, trim?: true
-      description "Workspace these quota figures were captured for."
+      description "Provider account these quota figures were captured for (§6)."
     end
 
     attribute :provider, :string do
@@ -115,6 +116,6 @@ defmodule Arbiter.Quota.GoogleQuota do
   end
 
   identities do
-    identity :workspace_provider, [:workspace_id, :provider]
+    identity :account_provider, [:provider_account_id, :provider]
   end
 end

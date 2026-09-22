@@ -3,13 +3,11 @@ defmodule Arbiter.Tasks.DependencyGraph do
   Gating-edge normalisation and cycle detection over `Arbiter.Tasks.Dependency`
   rows.
 
-  Extracted from `Arbiter.Workflows.Conductor` (bd-apj0gq) so the two callers
-  that need it agree on one implementation:
-
-    * `Conductor.validate_acyclic/1` — over a *graph's members only*, at kickoff.
-    * `Arbiter.Tasks.Dependencies.add/4` — via `candidate_cycle/2`, over the
-      **global** edge set, on every gating-edge write, so a cycle can never be
-      persisted in the first place.
+  The one implementation of "would this edge close a cycle?", used by
+  `Arbiter.Tasks.Dependencies.add/4` (via `candidate_cycle/2`) over the
+  **global** edge set on every gating-edge write, so a cycle can never be
+  persisted in the first place, and by `ArbiterWeb.TaskDetailLive`'s
+  add-dependency form for the same check before it writes.
 
   ## Gating edges
 
@@ -47,8 +45,8 @@ defmodule Arbiter.Tasks.DependencyGraph do
   Every gating edge in the ledger, normalised to `{dependent, dependency}`.
 
   Pass `:all` for the global set, or a list of issue ids to keep only edges with
-  **both** endpoints in that set (the Conductor's member-scoped view — an edge
-  running through a non-member is not a cycle *within the graph*).
+  **both** endpoints in that set — an edge running through an id outside the
+  scope is not a cycle *within* that scope.
   """
   @spec gating_edges(:all | [String.t()]) :: [edge()]
   def gating_edges(scope \\ :all)
@@ -101,9 +99,9 @@ defmodule Arbiter.Tasks.DependencyGraph do
   walk (first id repeated at the end) naming the offenders. Vertices are probed
   in sorted order for determinism.
 
-  This asks the *whole-graph* question ("is anything in here cyclic?"), which is
-  what `Conductor.validate_acyclic/1` wants at kickoff. A write path testing one
-  candidate edge wants `candidate_cycle/2` instead — see its note.
+  This asks the *whole-set* question ("is anything in here cyclic?"). A write
+  path testing one candidate edge wants `candidate_cycle/2` instead — see its
+  note.
   """
   @spec detect_cycle([String.t()], [edge()]) :: :ok | {:error, {:cyclic, [String.t()]}}
   def detect_cycle(vertices, edges) do
