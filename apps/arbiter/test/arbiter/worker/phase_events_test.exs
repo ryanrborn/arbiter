@@ -8,6 +8,7 @@ defmodule Arbiter.Worker.PhaseEventsTest do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Test.StubMerger
   alias Arbiter.Worker
 
   setup do
@@ -56,6 +57,34 @@ defmodule Arbiter.Worker.PhaseEventsTest do
     :ok = Worker.advance(pid, :implement)
 
     refute_receive {:event, %{topic: "worker_phase"}}, 300
+  end
+
+  test "parking at :awaiting_review announces waiting_ci_merge", %{pid: pid, task: task} do
+    # The author's agent is long gone by the time the MR opens: the record says
+    # :awaiting_review, the honest phase is "waiting on CI / merge", and the
+    # `worker_phase` topic has to say so — this is one of the two transitions
+    # the ticket exists to surface.
+    StubMerger.reset()
+    StubMerger.next_open_ref("!91")
+
+    :ok = Worker.advance(pid, :implement)
+
+    assert {:ok, "!91"} =
+             Worker.open_mr(pid, "feature/phase", "Phase", "desc", %{
+               adapter: StubMerger,
+               workspace: nil,
+               # Park the Watchdog well past the test so it can't poll the stub
+               # and complete the worker out from under the assertion.
+               interval_ms: 1_000_000,
+               initial_delay_ms: 1_000_000
+             })
+
+    event = await_event("worker_phase")
+
+    assert event.task_id == task.id
+    assert event.phase == "waiting_ci_merge"
+    assert event.status == "awaiting_review"
+    assert event.agent_live == false
   end
 
   test "worker_failed carries the status and phase", %{pid: pid, task: task} do

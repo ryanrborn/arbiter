@@ -101,7 +101,13 @@ defmodule Arbiter.Tasks.SlotGate do
 
   @doc """
   Coerce a caller-supplied basis (atom, string or `nil`) to a known one.
-  `nil` resolves to the configured basis; anything unrecognised to the default.
+
+  Pure: `nil` and anything unrecognised resolve to the default (`:agents`),
+  *not* to the configured basis — reading config here would make every slot
+  predicate impure, and `basis/0` itself calls this on the env value, so the
+  two would recurse. Callers that want the install's configured basis read
+  `basis/0` at their own impure boundary and pass the result down; that is
+  what `Arbiter.Board.Snapshot.load/1` does.
   """
   @spec normalize_basis(term()) :: basis()
   def normalize_basis(nil), do: @default_basis
@@ -117,9 +123,9 @@ defmodule Arbiter.Tasks.SlotGate do
   @doc """
   Does this worker snapshot occupy a worker slot?
 
-  `basis` defaults to the configured one; pass it explicitly from a pure
-  caller (`Arbiter.Board.Snapshot.derive/1`) so the answer stays a function of
-  its inputs.
+  `basis` defaults to `:agents` (see `normalize_basis/1` — it does *not* read
+  config); pass the install's basis explicitly, resolved once via `basis/0` at
+  an impure boundary, so the answer stays a function of its inputs.
   """
   @spec occupies_slot?(map(), basis() | nil) :: boolean()
   def occupies_slot?(worker, basis \\ nil)

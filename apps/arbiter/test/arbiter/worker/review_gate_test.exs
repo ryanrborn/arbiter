@@ -444,6 +444,23 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
     end
 
+    test "parking at the gate announces the :in_review phase on /events (bd-aw2cyt)",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+      {pid, _branch} = start_author(task, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      # The author's agent has exited; the record is parked at the gate. An
+      # operator watching the stream must be told the stage changed to
+      # "in review" rather than being left on the last :handing_off event.
+      assert_receive {:event,
+                      %{topic: "worker_phase", phase: "in_review", status: "awaiting_review_gate"}},
+                     2_000
+    end
+
     test "APPROVE proceeds to the merger — a real --no-ff merge lands on main",
          %{repo: repo, ws: ws} do
       task = new_task(ws)

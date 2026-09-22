@@ -3335,7 +3335,10 @@ defmodule Arbiter.Worker do
 
     unless watchdog_ok?, do: escalate_watchdog_failure(new_state)
 
-    new_state
+    # bd-aw2cyt: parked at :awaiting_review with no agent — phase
+    # :waiting_ci_merge. Announced after the Watchdog branch resolves so the
+    # event reflects the state we actually settle in.
+    announce_phase(new_state)
   end
 
   # Broadcast {:worker_done, task_id} to the workspace MergeQueue when the
@@ -4985,12 +4988,16 @@ defmodule Arbiter.Worker do
         _ -> meta
       end
 
-    parked = %State{
-      state
-      | status: :awaiting_review_gate,
-        step_started_at: DateTime.utc_now(),
-        meta: meta
-    }
+    # bd-aw2cyt: the author's agent has already exited by now, so this park is
+    # exactly the `:running` -> `:in_review` transition the `worker_phase`
+    # topic exists to report. Announce it before the gate spawns.
+    parked =
+      announce_phase(%State{
+        state
+        | status: :awaiting_review_gate,
+          step_started_at: DateTime.utc_now(),
+          meta: meta
+      })
 
     case spawn_review_gate(parked, branch) do
       # Stash the monitor ref so a ReviewGate that dies before reporting can't
@@ -5403,7 +5410,7 @@ defmodule Arbiter.Worker do
 
     merged =
       apply_review_gate_verdict(
-        %State{state | status: :awaiting_review_gate, meta: meta},
+        announce_phase(%State{state | status: :awaiting_review_gate, meta: meta}),
         verdict
       )
 
@@ -6259,7 +6266,9 @@ defmodule Arbiter.Worker do
       escalate_watchdog_failure(new_state)
     end
 
-    {:ok, mr_ref, new_state}
+    # bd-aw2cyt: same park as adopt_pr_and_spawn_watchdog/5 — announce
+    # :waiting_ci_merge once the Watchdog branch has resolved.
+    {:ok, mr_ref, announce_phase(new_state)}
   end
 
   # bd-129xh4: open the PR for `branch` BEFORE the reviewer runs, WITHOUT

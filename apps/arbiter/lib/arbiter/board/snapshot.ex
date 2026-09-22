@@ -299,7 +299,10 @@ defmodule Arbiter.Board.Snapshot do
     issues = Keyword.get_lazy(opts, :issues, &load_issues/0)
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
     workspace_id = Keyword.get(opts, :workspace_id) || default_workspace_id()
-    slot_basis = SlotGate.normalize_basis(Keyword.get(opts, :slot_basis))
+    # bd-aw2cyt: `load/1` is the impure boundary, so it is where the configured
+    # basis is read. `derive/1` stays a function of its inputs, and an explicit
+    # `:slot_basis` (the pure tests, a caller with its own opinion) still wins.
+    slot_basis = SlotGate.normalize_basis(Keyword.get(opts, :slot_basis) || SlotGate.basis())
 
     # One read of the dependency rows feeds both derived inputs — the gating
     # blockers and (bd-38of5i) the `parent_of` pairs. Skipped entirely when the
