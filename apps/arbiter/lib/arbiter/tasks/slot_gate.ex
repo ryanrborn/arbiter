@@ -66,11 +66,9 @@ defmodule Arbiter.Tasks.SlotGate do
 
   @bases [:agents, :issues]
 
-  @typedoc """
-  Worker statuses that held a slot under the `:issues` basis — an author
-  record with a workflow still in its hands. `:awaiting_review` is absent: it
-  holds an MR, not a subprocess.
-  """
+  # Worker statuses that held a slot under the `:issues` basis — an author
+  # record with a workflow still in its hands. `:awaiting_review` is absent: it
+  # holds an MR, not a subprocess.
   @slot_statuses [:idle, :resuming, :running, :awaiting, :awaiting_review_gate]
 
   # A reviewer / implementer runs under its *own* synthetic task id on behalf

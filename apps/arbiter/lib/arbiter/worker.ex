@@ -1830,13 +1830,8 @@ defmodule Arbiter.Worker do
     do: {:reply, do_restart_watchdog(state), state}
 
   # bd-2aslx6: see `agent_session_live?/1`.
-  def handle_call(:agent_session_live?, _from, %State{claude_sessions: sessions} = state) do
-    live? =
-      Enum.any?(sessions, fn {port, session} ->
-        is_nil(Map.get(session, :exited_at)) and is_port(port) and Port.info(port) != nil
-      end)
-
-    {:reply, live?, state}
+  def handle_call(:agent_session_live?, _from, %State{} = state) do
+    {:reply, session_live?(state), state}
   end
 
   def handle_call({:advance, step}, _from, %State{status: status} = state)
@@ -6001,6 +5996,16 @@ defmodule Arbiter.Worker do
     end
   end
 
+  # The one definition of "this worker owns an agent subprocess right now".
+  # Read by `agent_session_live?/1` (the re-dispatch guard) and stamped onto
+  # every snapshot as `:agent_live` (bd-aw2cyt), so slot accounting and the
+  # phase model cannot disagree with the guard about what is running.
+  defp session_live?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {port, session} ->
+      is_nil(Map.get(session, :exited_at)) and is_port(port) and Port.info(port) != nil
+    end)
+  end
+
   defp snapshot(%State{} = s) do
     %{
       task_id: s.task_id,
@@ -6015,6 +6020,11 @@ defmodule Arbiter.Worker do
       repo: s.repo,
       current_step: s.current_step,
       status: s.status,
+      # bd-aw2cyt: a slot is a live agent, not a live record. Stamped here so
+      # every surface that already reads a snapshot — the board, `arb worker
+      # list`, the MCP tools, the worker lifecycle broadcast — gets the answer
+      # without a second call into this process.
+      agent_live: session_live?(s),
       started_at: s.started_at,
       step_started_at: s.step_started_at,
       mr_ref: s.mr_ref,
