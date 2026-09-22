@@ -605,12 +605,14 @@ defmodule Arbiter.Agents.GeminiTest do
       {:ok, agy: agy}
     end
 
-    test ":strict emits --sandbox and never --dangerously-skip-permissions", %{agy: agy} do
+    test ":strict emits neither flag — --sandbox disables the allowlist gate (bd-25ivqe)", %{
+      agy: agy
+    } do
       policy = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :strict}})
 
       assert {:ok, argv} = Gemini.default_argv("p", security: policy)
       assert ["sh", "-c", _exec, "sh", ^agy, "-p", "p" | rest] = argv
-      assert "--sandbox" in rest
+      refute "--sandbox" in rest
       refute "--dangerously-skip-permissions" in rest
     end
 
