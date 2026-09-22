@@ -89,23 +89,45 @@ defmodule ArbiterWeb.Layouts do
     # badge (bd-2wmxt5) is global chrome, so threading it through all eleven
     # LiveViews' `<Layouts.app ...>` call sites would buy nothing. Tests and
     # specimens that render the layout outside a DB sandbox pass the count in.
-    groups = ArbiterWeb.Nav.groups(assigns.open_epic_count || Arbiter.Tasks.open_epic_count())
-
     assigns =
-      assigns
-      |> assign(:groups, groups)
-      |> assign(:nav_items, ArbiterWeb.Nav.flat_items(groups))
+      assign(
+        assigns,
+        :groups,
+        ArbiterWeb.Nav.groups(assigns.open_epic_count || Arbiter.Tasks.open_epic_count())
+      )
 
     assigns =
       assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
 
     ~H"""
-    <.top_nav
-      items={@nav_items}
-      current_path={@current_path}
-      active_href={ArbiterWeb.Nav.active_href(@groups, @current_path)}
+    <%!-- The status bar (bd-d63b1c): the wordmark and the right-hand cluster,
+          and nothing else — the links moved to the rail. It sticks to the top
+          of the viewport because everything `position: fixed` below it (the
+          rail, the dock's Side and Max windows) is measured from
+          `--nav-height`, so a bar that scrolled away would leave a gap above
+          all three. --%>
+    <header
+      id="app-status-bar"
+      class="sticky top-0 z-20 flex items-center gap-[18px] h-[var(--nav-height)] px-4 bg-[var(--surface-chrome)] border-b border-solid border-[var(--border-default)]"
     >
-      <:right>
+      <button
+        type="button"
+        id="nav-rail-toggle"
+        aria-label="Menu"
+        aria-controls="nav-rail"
+        aria-expanded="false"
+        phx-mounted={JS.ignore_attributes(["aria-expanded"])}
+        phx-click={JS.dispatch("nav-rail:toggle")}
+        class="lg:hidden -ml-1 flex flex-none items-center justify-center size-[30px] rounded-[var(--radius-field)] cursor-pointer text-[var(--text-secondary)] transition-colors duration-150 hover:bg-[var(--arb-raised-hover)] hover:text-[var(--text-title)]"
+      >
+        <ArbiterWeb.CoreComponents.Core.icon name="hero-bars-3" size={20} />
+      </button>
+
+      <span class="flex-none" aria-label="Arbiter">
+        <.brandmark form="wordmark" size={120} tone="accent" />
+      </span>
+
+      <div class="ml-auto flex flex-none items-center gap-4">
         <div :for={quota <- @quotas} class="max-lg:hidden flex flex-col gap-[3px]">
           <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
             {quota_provider_label(quota.provider)}
@@ -136,8 +158,43 @@ defmodule ArbiterWeb.Layouts do
         <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" live={@live} />
         <.coordinator_inbox_trigger unread={length(@coordinator_inbox)} />
         <.theme_toggle />
-      </:right>
-    </.top_nav>
+      </div>
+    </header>
+
+    <%!-- The nav rail (bd-d63b1c). One `sidebar_nav/1` tree, always rendered
+          expanded, inside a `position: fixed` column whose *width* is the only
+          thing that changes — `app.css` ("the nav rail") clips it to the icon
+          column when collapsed and hides the labels and headers there. So:
+
+          * hovering the collapsed rail widens this column over the page; it is
+            `fixed`, out of `<main>`'s flow, and no inset rule mentions
+            `:hover`, so nothing reflows;
+          * pinning (the `NavRail` hook, `<html data-nav-rail="pinned">`)
+            widens it *and* the page inset, so the page makes room instead;
+          * below `lg` it is hidden and the page takes the full width, until
+            the status bar's hamburger opens it as an overlay
+            (`<html data-nav-rail-open>`).
+
+          It is one tree rather than a collapsed rail plus an expanded float so
+          the page has exactly one `aria-current` item, and so a label is always
+          in the accessibility tree even when it is clipped out of sight.
+          `z-20` keeps it under the dock (`z-30`) and the coordinator drawer
+          (`z-40` backdrop, `z-50` drawer). --%>
+    <div
+      id="nav-rail-backdrop"
+      class="nav-rail-backdrop fixed inset-0 top-[var(--nav-height)] z-10 bg-black/30"
+      phx-click={JS.dispatch("nav-rail:close")}
+      aria-hidden="true"
+    >
+    </div>
+
+    <div
+      id="nav-rail"
+      phx-hook="NavRail"
+      class="nav-rail fixed left-0 top-[var(--nav-height)] bottom-[var(--session-dock-strip-height)] z-20"
+    >
+      <.sidebar_nav groups={@groups} current_path={@current_path} expanded={true} />
+    </div>
 
     <%!-- The room the page's two fixed edges are taking, each zero unless
           something is actually occupying it (bd-2qqqbp): on the right a

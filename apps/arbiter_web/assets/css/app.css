@@ -305,6 +305,139 @@ html[data-dock-size="side"] {
   --session-dock-page-inset: var(--session-dock-side-width);
 }
 
+/* bd-d63b1c: the nav rail, and the left half of the page-inset contract.
+   `Layouts.app/1` renders one expanded `sidebar_nav/1` tree inside a fixed
+   `.nav-rail` column, and these rules decide how much of it shows.
+   Three states, each owned by one thing:
+
+   * collapsed (the default) - the column is `--nav-rail-width` wide, clipping
+     the tree to its icons; labels fade out and group headers become hairlines.
+   * hover float - hovering the collapsed column widens it over the page.
+     Width only, on a `position: fixed` element: no inset rule below mentions
+     `:hover`, so the page never reflows under the pointer.
+   * pinned - the NavRail hook sets `<html data-nav-rail="pinned">` (read
+     back from localStorage, and before first paint by theme.js). The column
+     is expanded and the page inset follows it, so the page makes room.
+
+   Below `lg` the rail is hidden and the page keeps its full width, until the
+   status bar hamburger sets `<html data-nav-rail-open>` and it opens as an
+   overlay over a click-dismissable backdrop.
+
+   The inset keys off `:has(#nav-rail)` so it is zero on any page that does not
+   render the rail, and so a dead render is already laid out right before any
+   hook has run. */
+@media (min-width: 64rem) {
+  /* bd-d63b1c: the inset, lg and up only. */
+  html:has(#nav-rail) {
+    --nav-rail-page-inset: var(--nav-rail-width);
+  }
+
+  html[data-nav-rail="pinned"]:has(#nav-rail) {
+    --nav-rail-page-inset: var(--nav-rail-width-expanded);
+  }
+}
+
+.nav-rail {
+  display: none;
+  width: var(--nav-rail-width-expanded);
+  overflow: hidden;
+  transition:
+    width var(--dur-hover) var(--arb-ease-out),
+    box-shadow var(--dur-hover) var(--arb-ease-out);
+}
+
+.nav-rail-backdrop {
+  display: none;
+  animation: arb-fade-in var(--dur-hover) var(--arb-ease-out);
+}
+
+.nav-rail a > .truncate,
+.nav-rail [data-role="nav-group-header"] {
+  transition:
+    opacity var(--dur-hover) var(--arb-ease-out),
+    color var(--dur-hover) var(--arb-ease-out);
+}
+
+.nav-rail [phx-click="toggle-nav-pin"] > span {
+  transition: transform var(--dur-hover) var(--arb-ease-out);
+}
+
+/* Unpinned, the pin points outward: it opens the rail rather than closing it. */
+html:not([data-nav-rail="pinned"]) .nav-rail [phx-click="toggle-nav-pin"] > span {
+  transform: rotate(180deg);
+}
+
+@media not all and (min-width: 64rem) {
+  html[data-nav-rail-open] .nav-rail {
+    display: block;
+    box-shadow: var(--shadow-float);
+  }
+
+  html[data-nav-rail-open] .nav-rail-backdrop {
+    display: block;
+  }
+
+  /* No page inset to pin to down here; the overlay only ever floats. */
+  .nav-rail [phx-click="toggle-nav-pin"] {
+    visibility: hidden;
+  }
+}
+
+@media (min-width: 64rem) {
+  .nav-rail {
+    display: block;
+    width: var(--nav-rail-width);
+  }
+
+  .nav-rail:hover,
+  .nav-rail:has(:focus-visible),
+  html[data-nav-rail="pinned"] .nav-rail {
+    width: var(--nav-rail-width-expanded);
+  }
+
+  /* A short delay on the way in, so a pointer crossing the rail on its way
+     somewhere else does not flash it open. None on the way out. */
+  .nav-rail:hover {
+    box-shadow: var(--shadow-float);
+    transition-delay: var(--dur-instant);
+  }
+
+  html[data-nav-rail="pinned"] .nav-rail {
+    box-shadow: none;
+    transition-delay: 0ms;
+  }
+
+  html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) {
+    /* The pin row centres its button on the icon column. */
+    & > nav > div:first-child {
+      justify-content: flex-start;
+      padding-inline: 12px;
+    }
+
+    /* Clipped already; faded so no half-label peeks past the icon column.
+       Opacity rather than display, so it stays the accessible name. */
+    & a > .truncate {
+      opacity: 0;
+    }
+
+    /* The badge rides the icon corner, as in the collapsed component. */
+    & a > [data-role="nav-badge"] {
+      position: absolute;
+      top: 2px;
+      left: 28px;
+      margin-left: 0;
+    }
+
+    /* Headers keep their height, so rows never jump when the rail widens,
+       and read as the hairline group separators instead. */
+    & [data-role="nav-group-header"] {
+      color: transparent;
+      background: linear-gradient(var(--border-default), var(--border-default)) no-repeat 12px
+        60% / calc(100% - 24px) 1px;
+    }
+  }
+}
+
 @keyframes arb-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
 @keyframes arb-ping { 0% { transform: scale(1); opacity: 0.6 } 80%, 100% { transform: scale(2.4); opacity: 0 } }
 @keyframes arb-fade-in { from { opacity: 0 } to { opacity: 1 } }

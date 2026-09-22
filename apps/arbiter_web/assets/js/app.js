@@ -25,6 +25,7 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/arbiter_web"
 import topbar from "../vendor/topbar"
 import {SessionDock} from "./session_dock.mjs"
+import {NavRail} from "./nav_rail.mjs"
 import {insideTerminal} from "./session_keys.mjs"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
@@ -38,6 +39,8 @@ const Hooks = {
   // bd-dlc136: the session dock's localStorage bridge. It lives in a module of
   // its own so its storage guards can be unit-tested without a browser.
   SessionDock,
+  // bd-d63b1c: the nav rail's pin (localStorage) and its below-lg overlay.
+  NavRail,
 }
 
 const liveSocket = new LiveSocket("/live", Socket, {
