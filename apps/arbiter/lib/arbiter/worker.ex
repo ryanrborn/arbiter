@@ -2319,47 +2319,8 @@ defmodule Arbiter.Worker do
   def handle_info({:__worker_stopped__, port}, %State{status: status} = state)
       when status in @live_statuses do
     case Map.fetch(state.claude_sessions, port) do
-      {:ok, session} ->
-        cond do
-          # bd-aje6fj: systemd's control-group SIGTERM reaches the agent at the
-          # same moment as the BEAM, so on a restart the agent usually exits
-          # before the supervisor gets round to this worker. That is the node
-          # going down, not the run failing: don't classify, escalate or
-          # auto-resume it — terminate/2 records it `:interrupted` shortly.
-          node_stopping?() ->
-            {:noreply, state}
-
-          other_session_live?(state, port) ->
-            {:noreply, state}
-
-          run_signalled_done?(state) ->
-            {:noreply, on_claude_done(state)}
-
-          # bd-2da6ay: a non-reviewable `task`-type worker whose subprocess
-          # exited cleanly (status 0) at wrap-up without ever printing `arb
-          # done`. Its deliverable is a findings summary in `notes`, NOT a
-          # worktree change — so a clean exit means the agent reached the end of
-          # its work and quit; it just never emitted the sentinel. Resuming
-          # (bd-t9uq25) only replays the identical clean exit, burning Opus on a
-          # loop that can never converge (observed: 3× on bd-8ggqep, ~$6.28).
-          # Finalize deterministically through the same notes gate `arb done`
-          # uses instead: populated notes complete the task; blank notes nudge
-          # up to the cap then escalate with a concrete cause. Infra failures
-          # (auth/credit/rate/killed/crashed) are NOT clean exits, so they fall
-          # through to the resume/fail_stopped path and keep their specific
-          # escalations (e.g. the credential watchdog).
-          task_type?(state.meta) and not review_only?(state.meta) and
-              clean_exit_without_done?(session) ->
-            {:noreply, finalize_task_type_stop(state)}
-
-          true ->
-            # bd-t9uq25: exited without `arb done` — try to resume the session
-            # in place (bounded) before failing + discarding the worktree.
-            {:noreply, maybe_resume_continuation(state, session)}
-        end
-
-      :error ->
-        {:noreply, state}
+      {:ok, session} -> {:noreply, on_agent_stopped(state, port, session)}
+      :error -> {:noreply, state}
     end
   end
 
@@ -2481,6 +2442,47 @@ defmodule Arbiter.Worker do
   end
 
   # ---- helpers -----------------------------------------------------------
+
+  # The deferred stop check proper, for a session this worker owns.
+  defp on_agent_stopped(%State{} = state, port, session) do
+    cond do
+      # bd-aje6fj: systemd's control-group SIGTERM reaches the agent at the
+      # same moment as the BEAM, so on a restart the agent usually exits
+      # before the supervisor gets round to this worker. That is the node
+      # going down, not the run failing: don't classify, escalate or
+      # auto-resume it — terminate/2 records it `:interrupted` shortly.
+      node_stopping?() ->
+        state
+
+      other_session_live?(state, port) ->
+        state
+
+      run_signalled_done?(state) ->
+        on_claude_done(state)
+
+      # bd-2da6ay: a non-reviewable `task`-type worker whose subprocess
+      # exited cleanly (status 0) at wrap-up without ever printing `arb
+      # done`. Its deliverable is a findings summary in `notes`, NOT a
+      # worktree change — so a clean exit means the agent reached the end of
+      # its work and quit; it just never emitted the sentinel. Resuming
+      # (bd-t9uq25) only replays the identical clean exit, burning Opus on a
+      # loop that can never converge (observed: 3× on bd-8ggqep, ~$6.28).
+      # Finalize deterministically through the same notes gate `arb done`
+      # uses instead: populated notes complete the task; blank notes nudge
+      # up to the cap then escalate with a concrete cause. Infra failures
+      # (auth/credit/rate/killed/crashed) are NOT clean exits, so they fall
+      # through to the resume/fail_stopped path and keep their specific
+      # escalations (e.g. the credential watchdog).
+      task_type?(state.meta) and not review_only?(state.meta) and
+          clean_exit_without_done?(session) ->
+        finalize_task_type_stop(state)
+
+      true ->
+        # bd-t9uq25: exited without `arb done` — try to resume the session
+        # in place (bounded) before failing + discarding the worktree.
+        maybe_resume_continuation(state, session)
+    end
+  end
 
   defp on_port_data(%State{} = state, port, fragment, eol?) do
     case Map.fetch(state.claude_sessions, port) do
