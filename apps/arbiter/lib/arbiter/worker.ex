@@ -2451,6 +2451,14 @@ defmodule Arbiter.Worker do
       # before the supervisor gets round to this worker. That is the node
       # going down, not the run failing: don't classify, escalate or
       # auto-resume it — terminate/2 records it `:interrupted` shortly.
+      #
+      # Deliberately ahead of run_signalled_done?/1: a run that printed `arb
+      # done` in the last exit-grace window is interrupted too, not completed.
+      # on_claude_done/1 is not safe mid-shutdown — the commit gate can
+      # respawn a nudge agent, and the review gate / merge queue it hands off
+      # to are being torn down alongside this worker — so it could be killed
+      # halfway through a hand-off. Resuming at boot just replays the `arb
+      # done`, which is harmless.
       node_stopping?() ->
         state
 
