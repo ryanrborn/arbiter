@@ -777,7 +777,7 @@ Each phase is sized to be one child ticket.
 | **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in | P7 | P2 | D3 |
 | **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill | bd-adyhvn, P2 | P2 | D2 |
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces | P9, P5 | P3 | D2 |
-| **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) | P2 | P2 | D2 |
+| **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a — also adds nullable `usage_events.provider_account_id`/`provider_credential_id`, a minimal P9 slice merge needed to re-point; full backfill is still P9) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |
 
 P5 and P7 are P1 because they are the correctness fixes — the gate is only sound

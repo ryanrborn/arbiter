@@ -70,6 +70,16 @@ defmodule Arbiter.Accounts.ProviderCredential do
       change set_attribute(:active, false)
       change set_attribute(:retired_at, &DateTime.utc_now/0)
     end
+
+    # `arb account merge` (§2.5, P11): "provider_credentials rows move across
+    # and stay distinct." Re-pointing the owning account is the one field a
+    # merge legitimately changes; it never touches the append-only
+    # secret/kind/fingerprint fields the moduledoc's append-only enforcement
+    # is actually about.
+    update :reassign_account do
+      require_atomic? false
+      accept [:provider_account_id]
+    end
   end
 
   attributes do

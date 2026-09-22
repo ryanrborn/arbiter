@@ -101,6 +101,8 @@ defmodule Arbiter.Usage.Event do
         :step,
         :model,
         :provider,
+        :provider_account_id,
+        :provider_credential_id,
         :tokens_in,
         :tokens_out,
         :thinking_tokens,
@@ -186,6 +188,30 @@ defmodule Arbiter.Usage.Event do
       constraints max_length: 64, trim?: true
 
       description ~s[Provider key (e.g. "claude", "openai"). Normalised so future non-Claude agents fit this same ledger.]
+    end
+
+    attribute :provider_account_id, :uuid do
+      public? true
+      allow_nil? true
+
+      description """
+      The Arbiter.Accounts.ProviderAccount this spend is metered under
+      (`docs/provider-account-design.md` §2.5, §3.2). Nullable — only rows
+      written since P11 (bd-8zvh5a) and rows re-pointed by `arb account merge`
+      carry it; the historical backfill is P9 (bd-al9qqe)'s scope.
+      """
+    end
+
+    attribute :provider_credential_id, :uuid do
+      public? true
+      allow_nil? true
+
+      description """
+      The specific `Arbiter.Accounts.ProviderCredential` in use, stamped so a
+      later-discovered split (§2.5) can tell which rotation-era events belong
+      to which sub-account. Nullable for the same reason as
+      `provider_account_id`.
+      """
     end
 
     attribute :tokens_in, :integer do
