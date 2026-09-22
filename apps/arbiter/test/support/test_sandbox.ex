@@ -221,7 +221,8 @@ defmodule Arbiter.TestSandbox do
       # it quiesces first, so a worker parked in a DB callback is not killed
       # mid-query, and it stops through the `sys` terminate path, so the
       # owner's `terminate/2` actually runs. That matters here more than
-      # anywhere: `Arbiter.Worker` does not trap exits, and its `terminate/2`
+      # anywhere: an owner need not trap exits (`Arbiter.Worker` does since
+      # bd-aje6fj, but the probe and others don't), and a worker's `terminate/2`
       # is the only thing that SIGKILLs the agent's OS process and its
       # descendants (bd-bmmj4w). An exit signal skips the callback, so the
       # owner would go down while its agent kept running — cwd inside the root

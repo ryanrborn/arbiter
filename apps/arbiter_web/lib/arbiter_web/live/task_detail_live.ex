@@ -3869,6 +3869,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp run_worker_label(_), do: "—"
 
   defp run_failed?(%Run{status: :failed}), do: true
+  # bd-aje6fj: shut down with the server. The agent usually took systemd's
+  # SIGTERM too (exit 143), which is not the run failing.
+  defp run_failed?(%Run{status: :interrupted}), do: false
   defp run_failed?(%Run{exit_code: code}) when is_integer(code) and code != 0, do: true
   defp run_failed?(_), do: false
 
@@ -3899,8 +3902,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   # NON-failures, so `run_failed?/1` (correctly) says no about both — but the
   # recorded reason is still the only thing worth showing in this column: the
   # run itself produced nothing new to count, and "why is this sitting still"
-  # is exactly what an operator is scanning for.
-  @outcome_reason_statuses [:review_not_started, :review_parked]
+  # is exactly what an operator is scanning for. bd-aje6fj `:interrupted` (shut
+  # down with the server) is the same shape.
+  @outcome_reason_statuses [:review_not_started, :review_parked, :interrupted]
 
   defp outcome_reason?(%Run{} = run) do
     (run_failed?(run) or run.status in @outcome_reason_statuses) and run_failure_line(run) != ""

@@ -261,10 +261,15 @@ defmodule ArbiterCli.Cmd.Worker do
           "started=#{r["started_at"]}  completed=#{completed}#{model_part}"
       )
 
-      if r["failure_reason"], do: IO.puts("      failure: #{r["failure_reason"]}")
+      if r["failure_reason"], do: IO.puts("      #{reason_label(r)}: #{r["failure_reason"]}")
       if r["failure_summary"], do: IO.puts("      summary: #{r["failure_summary"]}")
     end)
   end
+
+  # bd-aje6fj: an `interrupted` run (shut down with the server) carries its
+  # cause in failure_reason too, but it is not a failure — don't label it one.
+  defp reason_label(%{"status" => "interrupted"}), do: "reason"
+  defp reason_label(_run), do: "failure"
 
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
 
