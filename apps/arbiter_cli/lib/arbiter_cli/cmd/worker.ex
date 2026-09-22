@@ -383,19 +383,16 @@ defmodule ArbiterCli.Cmd.Worker do
   defp cost_label(%{"cost_usd" => nil, "cost_unpriced" => true}), do: "n/a"
 
   defp cost_label(%{"cost_usd" => cost} = row) when is_number(cost) do
-    live? = row["cost_live"] == true
-    in_flight = row["cost_live_usd"]
-    flagged? = row["cost_degraded"] == true or row["cost_unpriced"] == true
+    unpriced? = row["cost_unpriced"] == true
+    degraded? = row["cost_degraded"] == true
 
-    if cost <= 0 and not flagged? do
+    if cost <= 0 and not (unpriced? or degraded?) do
       nil
     else
       [
-        if(live?, do: "~#{dollars(cost)}", else: dollars(cost)),
-        (live? and is_number(in_flight) and in_flight > 0) &&
-          " (incl. ~#{dollars(in_flight)} in flight)",
-        row["cost_unpriced"] == true && " + n/a unpriced",
-        row["cost_degraded"] == true && " (live read incomplete)"
+        live_figure(cost, row),
+        unpriced? && " + n/a unpriced",
+        degraded? && " (live read incomplete)"
       ]
       |> Enum.filter(&is_binary/1)
       |> Enum.join()
@@ -403,6 +400,13 @@ defmodule ArbiterCli.Cmd.Worker do
   end
 
   defp cost_label(_row), do: nil
+
+  defp live_figure(cost, %{"cost_live" => true, "cost_live_usd" => in_flight})
+       when is_number(in_flight) and in_flight > 0,
+       do: "~#{dollars(cost)} (incl. ~#{dollars(in_flight)} in flight)"
+
+  defp live_figure(cost, %{"cost_live" => true}), do: "~#{dollars(cost)}"
+  defp live_figure(cost, _row), do: dollars(cost)
 
   defp dollars(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
 

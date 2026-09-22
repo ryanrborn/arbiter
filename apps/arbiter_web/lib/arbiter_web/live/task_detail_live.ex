@@ -73,8 +73,8 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Trackers
   alias Arbiter.Usage
   alias Arbiter.Usage.Budget
-  alias Arbiter.Usage.LiveSpend
   alias Arbiter.Usage.Event, as: UsageEvent
+  alias Arbiter.Usage.LiveSpend
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ReviewGate
