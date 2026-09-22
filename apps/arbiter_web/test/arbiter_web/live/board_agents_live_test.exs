@@ -51,6 +51,20 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
     assert slots =~ "0 of"
   end
 
+  test "the workers index shows the phase and dims a row with no live agent", %{
+    conn: conn,
+    ws: ws
+  } do
+    t = task(ws, "workers index row")
+    {:ok, pid} = Worker.start(task_id: t.id, repo: "r", workspace_id: ws.id)
+    :ok = Worker.advance(pid, :implement)
+    on_exit(fn -> if Process.alive?(pid), do: Worker.stop(t.id, :normal) end)
+
+    {:ok, view, _html} = live(conn, "/workers")
+
+    assert has_element?(view, "[data-phase][data-agent-live='false']")
+  end
+
   test "a running card with no live agent is marked as such", %{conn: conn, ws: ws} do
     t = task(ws, "stalled card")
     {:ok, pid} = Worker.start(task_id: t.id, repo: "r", workspace_id: ws.id)
