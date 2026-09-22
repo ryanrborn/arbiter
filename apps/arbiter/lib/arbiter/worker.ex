@@ -256,6 +256,33 @@ defmodule Arbiter.Worker do
   # generous; the point is that a wedged teardown can't block a merge-queue tick.
   @reap_stop_timeout_ms 5_000
 
+  # bd-96mn8i (round 2): a session that ends without ever having a terminal
+  # stream event parsed — process killed/stopped mid-turn, port torn down
+  # before the CLI's own `result`/`error` event arrived, or (agy/gemini,
+  # which have no disk fallback — see `maybe_reconcile_usage_from_disk/3`)
+  # simply no on-disk source to recover from — leaves `usage` with every
+  # token field nil. That is the CORRECT "unknown" representation (never a
+  # fabricated zero), but a bare nil is indistinguishable from a provider
+  # that is *known* to report nothing (e.g. agy's own no-cost note). Stamp an
+  # explicit reason so the row reads as "we looked and found nothing" rather
+  # than looking like an unhandled gap.
+  @no_terminal_event_note "no usage captured: the session ended before any " <>
+                            "terminal usage event was observed on its stream"
+
+  # bd-96mn8i (round 3 fix): a terminal event CAN arrive and still carry no
+  # tokens — a codex `turn.failed`, an upstream gemini error `result`, or a
+  # Claude `result` with `is_error: true` and no `usage` object. Each of those
+  # sets `result_status`/`is_error` on the usage map (see
+  # `Arbiter.Agents.Codex.Stream.usage_fields/2`,
+  # `Arbiter.Agents.Gemini.Stream.usage_fields/2`, and
+  # `ClaudeSession.absorb_usage/2`'s `"result"` clause) even though `drop_nil`
+  # strips the absent token fields. Claiming "the session ended before any
+  # terminal usage event was observed" on THOSE rows is false — a terminal
+  # event was observed, it just reported a failure with no usage. Distinguish
+  # the two so the note never lies about which case produced the nil.
+  @terminal_event_no_usage_note "no usage captured: a terminal event was observed on the " <>
+                                  "stream but reported no usage (status: "
+
   # ---- public API ---------------------------------------------------------
 
   @doc """
@@ -1491,6 +1518,7 @@ defmodule Arbiter.Worker do
       session
       |> Arbiter.Worker.ClaudeSession.usage_summary()
       |> maybe_reconcile_usage_from_disk(session, state)
+      |> maybe_note_missing_usage()
 
     role = Map.get(state.meta || %{}, :role)
 
@@ -1692,6 +1720,51 @@ defmodule Arbiter.Worker do
     case Map.get(usage, :cost_note) do
       existing when is_binary(existing) and existing != "" -> usage
       _ -> Map.put(usage, :cost_note, note)
+    end
+  end
+
+  # bd-96mn8i (round 2): the row-level counterpart to `maybe_put_cost_note/2`
+  # above — this one fires on `:tokens_in`, not `:cost_usd`, and only when
+  # NOTHING was captured (no stream usage, no disk reconciliation, and no
+  # provider-specific note already explaining a deliberate zero/unknown, e.g.
+  # agy's `@agy_cost_unavailable_note`). Leaves a genuinely priced-but-costless
+  # row (tokens present, cost_usd nil) untouched.
+  defp maybe_note_missing_usage(usage) do
+    case Map.get(usage, :tokens_in) do
+      nil -> maybe_put_cost_note(usage, missing_usage_note(usage))
+      _ -> usage
+    end
+  end
+
+  # A terminal event was observed if the stream's own error/status clause ran
+  # — `is_error` is explicitly `true`/`false` (never absent-then-dropped, see
+  # each provider's `usage_fields/2` clause above) or `result_status`/
+  # `result_subtype` carries a value. Any of those means the CLI reported an
+  # outcome with no usage attached, which is a materially different fact from
+  # "the port closed and nothing was ever parsed".
+  defp missing_usage_note(usage) do
+    status =
+      Map.get(usage, :result_status) || Map.get(usage, :result_subtype)
+
+    observed_terminal_event? =
+      is_boolean(Map.get(usage, :is_error)) or not is_nil(status)
+
+    if observed_terminal_event? do
+      @terminal_event_no_usage_note <> "#{status || terminal_event_status_label(usage)})"
+    else
+      @no_terminal_event_note
+    end
+  end
+
+  # `status` is nil whenever the provider's own status field was absent and
+  # all we have is the boolean `is_error` flag — interpolating that boolean
+  # directly reads as a stray `true`/`false` in a column labelled "status",
+  # so spell it out instead.
+  defp terminal_event_status_label(usage) do
+    case Map.get(usage, :is_error) do
+      true -> "errored"
+      false -> "not reported"
+      nil -> "not reported"
     end
   end
 
