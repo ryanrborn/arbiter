@@ -100,6 +100,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Usage.Budget
+  alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
 
   require Ash.Query
@@ -564,11 +565,14 @@ defmodule Arbiter.Board.Snapshot do
     workers
     |> Enum.filter(&(&1.status in @running_statuses))
     |> Enum.map(fn w ->
+      gate_worker = Map.get(gate_workers_by_author, w.task_id)
+
       w
       |> base_card(issues_by_id)
       |> Map.merge(%{
         step: Map.get(w, :current_step),
-        activity: activity(w, Map.get(gate_workers_by_author, w.task_id)),
+        activity: activity(w, gate_worker),
+        provider: card_provider(w, gate_worker),
         since: since(w)
       })
     end)
@@ -1050,6 +1054,15 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp activity(worker, _gate_worker), do: live_label(worker) || "working"
+
+  # While an author sits in :awaiting_review_gate, the gate worker (reviewer
+  # or implementer) is the one actually running for the issue, so its
+  # provider is what the card shows — not the parked author's.
+  defp card_provider(%{status: :awaiting_review_gate}, %{} = gate_worker) do
+    Worker.provider(Map.get(gate_worker, :meta))
+  end
+
+  defp card_provider(worker, _gate_worker), do: Worker.provider(Map.get(worker, :meta))
 
   # A reviewer/implementer's synthetic id is `<base>#<suffix>` where suffix
   # may itself be a chain (e.g. `#review#impl2`, `#review#r2#v2`) —

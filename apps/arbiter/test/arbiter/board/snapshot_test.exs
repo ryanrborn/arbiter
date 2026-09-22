@@ -453,6 +453,32 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert [%{id: "bd-a", activity: "round 2 review"}] = board.running
     end
+
+    test "an author-only card's provider is the author's own" do
+      board = derive(workers: [worker("bd-a", :running, %{meta: %{provider: "codex"}})])
+
+      assert [%{id: "bd-a", provider: "codex"}] = board.running
+    end
+
+    test "an author awaiting review shows the gate worker's provider, not its own" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting_review_gate, %{meta: %{provider: "claude"}}),
+            worker("bd-a#review", :running, %{
+              meta: %{role: :reviewer, reviews: "bd-a", provider: "gemini"}
+            })
+          ]
+        )
+
+      assert [%{id: "bd-a", provider: "gemini"}] = board.running
+    end
+
+    test "an unknown provider is nil, not a guess" do
+      board = derive(workers: [worker("bd-a", :running, %{meta: %{}})])
+
+      assert [%{id: "bd-a", provider: nil}] = board.running
+    end
   end
 
   describe "waiting column" do
