@@ -82,6 +82,38 @@ defmodule Arbiter.Accounts.Credentials do
   end
 
   @doc """
+  The account's own `/api/oauth/usage`-authenticating credential (P6,
+  `docs/provider-account-design.md` §5 row 10 / §9).
+
+  Deliberately keyed on `kind == :cli_credentials_file`, not `env_var` — a
+  `:oauth_token` row under `CLAUDE_CODE_OAUTH_TOKEN` is a `worker_env` token,
+  and bd-4fbpto found that shape cannot authenticate this endpoint at all
+  (see PR #1607). Only the credentials-file-sourced secret can, so this is
+  the one credential kind `Arbiter.Quota.capture_oauth_usage/2` reads.
+
+  `:none` when the account has no active credential of that kind yet — a
+  pre-migration install, or an account minted by `Resolver.ensure_account_id/2`
+  with no credential attached. The caller falls back to
+  `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
+  `.credentials.json` on disk) in that case, unchanged from pre-P6 behavior.
+  """
+  @spec account_oauth_usage_token(String.t() | nil) :: {:ok, String.t()} | :none
+  def account_oauth_usage_token(account_id) when is_binary(account_id) and account_id != "" do
+    [account_id]
+    |> active_credentials()
+    |> Enum.find(&(&1.kind == :cli_credentials_file))
+    |> case do
+      nil -> :none
+      credential -> pair(credential) |> extract_secret()
+    end
+  end
+
+  def account_oauth_usage_token(_), do: :none
+
+  defp extract_secret([{_env_var, secret}]), do: {:ok, secret}
+  defp extract_secret([]), do: :none
+
+  @doc """
   The install-wide credential for `env_var`, **only when it is unambiguous**:
   the single distinct secret across every enabled account that has an active
   credential under that var.

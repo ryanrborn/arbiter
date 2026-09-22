@@ -45,6 +45,7 @@ defmodule Arbiter.Quota do
 
   use Ash.Domain
 
+  alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Quota.AnthropicQuota
@@ -676,6 +677,18 @@ defmodule Arbiter.Quota do
   credentials, or any transport error is returned as `{:error, reason}` here
   but never raises — callers that just want "whatever we have" should use
   `refresh_and_serialize/2` instead, which swallows this outright.
+
+  Since P6 (§9), an explicit `:token` in `opts` (tests, or an already-resolved
+  credential) is always honored as-is. Otherwise this resolves *this
+  account's own* `cli_credentials_file` credential
+  (`Arbiter.Accounts.Credentials.account_oauth_usage_token/1`) to authenticate
+  the request, and tags the fetch with `:provider_account_id` so
+  `Arbiter.Quota.OAuthUsage`'s 429 cooldown is keyed on the account, not
+  whichever credential happened to authenticate it — two credentials on one
+  account (e.g. mid-rotation) share the one cooldown window the account's
+  rate limit actually enforces. An account with no credential row yet (a
+  pre-migration install) falls back to `OAuthUsage.fetch/1`'s own default
+  (the operator's `.credentials.json` on disk).
   """
   @spec capture_oauth_usage(String.t() | nil, keyword()) ::
           {:ok, AnthropicQuota.t()} | {:error, term()}
@@ -683,8 +696,28 @@ defmodule Arbiter.Quota do
     provider = Keyword.get(opts, :provider, @default_provider)
 
     with {:ok, id} <- fetch_account_id(account_id),
-         {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(opts) do
+         {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(account_oauth_fetch_opts(id, opts)) do
       record_oauth_usage(id, provider, usage)
+    end
+  end
+
+  # Resolves the token to authenticate `/api/oauth/usage` with (see the
+  # moduledoc on `capture_oauth_usage/2`). An explicit `:token` already in
+  # `opts` — the pre-P6 shape every existing test and on-demand caller uses —
+  # is never overridden, and in that case the cooldown stays keyed on the
+  # token exactly as before P6, so a caller that already knows exactly which
+  # credential it wants keeps full control of both the fetch and the
+  # cooldown it shares with other calls using that same explicit token.
+  defp account_oauth_fetch_opts(account_id, opts) do
+    if Keyword.has_key?(opts, :token) do
+      opts
+    else
+      opts = Keyword.put(opts, :provider_account_id, account_id)
+
+      case Credentials.account_oauth_usage_token(account_id) do
+        {:ok, token} -> Keyword.put(opts, :token, token)
+        :none -> opts
+      end
     end
   end
 
@@ -705,8 +738,7 @@ defmodule Arbiter.Quota do
   `capture_oauth_usage/2`, but for a *group of workspaces* (bd-5xuneh).
   `/api/oauth/usage` is account-wide and rate-limited per account, not per
   workspace, so fetching it once per workspace burns the shared rate-limit
-  budget for an identical number. This fetches **once** and writes (+
-  broadcasts) the resulting snapshot to every workspace in `workspace_ids`.
+  budget for an identical number.
 
   bd-5xuneh originally grouped workspaces by
   `Arbiter.Agents.Claude.ConfigDir.oauth_token/1` and passed the resolved
@@ -714,48 +746,43 @@ defmodule Arbiter.Quota do
   token could authenticate this call. bd-4fbpto found that backwards — that
   token is scope/rate-limited for this endpoint and passing it here is why
   every poll silently failed once the header-capture fallback was removed
-  (see the status codes and body shapes recorded in PR #1607). `Arbiter.Quota.CloudProbe` no
-  longer resolves or passes a per-workspace token: it calls this once per
-  cycle for *every* workspace on the install and lets
-  `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
-  `.credentials.json`) authenticate the request — see that module's `opts`
-  for how a caller can still override it (tests do, via `:token` /
-  `:source_dir`). Returns the list of per-workspace `record_oauth_usage`
-  results, in the same order as `workspace_ids`, if the single fetch
-  succeeded.
+  (see the status codes and body shapes recorded in PR #1607).
 
-  Since P5 (§6) the write is **per account**, not per workspace: each
-  workspace id is resolved to the account it meters under and the snapshot
-  is written once per distinct account, so three workspaces on one plan
-  produce one row rather than three. The return value still has one entry
-  per input workspace, in order, so a caller can report which workspace's
-  resolution failed — workspaces sharing an account share that account's
-  result.
+  Each workspace id is resolved to the account it meters under (§6), and this
+  fetches **once per distinct account**, not once for the whole group — P5
+  made the *write* per-account; P6 (§9) is what makes the *fetch* genuinely
+  per-account too, via `capture_oauth_usage/2`, so N accounts sharing this
+  cycle's workspace list get N independent fetches, each authenticated with
+  that account's own credential (or the install-wide default, when the
+  account has none — see `capture_oauth_usage/2`). Three workspaces on one
+  account still produce exactly one fetch and one write, exactly as before.
 
-  The remaining per-account *fetch* is P6: this still fetches once for the
-  whole cycle and writes that one body to every account, which is only
-  correct while the install has a single account. `Arbiter.Quota.CloudProbe`
-  is where that loop gets built (§9).
+  Returns `{:ok, results}` with one entry per input workspace, in the same
+  order, so a caller can tell which workspace's account failed — workspaces
+  sharing an account share that account's result. When every workspace in
+  the group resolves to the *same* failure (typically: one account, or every
+  account failing identically, e.g. a transport error), the failure is
+  surfaced as a bare `{:error, reason}` instead, matching this function's
+  pre-P6 contract for the single-account case every existing caller relies
+  on.
   """
   @spec capture_oauth_usage_for_group([String.t()], keyword()) ::
           {:ok, [{:ok, AnthropicQuota.t()} | {:error, term()}]} | {:error, term()}
   def capture_oauth_usage_for_group(workspace_ids, opts \\ []) when is_list(workspace_ids) do
     provider = Keyword.get(opts, :provider, @default_provider)
 
-    with {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(opts) do
-      {results, _seen} =
-        Enum.map_reduce(workspace_ids, %{}, fn workspace_id, seen ->
-          write_once_per_account(workspace_id, provider, usage, seen)
-        end)
+    {results, _seen} =
+      Enum.map_reduce(workspace_ids, %{}, fn workspace_id, seen ->
+        write_once_per_account(workspace_id, provider, opts, seen)
+      end)
 
-      {:ok, results}
-    end
+    collapse_uniform_failure(results)
   end
 
-  # One write per distinct account per cycle. `seen` memoizes the result so
-  # the second and third workspace on an account neither re-write the row nor
-  # report a different outcome from the first.
-  defp write_once_per_account(workspace_id, provider, usage, seen) do
+  # One fetch + write per distinct account per cycle. `seen` memoizes the
+  # result so the second and third workspace on an account neither re-fetch
+  # nor re-write, and report the same outcome as the first.
+  defp write_once_per_account(workspace_id, provider, opts, seen) do
     with {:ok, ws_id} <- resolve_workspace_id(workspace_id),
          {:ok, account_id} <- ensure_account_id(ws_id, provider) do
       case Map.fetch(seen, account_id) do
@@ -763,11 +790,30 @@ defmodule Arbiter.Quota do
           {result, seen}
 
         :error ->
-          result = record_oauth_usage(account_id, provider, usage)
+          result = capture_oauth_usage(account_id, Keyword.put(opts, :provider, provider))
           {result, Map.put(seen, account_id, result)}
       end
     else
       error -> {error, seen}
+    end
+  end
+
+  # Pre-P6 callers (and every existing test) expect a single fetch shared by
+  # the whole group to fail as a bare `{:error, reason}`, not
+  # `{:ok, [{:error, reason}, ...]}` — this keeps that contract for the
+  # common case (one account, or every account failing the same way) while
+  # still exposing real per-account divergence (some accounts ok, some not)
+  # through the per-workspace `results` list.
+  defp collapse_uniform_failure(results) do
+    results
+    |> Enum.map(fn
+      {:error, reason} -> {:error, reason}
+      _ -> :ok
+    end)
+    |> Enum.uniq()
+    |> case do
+      [{:error, reason}] -> {:error, reason}
+      _ -> {:ok, results}
     end
   end
 

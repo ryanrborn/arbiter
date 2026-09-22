@@ -154,6 +154,87 @@ defmodule Arbiter.Quota.CloudProbeTest do
       end
     end
 
+    # P6 (`docs/provider-account-design.md` §5 row 10, §9): CloudProbe iterates
+    # provider accounts, not a single install-wide token — bd-4fbpto's single
+    # shared fetch (above) was only correct while the install had one account.
+    # Two workspaces on two distinct accounts must each get their own fetch,
+    # authenticated with that account's own `cli_credentials_file` credential.
+    test "issues one /api/oauth/usage request per distinct account, each with its own credential",
+         context do
+      alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+
+      Req.Test.set_req_test_to_shared(context)
+
+      account_a = Ash.create!(ProviderAccount, %{provider: :claude, slug: "cp-acct-a"})
+      account_b = Ash.create!(ProviderAccount, %{provider: :claude, slug: "cp-acct-b"})
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_a.id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "cp-fp-a",
+        secret: "cp-token-a"
+      })
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_b.id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "cp-fp-b",
+        secret: "cp-token-b"
+      })
+
+      alpha = workspace_with_token!("cp-alpha", "irrelevant")
+      beta = workspace_with_token!("cp-beta", "irrelevant")
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: alpha.id,
+        provider: :claude,
+        provider_account_id: account_a.id
+      })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: beta.id,
+        provider: :claude,
+        provider_account_id: account_b.id
+      })
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        token =
+          conn
+          |> Plug.Conn.get_req_header("authorization")
+          |> List.first()
+          |> String.replace_prefix("Bearer ", "")
+
+        send(test_pid, {:oauth_usage_call, token})
+        Req.Test.json(conn, %{"seven_day_sonnet" => %{"utilization" => 42}})
+      end)
+
+      on_exit(fn ->
+        Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_a.id)
+        Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_b.id)
+      end)
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: []
+        )
+
+      CloudProbe.probe(pid)
+
+      assert_receive {:oauth_usage_call, "cp-token-a"}, 2_000
+      assert_receive {:oauth_usage_call, "cp-token-b"}, 2_000
+      refute_receive {:oauth_usage_call, _}, 300
+
+      assert Arbiter.Quota.serialize(account_a.id).per_model_utilization == %{"sonnet" => 0.42}
+      assert Arbiter.Quota.serialize(account_b.id).per_model_utilization == %{"sonnet" => 0.42}
+    end
+
     # bd-b0zody: the probe cycle is the *only* thing keeping Claude's snapshot
     # current for a fleet making no proxied traffic, so a probe must land the
     # columns the dispatch gate reads — not just the per-model garnish.

@@ -656,6 +656,38 @@ defmodule Arbiter.QuotaTest do
 
       assert Quota.serialize(quota_account_id!(ws.id)).per_model_utilization == %{}
     end
+
+    # P6 (§9): with no explicit `:token`, the account's own
+    # `cli_credentials_file` credential authenticates the request, and the
+    # cooldown is keyed on the account (not the token) so it survives a
+    # credential rotation.
+    test "resolves the account's own cli_credentials_file credential when no token is given" do
+      alias Arbiter.Accounts.ProviderCredential
+
+      account_id = quota_account_id!(workspace!().id)
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "fp-resolved",
+        secret: "resolved-token"
+      })
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_id) end)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer resolved-token"]
+        Req.Test.json(conn, %{"five_hour" => %{"utilization" => 5}})
+      end)
+
+      assert {:ok, quota} =
+               Quota.capture_oauth_usage(account_id,
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+
+      assert quota.utilization_5h == 0.05
+    end
   end
 
   describe "capture_oauth_usage_for_group/2" do
@@ -716,6 +748,83 @@ defmodule Arbiter.QuotaTest do
 
       assert Quota.serialize(quota_account_id!(ws_a.id)) == nil
       assert Quota.serialize(quota_account_id!(ws_b.id)) == nil
+    end
+
+    # P6 (§9): the shared-fetch shortcut above was only correct while the
+    # install had exactly one account — this proves the real per-account
+    # fetch it was replaced with: two workspaces on two distinct accounts
+    # get two independent fetches, each authenticated with that account's
+    # own credential, and each account's row reflects only its own fetch.
+    test "two workspaces on two distinct accounts each get their own fetch and credential" do
+      alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+
+      account_a = Ash.create!(ProviderAccount, %{provider: :claude, slug: "acct-a"})
+      account_b = Ash.create!(ProviderAccount, %{provider: :claude, slug: "acct-b"})
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_a.id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "fp-a",
+        secret: "token-a"
+      })
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_b.id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "fp-b",
+        secret: "token-b"
+      })
+
+      ws_a = workspace!("acct-a-ws")
+      ws_b = workspace!("acct-b-ws")
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws_a.id,
+        provider: :claude,
+        provider_account_id: account_a.id
+      })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws_b.id,
+        provider: :claude,
+        provider_account_id: account_b.id
+      })
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        token =
+          conn
+          |> Plug.Conn.get_req_header("authorization")
+          |> List.first()
+          |> String.replace_prefix("Bearer ", "")
+
+        send(test_pid, {:http_call, token})
+
+        utilization = if token == "token-a", do: 11, else: 22
+        Req.Test.json(conn, %{"five_hour" => %{"utilization" => utilization}})
+      end)
+
+      on_exit(fn ->
+        Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_a.id)
+        Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_b.id)
+      end)
+
+      assert {:ok, results} =
+               Quota.capture_oauth_usage_for_group([ws_a.id, ws_b.id],
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      assert_received {:http_call, "token-a"}
+      assert_received {:http_call, "token-b"}
+      refute_received {:http_call, _}
+
+      assert Quota.serialize(account_a.id).utilization_5h == 0.11
+      assert Quota.serialize(account_b.id).utilization_5h == 0.22
     end
   end
 
