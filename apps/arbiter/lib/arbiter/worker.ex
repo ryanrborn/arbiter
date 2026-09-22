@@ -256,6 +256,19 @@ defmodule Arbiter.Worker do
   # generous; the point is that a wedged teardown can't block a merge-queue tick.
   @reap_stop_timeout_ms 5_000
 
+  # bd-96mn8i (round 2): a session that ends without ever having a terminal
+  # stream event parsed — process killed/stopped mid-turn, port torn down
+  # before the CLI's own `result`/`error` event arrived, or (agy/gemini,
+  # which have no disk fallback — see `maybe_reconcile_usage_from_disk/3`)
+  # simply no on-disk source to recover from — leaves `usage` with every
+  # token field nil. That is the CORRECT "unknown" representation (never a
+  # fabricated zero), but a bare nil is indistinguishable from a provider
+  # that is *known* to report nothing (e.g. agy's own no-cost note). Stamp an
+  # explicit reason so the row reads as "we looked and found nothing" rather
+  # than looking like an unhandled gap.
+  @no_stream_usage_note "no usage captured: the session ended before any " <>
+                           "terminal usage event was observed on its stream"
+
   # ---- public API ---------------------------------------------------------
 
   @doc """
@@ -1475,6 +1488,7 @@ defmodule Arbiter.Worker do
       session
       |> Arbiter.Worker.ClaudeSession.usage_summary()
       |> maybe_reconcile_usage_from_disk(session, state)
+      |> maybe_note_missing_usage()
 
     role = Map.get(state.meta || %{}, :role)
 
@@ -1676,6 +1690,19 @@ defmodule Arbiter.Worker do
     case Map.get(usage, :cost_note) do
       existing when is_binary(existing) and existing != "" -> usage
       _ -> Map.put(usage, :cost_note, note)
+    end
+  end
+
+  # bd-96mn8i (round 2): the row-level counterpart to `maybe_put_cost_note/2`
+  # above — this one fires on `:tokens_in`, not `:cost_usd`, and only when
+  # NOTHING was captured (no stream usage, no disk reconciliation, and no
+  # provider-specific note already explaining a deliberate zero/unknown, e.g.
+  # agy's `@agy_cost_unavailable_note`). Leaves a genuinely priced-but-costless
+  # row (tokens present, cost_usd nil) untouched.
+  defp maybe_note_missing_usage(usage) do
+    case Map.get(usage, :tokens_in) do
+      nil -> maybe_put_cost_note(usage, @no_stream_usage_note)
+      _ -> usage
     end
   end
 
