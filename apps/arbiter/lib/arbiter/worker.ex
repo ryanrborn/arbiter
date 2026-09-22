@@ -267,7 +267,7 @@ defmodule Arbiter.Worker do
   # explicit reason so the row reads as "we looked and found nothing" rather
   # than looking like an unhandled gap.
   @no_stream_usage_note "no usage captured: the session ended before any " <>
-                           "terminal usage event was observed on its stream"
+                          "terminal usage event was observed on its stream"
 
   # ---- public API ---------------------------------------------------------
 
