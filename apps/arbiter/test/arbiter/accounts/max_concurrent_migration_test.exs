@@ -156,6 +156,7 @@ defmodule Arbiter.Accounts.MaxConcurrentMigrationTest do
 
   defp insert_workspace(id, name, max_concurrent) do
     config = Jason.encode!(%{"conductor" => %{"max_concurrent" => max_concurrent}})
+
     Repo.query!("INSERT INTO workspaces (id, name, config) VALUES (?1, ?2, ?3)", [
       id,
       name,

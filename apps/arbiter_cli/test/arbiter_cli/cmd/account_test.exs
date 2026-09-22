@@ -80,7 +80,8 @@ defmodule ArbiterCli.Cmd.AccountTest do
        end}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Account.run(["set", "personal-max", "--max-concurrent", "4"]) end)
+    {out, _err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--max-concurrent", "4"]) end)
 
     assert exit_code == 0
     assert out =~ "claude:personal-max max_concurrent=4"
