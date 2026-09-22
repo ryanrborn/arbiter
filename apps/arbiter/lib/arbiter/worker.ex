@@ -1734,9 +1734,21 @@ defmodule Arbiter.Worker do
       is_boolean(Map.get(usage, :is_error)) or not is_nil(status)
 
     if observed_terminal_event? do
-      @terminal_event_no_usage_note <> "#{status || Map.get(usage, :is_error)})"
+      @terminal_event_no_usage_note <> "#{status || terminal_event_status_label(usage)})"
     else
       @no_terminal_event_note
+    end
+  end
+
+  # `status` is nil whenever the provider's own status field was absent and
+  # all we have is the boolean `is_error` flag — interpolating that boolean
+  # directly reads as a stray `true`/`false` in a column labelled "status",
+  # so spell it out instead.
+  defp terminal_event_status_label(usage) do
+    case Map.get(usage, :is_error) do
+      true -> "errored"
+      false -> "not reported"
+      nil -> "not reported"
     end
   end
 
