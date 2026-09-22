@@ -170,6 +170,7 @@ defmodule Arbiter.Accounts do
     with {:ok, provider} <- normalize_provider(provider),
          {:ok, _workspace} <- get_workspace(workspace_id),
          {:ok, account} <- get_account(account_ref),
+         :ok <- ensure_not_merged_away(account),
          :ok <- ensure_provider_match(account, provider) do
       case existing_link(workspace_id, provider) do
         nil ->
@@ -214,6 +215,11 @@ defmodule Arbiter.Accounts do
   defp ensure_provider_match(%{provider: account_provider}, _),
     do: {:error, {:provider_mismatch, account_provider}}
 
+  defp ensure_not_merged_away(%{merged_into_id: nil}), do: :ok
+
+  defp ensure_not_merged_away(%{merged_into_id: survivor_id}),
+    do: {:error, {:merged_away, survivor_id}}
+
   defp existing_link(workspace_id, provider) do
     WorkspaceProviderAccount
     |> Ash.Query.filter(workspace_id == ^workspace_id and provider == ^provider)
@@ -231,6 +237,7 @@ defmodule Arbiter.Accounts do
   @spec rotate_credential(String.t(), map()) :: {:ok, ProviderCredential.t()} | {:error, term()}
   def rotate_credential(account_ref, attrs) when is_map(attrs) do
     with {:ok, account} <- get_account(account_ref),
+         :ok <- ensure_not_merged_away(account),
          {:ok, secret} <- fetch_required(attrs, :secret),
          {:ok, raw_kind} <- fetch_required(attrs, :kind),
          {:ok, kind} <- parse_kind(raw_kind),
@@ -247,7 +254,7 @@ defmodule Arbiter.Accounts do
                env_var: env_var,
                secret: secret,
                fingerprint: Census.fingerprint(secret),
-               scopes: Map.get(attrs, :scopes)
+               scopes: Map.get(attrs, :scopes) || Map.get(attrs, "scopes")
              }) do
           {:ok, credential} -> credential
           {:error, error} -> Arbiter.Repo.rollback(error)

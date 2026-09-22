@@ -191,6 +191,19 @@ defmodule Arbiter.AccountsTest do
       assert {:error, :not_found} =
                Accounts.attach_workspace("ws-does-not-exist", :claude, account.id)
     end
+
+    test "rejects attaching to an account that has been merged away" do
+      ws = create_workspace!("attach-ws-merged")
+      from_account = create_account!(%{provider: :claude, slug: "attach-merge-from"})
+      into_account = create_account!(%{provider: :claude, slug: "attach-merge-into"})
+
+      assert {:ok, _} = Accounts.merge_accounts(from_account.id, into_account.id)
+
+      assert {:error, {:merged_away, survivor_id}} =
+               Accounts.attach_workspace(ws.id, :claude, from_account.id)
+
+      assert survivor_id == into_account.id
+    end
   end
 
   describe "rotate_credential/2" do
@@ -257,6 +270,36 @@ defmodule Arbiter.AccountsTest do
                  env_var: "CLAUDE_CODE_OAUTH_TOKEN",
                  secret: "sk-secret"
                })
+    end
+
+    test "persists scopes passed with string keys — the only shape the CLI/controller send" do
+      account = create_account!(%{provider: :claude, slug: "rotate-scopes-string-keys"})
+
+      assert {:ok, credential} =
+               Accounts.rotate_credential(account.id, %{
+                 "kind" => "oauth_token",
+                 "env_var" => "CLAUDE_CODE_OAUTH_TOKEN",
+                 "secret" => "sk-scoped-secret",
+                 "scopes" => ["user:inference", "user:profile"]
+               })
+
+      assert credential.scopes == ["user:inference", "user:profile"]
+    end
+
+    test "rejects rotating a credential on an account that has been merged away" do
+      from_account = create_account!(%{provider: :claude, slug: "rotate-merge-from"})
+      into_account = create_account!(%{provider: :claude, slug: "rotate-merge-into"})
+
+      assert {:ok, _} = Accounts.merge_accounts(from_account.id, into_account.id)
+
+      assert {:error, {:merged_away, survivor_id}} =
+               Accounts.rotate_credential(from_account.id, %{
+                 kind: :oauth_token,
+                 env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+                 secret: "sk-should-not-be-written"
+               })
+
+      assert survivor_id == into_account.id
     end
   end
 

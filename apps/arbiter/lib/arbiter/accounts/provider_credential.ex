@@ -13,11 +13,15 @@ defmodule Arbiter.Accounts.ProviderCredential do
 
   ## Append-only enforcement
 
-  There is no `:update` action. The only actions are `:create` (§7.2's
-  "rotation inserts a new credential row") and `:retire`, which flips `active`
-  to `false` and stamps `retired_at` — it never touches `encrypted_secret`,
-  `fingerprint`, `kind`, or `env_var`. A partial unique index enforces at most
-  one active credential per `(provider_account_id, kind)`.
+  There is no general-purpose `:update` action. The actions are `:create`
+  (§7.2's "rotation inserts a new credential row"), `:retire`, which flips
+  `active` to `false` and stamps `retired_at` — it never touches
+  `encrypted_secret`, `fingerprint`, `kind`, or `env_var` — and
+  `:reassign_account` (P11, `arb account merge`), which accepts only
+  `provider_account_id` and re-points a credential row to the surviving
+  account without touching any of the append-only secret material either. A
+  partial unique index enforces at most one active credential per
+  `(provider_account_id, kind)`.
   """
 
   use Ash.Resource,

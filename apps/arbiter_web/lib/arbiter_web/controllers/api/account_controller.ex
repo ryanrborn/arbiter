@@ -153,8 +153,18 @@ defmodule ArbiterWeb.Api.AccountController do
   defp friendly({:error, {:invalid_provider, provider}}),
     do: {:error, {:invalid_request, "unknown provider #{inspect(provider)}"}}
 
+  defp friendly({:error, {:merged_away, survivor_id}}),
+    do: {:error, {:invalid_request, "account has been merged into #{survivor_ref(survivor_id)}"}}
+
   defp friendly({:error, {:missing, key}}),
     do: {:error, {:invalid_request, "missing required field: #{key}"}}
 
   defp friendly(other), do: other
+
+  defp survivor_ref(survivor_id) do
+    case Ash.get(Accounts.ProviderAccount, survivor_id) do
+      {:ok, %{provider: provider, slug: slug}} -> "#{provider}:#{slug}"
+      {:error, _} -> survivor_id
+    end
+  end
 end

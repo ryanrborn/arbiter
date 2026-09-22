@@ -234,6 +234,21 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
 
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
+
+    test "scopes round-trip through the string-keyed params the CLI sends", %{conn: conn} do
+      _account = create_account!(%{provider: :claude, slug: "rotate-scopes"})
+
+      conn =
+        post(conn, ~p"/api/accounts/rotate-scopes/rotate", %{
+          "kind" => "oauth_token",
+          "env_var" => "CLAUDE_CODE_OAUTH_TOKEN",
+          "secret" => "sk-scoped-secret",
+          "scopes" => ["user:inference", "user:profile"]
+        })
+
+      body = json_response(conn, 201)
+      assert body["scopes"] == ["user:inference", "user:profile"]
+    end
   end
 
   describe "POST /api/accounts/:ref/merge" do
