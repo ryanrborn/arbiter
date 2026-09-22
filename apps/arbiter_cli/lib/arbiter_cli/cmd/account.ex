@@ -141,26 +141,23 @@ defmodule ArbiterCli.Cmd.Account do
     IO.puts("Enabled:     #{account["enabled"]}")
     IO.puts("Max concurrent: #{account["max_concurrent"] || "(none)"}")
 
-    if account["merged_into_id"] do
-      IO.puts("Merged into: #{account["merged_into_id"]}")
-    end
+    emit_merged_into(account["merged_into_id"])
 
     IO.puts("")
     IO.puts("Credentials:")
-
-    case account["credentials"] || [] do
-      [] -> IO.puts("  (none)")
-      creds -> Enum.each(creds, &emit_credential_line/1)
-    end
+    emit_show_section(account["credentials"], &emit_credential_line/1)
 
     IO.puts("")
     IO.puts("Workspaces:")
-
-    case account["workspaces"] || [] do
-      [] -> IO.puts("  (none)")
-      links -> Enum.each(links, &emit_link_line/1)
-    end
+    emit_show_section(account["workspaces"], &emit_link_line/1)
   end
+
+  defp emit_merged_into(nil), do: :ok
+  defp emit_merged_into(id), do: IO.puts("Merged into: #{id}")
+
+  defp emit_show_section(nil, _fun), do: IO.puts("  (none)")
+  defp emit_show_section([], _fun), do: IO.puts("  (none)")
+  defp emit_show_section(items, fun), do: Enum.each(items, fun)
 
   defp emit_credential_line(c) do
     status = if c["active"], do: "active", else: "retired #{c["retired_at"]}"
