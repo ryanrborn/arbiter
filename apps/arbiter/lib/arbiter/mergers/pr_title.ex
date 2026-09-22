@@ -11,7 +11,9 @@ defmodule Arbiter.Mergers.PRTitle do
       type(scope): [TICKET] description   (if scope is derived)
 
   - `type` is derived from `issue.issue_type` (see @commit_types).
-  - `[TICKET]` is the task's `tracker_ref` (e.g. `AX-17892`) when present.
+  - `[TICKET]` is the task's `tracker_ref` (e.g. `AX-17892`) when present,
+    else its `tracker_context_ref` — so a context-only child of `VR-19083`
+    (#1973) still opens a `[VR-19083]` PR.
   - `description` is the raw title with internal-prefix noise stripped:
     - Leading all-caps team prefix: e.g. `VS: `, `AC: `.
     - Trailing tracker parenthetical that duplicates the bracket ticket:
@@ -63,13 +65,17 @@ defmodule Arbiter.Mergers.PRTitle do
 
   defp to_conventional_commit(%Issue{} = issue) do
     type = Map.get(@commit_types, issue.issue_type, "chore")
-    desc = clean_description(issue.title, issue.tracker_ref)
+    ticket = ticket_key(issue)
+    desc = clean_description(issue.title, ticket)
 
-    case issue.tracker_ref do
+    case ticket do
       ref when is_binary(ref) and ref != "" -> "#{type}: [#{ref}] #{desc}"
       _ -> "#{type}: #{desc}"
     end
   end
+
+  defp ticket_key(%Issue{tracker_ref: ref}) when is_binary(ref) and ref != "", do: ref
+  defp ticket_key(%Issue{tracker_context_ref: ref}), do: ref
 
   # Strip leading all-caps team prefix ("VS: ", "AC: ", "AX: ", …) and
   # strip the trailing tracker parenthetical that duplicates the bracket ticket.
