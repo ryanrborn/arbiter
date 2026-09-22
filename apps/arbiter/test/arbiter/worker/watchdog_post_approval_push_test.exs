@@ -297,8 +297,14 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         assert StubMerger.merge_count(mr_ref) == 0,
                "a post-approval fix-pass commit merged unreviewed"
 
-        assert [%{task_id: task_id, mr_ref: ^mr_ref}] = StubAutoResumeDispatcher.resumes()
+        assert [%{task_id: task_id, mr_ref: ^mr_ref} = args] = StubAutoResumeDispatcher.resumes()
         assert task_id == task.id
+
+        # The resumed worker is told this is a review round on finished,
+        # approved work — not a prompt to go looking for more to change.
+        assert args.briefing =~ "REVIEW ROUND ONLY"
+        assert args.briefing =~ approved
+        assert args.briefing =~ pushed
 
         # The old path did not record the head as reviewed anywhere.
         assert coverage_for(mr_ref, pushed) == []
