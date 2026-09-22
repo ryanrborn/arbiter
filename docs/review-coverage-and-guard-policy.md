@@ -196,10 +196,10 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3298` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
-| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:4978` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it writes `Run.status = :review_parked` and pages once; without one (a genuine REQUEST_CHANGES only) it is the pre-P9 `Run.status = :failed` via `apps/arbiter/lib/arbiter/worker.ex:5091` (`fail_reason_for`) | `fail_now` | 2 |
-| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:5109` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
-| C4 | `{:awaiting_review_timeout, N}` → `review_not_started` | `apps/arbiter/lib/arbiter/worker.ex:1419` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Terminal non-failure status | 1 |
+| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3407` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
+| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:5154` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it writes `Run.status = :review_parked` and pages once; without one (a genuine REQUEST_CHANGES only) it is the pre-P9 `Run.status = :failed` via `apps/arbiter/lib/arbiter/worker.ex:5194` (`fail_reason_for`) | `fail_now` | 2 |
+| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:5218` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
+| C4 | `{:awaiting_review_timeout, N}` → `review_not_started` | `apps/arbiter/lib/arbiter/worker.ex:1513` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Terminal non-failure status | 1 |
 
 ### 2.5 ReviewPatrol and PRPatrol
 

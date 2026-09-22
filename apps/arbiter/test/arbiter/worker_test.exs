@@ -54,7 +54,10 @@ defmodule Arbiter.WorkerTest do
       assert snap.agent_live == false
       assert snap.agent_live == Worker.agent_session_live?(task_id)
 
-      assert Enum.any?(Worker.list_children(), &(&1.task_id == task_id and &1.agent_live == false))
+      assert Enum.any?(
+               Worker.list_children(),
+               &(&1.task_id == task_id and &1.agent_live == false)
+             )
     end
 
     test "state/1 accepts task_id strings" do
