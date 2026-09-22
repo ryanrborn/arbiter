@@ -95,7 +95,16 @@ export function resolveDockSize(requested, metrics = {}) {
     ? metrics.minColumnsWidth
     : DEFAULT_MIN_COLUMNS_WIDTH
 
-  const fits = viewportWidth - sidePanelWidth(viewportWidth, floor) >= MIN_PAGE_WIDTH
+  // bd-2qqqbp: the rail takes from the same width the panel and the page share,
+  // so it has to come out before the page's floor is applied — otherwise
+  // `MIN_PAGE_WIDTH` stops meaning what it says and the dock keeps a side panel
+  // over a page it has already squeezed under it. Anything that is not a
+  // positive number is no rail, which is the answer from before rails existed.
+  const railWidth =
+    Number.isFinite(metrics.railWidth) && metrics.railWidth > 0 ? metrics.railWidth : 0
+
+  const fits =
+    viewportWidth - railWidth - sidePanelWidth(viewportWidth, floor) >= MIN_PAGE_WIDTH
 
   return fits ? { size: "side", fallback: false } : { size: "max", fallback: true }
 }
@@ -198,7 +207,8 @@ export function createDockSizeController({ doc, viewportWidth, columnWidth, onFa
   const decide = ({ always = false } = {}) => {
     const resolved = resolveDockSize(requested, {
       viewportWidth: viewportWidth(),
-      minColumnsWidth: minColumnsWidth(columnWidth())
+      minColumnsWidth: minColumnsWidth(columnWidth()),
+      railWidth: readRailWidth(doc)
     })
 
     size = resolved.size
@@ -224,6 +234,28 @@ export function createDockSizeController({ doc, viewportWidth, columnWidth, onFa
     get requested() {
       return requested
     }
+  }
+}
+
+// bd-2qqqbp: the left half of the page-inset contract, read the same way the
+// dock publishes its own half — off `<html>`, because that is where an inset
+// that has to outlive every page the sticky dock navigates through lives. A
+// document that cannot answer (a hook that ran before layout, a non-browser)
+// reads as no rail, which leaves the decision exactly as it was.
+function readRailWidth(doc) {
+  try {
+    const view = doc && doc.defaultView
+    if (!view || typeof view.getComputedStyle !== "function") return 0
+
+    const root = documentRoot(doc)
+    if (!root) return 0
+
+    const value = view.getComputedStyle(root).getPropertyValue("--nav-rail-page-inset")
+    const width = Number.parseFloat(value)
+
+    return Number.isFinite(width) && width > 0 ? width : 0
+  } catch (_error) {
+    return 0
   }
 }
 

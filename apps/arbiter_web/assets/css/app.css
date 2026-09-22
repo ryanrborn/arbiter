@@ -262,6 +262,12 @@
      a second variable rather than the width above: the page gives up room only
      while something is actually occupying it. */
   --session-dock-page-inset: 0px;
+  /* bd-2qqqbp: the same contract on the other edge, so it is two-sided. How
+     much of the page's width the left nav rail is currently taking. Zero
+     unless a rail is actually mounted and holding that edge — the page gives
+     up room on the left only while something is actually occupying it. It
+     ships at zero and nothing sets it yet; the rail's own swap does. */
+  --nav-rail-page-inset: 0px;
 
   --measure-prose: 74ch;
   --measure-narrow: 62ch;

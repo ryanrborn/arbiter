@@ -1485,6 +1485,22 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert html =~ "right-0"
     end
 
+    # bd-2qqqbp: the other half of the two-sided inset. A Maximized window is
+    # `fixed` and used to start flush at the viewport's left edge, which is the
+    # one place a nav rail lives — so its left edge is measured from the rail's
+    # inset instead. At the default `0px` it lands exactly where it did.
+    test "Maximized starts where the rail ends, not at the viewport edge", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_click(element(dock, "#session-dock-size-max-#{session.id}"))
+
+      html = render(dock)
+      assert html =~ "var(--nav-rail-page-inset)"
+      refute html =~ "left-3 right-3"
+    end
+
     test "Maximized fills the page and Compact takes it back", %{conn: conn} do
       session = launch!()
       {_view, dock} = dock(conn)

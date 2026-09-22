@@ -898,8 +898,14 @@ defmodule ArbiterWeb.SessionDockLive do
       "w-[var(--session-dock-side-width)]"
   end
 
+  # bd-2qqqbp: Maximized is `fixed`, so its left edge is a viewport offset, and
+  # the left edge of the viewport is exactly where a nav rail lives. It is
+  # therefore measured from the rail's inset rather than from the viewport, the
+  # same way `<main>` is — the window's own gutter on top. At the default
+  # `--nav-rail-page-inset: 0px` this is the `left-3` it has always been.
   defp window_size_class(true, "max") do
-    "fixed top-[var(--nav-height)] left-3 right-3 bottom-[var(--session-dock-strip-height)]"
+    "fixed top-[var(--nav-height)] left-[calc(var(--nav-rail-page-inset)+0.75rem)] " <>
+      "right-3 bottom-[var(--session-dock-strip-height)]"
   end
 
   defp open_sessions(assigns) do
