@@ -1,4 +1,5 @@
 defmodule ArbiterWeb.Api.WorkerJSON do
+  alias Arbiter.Usage.LiveSpend
   alias Arbiter.Workers.Run
   alias ArbiterWeb.Api.IssueJSON
 
@@ -51,14 +52,15 @@ defmodule ArbiterWeb.Api.WorkerJSON do
             mr_ref: Map.get(snap, :mr_ref),
             merger_url: Map.get(snap, :merger_url),
             pid: inspect(snap.pid),
-            model: Arbiter.Worker.Stats.short_model_name(model_id),
-            cost_usd: Map.get(costs, snap.task_id, 0.0)
+            model: Arbiter.Worker.Stats.short_model_name(model_id)
           }
+          # bd-8vnuy3: settled + in-flight; `cost_usd: nil` means n/a.
+          |> Map.merge(LiveSpend.cost_fields(Map.get(costs, snap.task_id)))
         end)
     }
   end
 
-  def show(%{snapshot: snap}) do
+  def show(%{snapshot: snap} = assigns) do
     meta = Map.get(snap, :meta, %{})
 
     %{
@@ -90,13 +92,14 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       result: Map.get(meta, :result),
       failure_reason: stringify(Map.get(meta, :failure_reason))
     }
+    |> Map.merge(LiveSpend.cost_fields(Map.get(assigns, :cost)))
   end
 
   # Historical fallback: no live worker, so we render the most recent durable
   # `Run` row into the same shape the CLI's `worker show` already knows how to
   # display. `source: "history"` lets clients flag that this is a post-mortem
   # rather than a live snapshot.
-  def show(%{run: %Run{} = run}) do
+  def show(%{run: %Run{} = run} = assigns) do
     %{
       source: "history",
       task_id: run.task_id,
@@ -115,6 +118,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       output_lines: run.output_lines || [],
       failure_reason: run.failure_reason
     }
+    |> Map.merge(LiveSpend.cost_fields(Map.get(assigns, :cost)))
   end
 
   defp phase(snap), do: to_string_atom(Map.get(snap, :phase))

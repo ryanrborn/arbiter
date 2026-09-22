@@ -663,7 +663,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     [
       "#{title_for(task_id)} (#{task_id}) has spent #{money(Map.get(info, :spend))} in " <>
-        "worker spend, past the p90 of what tasks like it cost.",
+        "worker spend, past the p90 of what tasks like it cost." <> live_spend_note(info),
       "Estimate: #{money(Map.get(est, :p25))}–#{money(Map.get(est, :p75))} " <>
         "(median #{money(Map.get(est, :median))}, p90 #{money(Map.get(est, :p90))}) · " <>
         "#{Map.get(est, :basis, "unknown")}, n=#{Map.get(est, :n, 0)}",
@@ -676,6 +676,28 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         "(under-rated task) or a worker going in circles, and act, or don't."
     ]
     |> Enum.join("\n")
+  end
+
+  # bd-8vnuy3: the patrol assesses live spend, so the figure can include a pass
+  # that has not ended. Say how much of it is that pass's estimate, and whether
+  # a session file could not be read (the figure is then short of the truth).
+  defp live_spend_note(info) do
+    live =
+      case Map.get(info, :live_spend) do
+        n when is_number(n) and n > 0 ->
+          " ≈#{money(n)} of that is an in-flight estimate read off a session still " <>
+            "running; the rest is settled."
+
+        _ ->
+          ""
+      end
+
+    degraded =
+      if Map.get(info, :degraded?),
+        do: " A running session's file could not be read, so the figure may be low.",
+        else: ""
+
+    live <> degraded
   end
 
   defp difficulty_label(d) when is_integer(d), do: "D#{d}"

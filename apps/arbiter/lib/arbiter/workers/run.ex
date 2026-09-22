@@ -55,7 +55,14 @@ defmodule Arbiter.Workers.Run do
   # coordinator paged once instead. Same shape as `:review_not_started`: only
   # the durable row diverges, the worker's FSM status stays `:failed` because
   # that is the terminal state `Dispatch.resume/2` re-attaches from.
-  @statuses ~w(running completed failed review_not_started review_parked)a
+  # bd-aje6fj / #1896: `:interrupted` is the run whose worker was shut down
+  # WITH the node (an application stop — `systemctl restart`), its agent reaped
+  # by the worker's own terminate/2. It neither failed nor finished; the task
+  # stays in progress and the boot-time resume sweep re-attaches it. Written with
+  # failure_reason "server shutdown". A run that missed that graceful path (a
+  # hard crash, a teardown that overran its grace) is still swept to `:failed` /
+  # "server restarted" by `Arbiter.Workers.Reconciler` on the next boot.
+  @statuses ~w(running completed failed review_not_started review_parked interrupted)a
 
   # The kind of worker that produced this run. A task can be worked by more
   # than one worker over its life: the `:main` worker that authors the change,
