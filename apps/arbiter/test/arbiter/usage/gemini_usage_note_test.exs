@@ -81,7 +81,9 @@ defmodule Arbiter.Usage.GeminiUsageNoteTest do
       assert report.scanned == 0
 
       reloaded = Ash.get!(Event, ev.id)
-      assert reloaded.cost_note == "a terminal event was observed, but it reported no usage payload"
+
+      assert reloaded.cost_note ==
+               "a terminal event was observed, but it reported no usage payload"
     end
 
     test "a codex row is never scanned, even preflight with nil tokens" do

@@ -47,7 +47,9 @@ defmodule Mix.Tasks.Arbiter.BackfillGeminiUsageNote do
   end
 
   defp banner(true), do: "Rewriting gemini usage notes (writing)…"
-  defp banner(false), do: "Rewriting gemini usage notes — DRY RUN, no writes. Re-run with --apply.\n"
+
+  defp banner(false),
+    do: "Rewriting gemini usage notes — DRY RUN, no writes. Re-run with --apply.\n"
 
   defp report(r, apply?) do
     verb = if apply?, do: "noted", else: "would note"
