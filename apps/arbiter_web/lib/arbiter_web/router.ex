@@ -247,8 +247,7 @@ defmodule ArbiterWeb.Router do
     get("/workers/:task_id/run_log_list", WorkerController, :run_log_list)
     post("/workers/:task_id/stop", WorkerController, :stop)
 
-    # Graph queue operations (C5 of #482)
-    post("/queue/:task_id/resume", QueueController, :resume)
+    # Task queue operations
     post("/queue/:task_id/retry_auto_resolve", QueueController, :retry_auto_resolve)
     post("/queue/:task_id/restart_watchdog", QueueController, :restart_watchdog)
     post("/queue/:task_id/rerun_ci", QueueController, :rerun_ci)

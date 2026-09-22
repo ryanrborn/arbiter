@@ -1002,9 +1002,9 @@ defmodule Arbiter.Worker do
   defp broadcast_worker_failed(%State{workspace_id: nil}), do: :ok
 
   defp broadcast_worker_failed(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
-    # `worker_failed` is a statement about the TASK's worker: the Conductor
-    # pauses the member's downstream branch on it and the API event stream
-    # reports it as "the worker for <task> stopped". Only the task's own primary
+    # `worker_failed` is a statement about the TASK's worker: the API event
+    # stream reports it as "the worker for <task> stopped" (`GET /events`).
+    # Only the task's own primary
     # worker may make that statement. Review-only workers were already excluded;
     # bd-8lq2g7 adds the subordinate passes, which run under the same task_id
     # while the primary is parked at :awaiting_review (see subordinate?/1).

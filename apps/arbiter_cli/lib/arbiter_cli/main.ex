@@ -86,8 +86,6 @@ defmodule ArbiterCli.Main do
       arb loop apply      <id> | all [--state proposed]
       arb loop reject     <id> [--reason "..."]
 
-      arb queue resume    <task-id>
-
       arb scheduler pause|resume|status
 
       arb quota           [--workspace <id|name>] [--json]

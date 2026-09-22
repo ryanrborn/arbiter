@@ -25,8 +25,10 @@ defmodule ArbiterCli.Cmd.DepTest do
 
     assert exit_code == 0
     assert out =~ "conflicts_with"
-    assert out =~ "Autopilot"
-    assert out =~ "Conductor"
+    # bd-a14qd1: the board scheduler is the only dispatcher, so it is the only
+    # thing that can enforce the mutex — help must not promise a second one.
+    assert out =~ "board scheduler"
+    refute out =~ "Conductor"
   end
 
   test "dep rm hits DELETE" do

@@ -59,8 +59,7 @@ defmodule Arbiter.Accounts.MaxConcurrentMigrationTest do
 
       # The whole point of §4.4: `nil` here is what makes pre/post dispatch
       # throughput identical. `Arbiter.Accounts.Concurrency.account_headroom/2`
-      # reads exactly this column and answers `:unlimited` for nil, which is
-      # covered end-to-end in `Arbiter.Workflows.ConductorTest`.
+      # reads exactly this column and answers `:unlimited` for nil.
       assert query("SELECT max_concurrent FROM provider_accounts") == [[nil]]
     end
   end

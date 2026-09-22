@@ -656,20 +656,12 @@ defmodule Arbiter.Quota.GateProviderTest do
     end
   end
 
-  describe "Workflows.QuotaGate.Default — provider-aware cap clamp" do
-    alias Arbiter.Workflows.QuotaGate
-
-    # P7: the gate is keyed by the provider account; the workspace rides
-    # along as policy context. This mirrors what `Conductor` now passes.
-    defp headroom(workspace) do
-      provider = Arbiter.Quota.default_provider(workspace)
-
-      QuotaGate.Default.quota_headroom(
-        Arbiter.Quota.account_id(workspace.id, provider),
-        workspace: workspace,
-        provider: provider
-      )
-    end
+  # bd-a14qd1 moved these off the removed `Workflows.QuotaGate.Default` and
+  # onto `Board.Snapshot.quota_hold/1`, the board scheduler's own gate. It
+  # resolves the provider account and provider from the asking workspace, so
+  # the per-provider keying these tests pin is unchanged.
+  describe "Board.Snapshot.quota_hold/1 — provider-aware cap clamp" do
+    defp hold(workspace), do: Arbiter.Board.Snapshot.quota_hold(workspace.id)
 
     defp provider_workspace(type) do
       {:ok, workspace} =
@@ -693,7 +685,7 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
-      assert headroom(workspace) == 0
+      assert {:hold, _} = hold(workspace)
     end
 
     test "allows when the codex workspace has headroom" do
@@ -707,7 +699,7 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
-      assert headroom(workspace) == :unlimited
+      assert hold(workspace) == :ok
     end
 
     test "a blown Anthropic snapshot does not clamp a codex workspace" do
@@ -721,7 +713,7 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
-      assert headroom(workspace) == :unlimited
+      assert hold(workspace) == :ok
     end
   end
 

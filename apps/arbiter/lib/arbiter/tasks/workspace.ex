@@ -605,11 +605,15 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
-  Per-workspace Conductor concurrency cap from `config["conductor"]["max_concurrent"]`.
+  Per-workspace worker concurrency cap from `config["conductor"]["max_concurrent"]`.
 
-  When set, the Conductor uses `min(workspace_cap, system_cap, quota_headroom)`
-  as the effective concurrency limit for this workspace's graphs. Returns `nil`
-  when not configured, in which case the system-wide cap applies uncapped.
+  When set, the board scheduler uses
+  `min(workspace_cap, system_cap, account_headroom, quota_headroom)` as the
+  effective concurrency limit for this workspace. Returns `nil` when not
+  configured, in which case the system-wide cap applies uncapped.
+
+  The `conductor` key name is historical (bd-a14qd1); renaming it would need a
+  workspace-config data migration.
 
   Accepts a positive integer or the stringified integer that round-trips
   through JSON config.

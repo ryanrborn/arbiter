@@ -28,7 +28,7 @@ defmodule Arbiter.MCP.CatalogTest do
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
   @workspace_resolving_tools ~w(task_ready coordinator_inbox coordinator_inbox_clear workspace_show
                                 quota_get task_create worker_list task_list usage_summarize notify_list
-                                tracker_claim tracker_sync worker_review graph_create workspace_config_get
+                                tracker_claim tracker_sync worker_review workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
                                 external_review_list skill_create skill_update skill_list skill_get
                                 transcript_capture_stats dep_list
@@ -48,16 +48,18 @@ defmodule Arbiter.MCP.CatalogTest do
       end
     end
 
-    # bd-6bax7s: the description promised the *Conductor* would not co-dispatch
-    # the pair, which a coordinator reasonably read as a general guarantee —
-    # and almost all dispatch goes through Autopilot, which ignored the edge.
-    # Now both honour it, and the description has to say so.
-    test "dep_add names both schedulers as honouring conflicts_with" do
+    # bd-6bax7s: the description promised a *second* scheduler would not
+    # co-dispatch the pair, which a coordinator reasonably read as a general
+    # guarantee — and almost all dispatch goes through Autopilot, which
+    # ignored the edge. bd-a14qd1 left Autopilot as the only dispatcher, so
+    # the description must name it and nothing else.
+    test "dep_add names the board scheduler as enforcing conflicts_with" do
       %{description: description} =
         @coordinator |> Catalog.visible() |> Enum.find(&(&1.name == "dep_add"))
 
       assert description =~ "Autopilot"
-      assert description =~ "Conductor"
+      assert description =~ "board scheduler"
+      refute description =~ "Conductor"
     end
   end
 

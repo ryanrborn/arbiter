@@ -67,8 +67,7 @@ defmodule Arbiter.DataCase do
     # `Arbiter.Workflows.MergeQueueSupervisor`, `Arbiter.Workflows.PRPatrolSupervisor`,
     # `Arbiter.Workflows.ReviewPatrolSupervisor`,
     # `Arbiter.Workflows.MergedPRFinalizerSupervisor`,
-    # `Arbiter.Workflows.DispatchQueueSupervisor`, and
-    # `Arbiter.Workflows.ConductorSupervisor`. Several other call paths
+    # and `Arbiter.Workflows.DispatchQueueSupervisor`. Several other call paths
     # (`Arbiter.Workflows.DispatchQueue.spawn_drain/2`,
     # `Arbiter.Worker.Dispatch.maybe_verify_codex_mcp_connection/4`,
     # `Arbiter.Reviews.ExternalReview.start_async/3`,
@@ -118,8 +117,7 @@ defmodule Arbiter.DataCase do
     Arbiter.Workflows.PRPatrolSupervisor,
     Arbiter.Workflows.ReviewPatrolSupervisor,
     Arbiter.Workflows.MergedPRFinalizerSupervisor,
-    Arbiter.Workflows.DispatchQueueSupervisor,
-    Arbiter.Workflows.ConductorSupervisor
+    Arbiter.Workflows.DispatchQueueSupervisor
   ]
 
   # Deliberately NOT here: `Arbiter.Sessions.Stream.Supervisor` (bd-3ymdvi).

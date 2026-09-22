@@ -1061,26 +1061,15 @@ defmodule Arbiter.MCP.ToolsTest do
       assert msg =~ "tonc"
     end
 
-    test "a directive filed for a graph gets a repo like any other issue" do
+    test "a `task`-typed issue gets a repo like any other issue" do
       {ws, coordinator} = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
 
       assert {:ok, data} =
                Tools.task_create(coordinator, %{"title" => "a directive", "issue_type" => "task"})
 
-      assert {:ok, graph} =
-               Tools.graph_create(coordinator, %{
-                 "name" => "g-#{System.unique_integer([:positive])}"
-               })
-
-      assert {:ok, _} =
-               Tools.graph_add_directive(coordinator, %{
-                 "graph_id" => graph.id,
-                 "issue_id" => data.id
-               })
-
-      directive = Ash.get!(Issue, data.id)
-      assert directive.repo == "tonic"
-      assert directive.workspace_id == ws.id
+      issue = Ash.get!(Issue, data.id)
+      assert issue.repo == "tonic"
+      assert issue.workspace_id == ws.id
     end
   end
 
@@ -2541,18 +2530,13 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "queue_resume/2 (dispatch guardrail, bd-5b5hq7)" do
-    test "refuses a coordinator scope without can_dispatch", ctx do
-      no_dispatch = %{ctx.coordinator | can_dispatch: false}
-
-      assert {:error, {:unauthorized, _}} =
-               Tools.queue_resume(no_dispatch, %{"task_id" => ctx.task.id})
-    end
-
-    test "a can_dispatch scope reaches Conductor lookup and 404s for a task in no running graph",
-         ctx do
-      assert {:error, {:not_found, _}} =
-               Tools.queue_resume(ctx.coordinator, %{"task_id" => ctx.task.id})
+  # bd-a14qd1: `queue_resume` is gone with the Conductor. Its dispatch
+  # guardrail (bd-5b5hq7) is still covered by `worker_resume`/`worker_review`
+  # below, which are the surviving dispatching tools.
+  describe "queue_resume/2 (removed, bd-a14qd1)" do
+    test "the tool is no longer exported or in the catalog" do
+      refute function_exported?(Tools, :queue_resume, 2)
+      refute "queue_resume" in Enum.map(Arbiter.MCP.Catalog.all(), & &1.name)
     end
   end
 
