@@ -190,6 +190,46 @@ defmodule Arbiter.Usage.CodexUsageBackfillTest do
       assert reloaded.cost_note =~ "CLI returned no parseable result object"
     end
 
+    test "a source: :task row is never scanned or rewritten, even with nil tokens and a matching rollout" do
+      dir = tmp_sessions_dir()
+      occurred_at = ~U[2026-09-17 00:04:36.349Z]
+
+      # A rollout exists and would match on timestamp alone — this proves
+      # the exclusion is the `source` filter, not "no rollout found".
+      write_rollout!(
+        dir,
+        ~D[2026-09-17],
+        "sid-task",
+        "2026-09-17T00:04:32.619Z",
+        18_915,
+        18_176,
+        5
+      )
+
+      worker_note =
+        "a terminal event was observed (status: error), but it reported no usage payload"
+
+      ev =
+        create_event!(%{
+          source: :task,
+          task_id: Ash.UUID.generate(),
+          occurred_at: occurred_at,
+          duration_ms: 4505,
+          tokens_in: nil,
+          tokens_out: nil,
+          cost_note: worker_note
+        })
+
+      report = CodexUsageBackfill.backfill(apply?: true, sessions_dir: dir)
+
+      assert report.scanned == 0
+      assert report.backfilled == 0
+
+      reloaded = Ash.get!(Event, ev.id)
+      assert reloaded.tokens_in == nil
+      assert reloaded.cost_note == worker_note
+    end
+
     test "a matched rollout with no token_count line is counted separately and gets an honest note" do
       dir = tmp_sessions_dir()
       occurred_at = ~U[2026-09-17 00:04:36.349Z]

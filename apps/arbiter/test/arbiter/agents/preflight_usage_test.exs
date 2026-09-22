@@ -132,7 +132,7 @@ defmodule Arbiter.Agents.PreflightUsageTest do
 
       assert ev.provider == "codex"
       assert is_integer(ev.tokens_in) and ev.tokens_in > 0
-      assert is_integer(ev.tokens_out)
+      assert is_integer(ev.tokens_out) and ev.tokens_out > 0
     else
       IO.puts("SKIP: no codex CLI on PATH on this host — live round-trip not exercised")
     end

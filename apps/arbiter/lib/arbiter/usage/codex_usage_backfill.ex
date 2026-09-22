@@ -18,9 +18,15 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
       passed `apply?: true`, matching `Arbiter.Workers.StepBackfill` and
       `mix arbiter.backfill_run_steps`.
     * **Only touches rows this fix actually caused.** The query is
-      `provider == "codex" and is_nil(tokens_in)` — a row that already
-      carries tokens (including a literal `0` some other cause wrote) is
-      never overwritten.
+      `provider == "codex" and source == :preflight and is_nil(tokens_in)` —
+      the bug this backfill recovers from was in `Arbiter.Usage.Probe`
+      (`source: :preflight`), never in the `source: :task` worker path
+      (`Arbiter.Worker`'s `absorb_usage/2`), which already wrote its own
+      honest note (round 5 finding 1). A `source: :task` row is left alone
+      entirely — its token columns and its worker-written `cost_note` are
+      never touched by this module — and a row that already carries tokens
+      (including a literal `0` some other cause wrote) is never overwritten
+      either.
     * **Honest gaps.** A row whose rollout has been reaped, or whose rollout
       carries no `token_count` line at all (a probe that failed before the
       CLI ever reported usage), is *counted*, not silently skipped — see
@@ -94,7 +100,7 @@ defmodule Arbiter.Usage.CodexUsageBackfill do
     find_opts = Keyword.take(opts, [:sessions_dir])
 
     Event
-    |> Ash.Query.filter(provider == "codex" and is_nil(tokens_in))
+    |> Ash.Query.filter(provider == "codex" and source == :preflight and is_nil(tokens_in))
     |> filter_since(opts[:since])
     |> filter_until(opts[:until])
     |> Ash.Query.sort(occurred_at: :asc)
