@@ -274,6 +274,58 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert head_sha == remote_main_sha
     end
 
+    # bd-8ssxap round 3 (reviewer finding 1): `git diff --quiet ref branch` is
+    # only empty while main has NOT moved past the squash commit. In the real
+    # incident, other PRs land on main between the squash merge and the
+    # redispatch — the normal case on a busy fleet — so the two trees diverge
+    # and a plain tree-equality check wrongly calls the branch "not stale",
+    # reintroducing the incident. The branch is squashed from TWO commits, so
+    # this also rules out `git cherry` as the detector: a squash of more than
+    # one commit produces a patch-id that matches neither original commit, so
+    # both would still show as unmerged.
+    test "hard-resets a squash-merged branch when force: true is given, even after main has moved on",
+         %{repo: repo, remote: remote} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/squash-merged-main-advanced", "main")
+      File.write!(Path.join(path, "fix.md"), "the fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "fix.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the fix"])
+      File.write!(Path.join(path, "fix2.md"), "more of the fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "fix2.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "more of the fix"])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          path,
+          "push",
+          "-q",
+          "origin",
+          "bugfix/squash-merged-main-advanced"
+        ])
+
+      squash_merge_onto_main(repo, "bugfix/squash-merged-main-advanced", "the fix (squashed)")
+
+      # main keeps moving — an unrelated PR lands after the squash, before the
+      # redispatch that must still detect the branch as stale.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+      File.write!(Path.join(repo, "unrelated.md"), "unrelated change\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "unrelated.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "unrelated PR"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      assert {:ok, :reset} =
+               Worktree.reset_if_merged(
+                 repo,
+                 "bugfix/squash-merged-main-advanced",
+                 "main",
+                 force: true
+               )
+
+      {:ok, remote_main_sha} = git_rev_parse(remote, "main")
+      {:ok, head_sha} = git_rev_parse(path, "HEAD")
+      assert head_sha == remote_main_sha
+    end
+
     # bd-8ssxap round 3 (reviewer finding 1): `task.verification_outcome` stays
     # `:failed` for the WHOLE re-work round — it only clears once the next PR
     # merges (`Issue.await_verification/…`) — so `Dispatch` passes `force:

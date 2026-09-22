@@ -2442,6 +2442,14 @@ defmodule Arbiter.Worker.DispatchTest do
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "the fix (squashed) (#1)"])
       {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
 
+      # main keeps moving — an unrelated PR merges after the squash, before
+      # the redispatch. On a busy fleet this is the normal case, and it must
+      # not stop the stale branch from being detected (bd-8ssxap round 3).
+      File.write!(Path.join(repo, "UNRELATED.md"), "unrelated\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "UNRELATED.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "unrelated PR (#2)"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
       # The task parks for post-merge verification and comes back :failed —
       # exactly the bd-96mn8i sequence.
       {:ok, task} = Ash.update(task, %{}, action: :await_verification)

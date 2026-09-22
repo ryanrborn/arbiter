@@ -487,11 +487,20 @@ defmodule Arbiter.Worker.Worktree do
   # (`verification_outcome` only clears once the NEXT pr merges), so a
   # naive `force? or ancestor?` would also blow away round-2 commits made
   # after the first, legitimate reset. Only treat the branch as stale when
-  # its tree content is already fully present in `ref` — i.e. nothing on
-  # the branch is unique — which is true right after a squash-merge lands
-  # it on the base, and false again the moment new work is committed.
+  # merging it into `ref` would change nothing — i.e. every change on the
+  # branch is already contained in `ref`. That is true right after a
+  # squash-merge lands it on the base (however many commits were squashed,
+  # and regardless of how much `ref` has since moved on with unrelated
+  # merges), and false again the moment new work is committed on the branch.
+  #
+  # A plain `git diff --quiet ref branch` (tried in an earlier round) only
+  # catches the instant-after-squash case: once anything else merges into
+  # `ref`, the two trees diverge even though the branch itself still has no
+  # unique content, and the stale branch would wrongly be kept. `git cherry`
+  # does not work either — a squash of more than one commit produces a
+  # patch-id matching neither original commit.
   defp should_reset?(branch_name, ref, cd, force?) do
-    ancestor?(branch_name, ref, cd) or (force? and tree_matches?(branch_name, ref, cd))
+    ancestor?(branch_name, ref, cd) or (force? and merge_is_noop?(branch_name, ref, cd))
   end
 
   defp ancestor?(branch_name, ref, cd) do
@@ -501,11 +510,20 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
-  defp tree_matches?(branch_name, ref, cd) do
-    case run_git(["diff", "--quiet", ref, branch_name], cd: cd) do
-      {:ok, _} -> true
-      {:error, _differs} -> false
+  # True when merging `branch_name` into `ref` produces a tree identical to
+  # `ref`'s own tree — the branch contributes nothing `ref` doesn't already
+  # have.
+  defp merge_is_noop?(branch_name, ref, cd) do
+    with {:ok, ref_tree} <- run_git(["rev-parse", ref <> "^{tree}"], cd: cd),
+         {:ok, merged_tree} <- run_git(["merge-tree", "--write-tree", ref, branch_name], cd: cd) do
+      String.trim(ref_tree) == first_line(merged_tree)
+    else
+      {:error, _} -> false
     end
+  end
+
+  defp first_line(output) do
+    output |> String.split("\n", parts: 2) |> hd() |> String.trim()
   end
 
   defp branch_ref_exists?(repo_path, branch_name) do
