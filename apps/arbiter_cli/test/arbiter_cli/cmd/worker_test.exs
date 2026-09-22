@@ -138,6 +138,28 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert :binary.match(out, "run-2") < :binary.match(out, "run-1")
     end
 
+    test "an interrupted run (shut down with the server) is not labelled a failure (bd-aje6fj)" do
+      stub_get("/api/workers/history", %{
+        "data" => [
+          %{
+            "id" => "run-3",
+            "task_id" => "bd-013",
+            "worker_type" => "main",
+            "status" => "interrupted",
+            "started_at" => "2026-09-18T14:00:00Z",
+            "completed_at" => "2026-09-18T14:30:00Z",
+            "failure_reason" => "server shutdown"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-013"]) end)
+      assert exit_code == 0
+      assert out =~ "status=interrupted"
+      assert out =~ "reason: server shutdown"
+      refute out =~ "failure:"
+    end
+
     test "reports when no historical runs exist" do
       stub_get("/api/workers/history", %{"data" => []})
 

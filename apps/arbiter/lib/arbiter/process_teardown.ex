@@ -3,9 +3,11 @@ defmodule Arbiter.ProcessTeardown do
   Stop a supervised process without interrupting whatever it is doing.
 
   `DynamicSupervisor.terminate_child/2` sends a bare `Process.exit(child,
-  :shutdown)`. None of Arbiter's per-workspace workers, patrols, machines or
-  queues trap exits, so that signal kills them the instant it arrives —
-  including while they are parked inside an `Ecto` query or transaction.
+  :shutdown)`. None of Arbiter's per-workspace patrols, machines or queues
+  trap exits, so that signal kills them the instant it arrives — including
+  while they are parked inside an `Ecto` query or transaction. (`Arbiter.Worker`
+  has trapped exits since bd-aje6fj, so a supervisor shutdown reaches its
+  `terminate/2`; everything below still applies to the rest.)
 
   That is not merely untidy. The dying process is a DBConnection *client*
   holding a checkout, so DBConnection has to assume the connection is in an
@@ -67,11 +69,12 @@ defmodule Arbiter.ProcessTeardown do
   The difference from the exit signal a supervisor sends — and from the
   `Process.exit(pid, :shutdown)` a caller reaches for by hand — is that an
   exit signal skips `terminate/2` entirely on a process that does not trap
-  exits, which none of Arbiter's workers do. For `Arbiter.Worker` that
-  callback is the only thing that SIGKILLs the agent's OS process and its
-  descendants (bd-bmmj4w), so skipping it leaves a live `claude` — and
-  whatever it spawned — running with its cwd inside a workspace the caller is
-  about to reclaim. `GenServer.stop/3` goes through the `sys` terminate path
+  exits. For `Arbiter.Worker` that callback is the only thing that SIGKILLs
+  the agent's OS process and its descendants (bd-bmmj4w); the worker traps
+  exits now (bd-aje6fj), but this helper takes any owner, and skipping the
+  callback on one that does not trap leaves a live `claude` — and whatever it
+  spawned — running with its cwd inside a workspace the caller is about to
+  reclaim. `GenServer.stop/3` goes through the `sys` terminate path
   instead, which a suspended `gen_*` still handles, so the quiesce still
   holds.
 

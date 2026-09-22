@@ -14,6 +14,13 @@ defmodule Arbiter.Workers.Reconciler do
   `failure_reason` of `"server restarted"`. Run on application start (see
   `Arbiter.Application`) after the Repo and the Worker Registry are online.
 
+  This is the **backstop**, not the shutdown path. Since bd-aje6fj a worker
+  traps exits, so an orderly application stop runs its `terminate/2`, which
+  reaps the agent and stamps the run `:interrupted` / "server shutdown" itself.
+  Only a run that missed that — a hard crash of the node, a teardown that
+  overran `Arbiter.Worker.shutdown_grace_ms/0` and was killed, systemd's stop
+  timeout firing first — is still `:running` when this sweep sees it.
+
   ## Single-instance gate
 
   Liveness is keyed off the LOCAL process registry, which is empty on a fresh

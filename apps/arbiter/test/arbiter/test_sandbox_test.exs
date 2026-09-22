@@ -77,8 +77,8 @@ defmodule Arbiter.TestSandboxTest do
     test "runs the owner's terminate/2, which is what reaps its agent's OS process" do
       sandbox = TestSandbox.provision!("terminating-owner")
 
-      # `Arbiter.Worker` does not trap exits and does its agent-reaping in
-      # `terminate/2` (bd-bmmj4w), so stopping an owner with an exit signal
+      # `Arbiter.Worker` does its agent-reaping in `terminate/2` (bd-bmmj4w),
+      # so stopping a non-trapping owner with an exit signal
       # would leave the agent alive inside the root about to be deleted. The
       # probe reports the callback only if it actually ran.
       owner = start_supervised!({Arbiter.TerminateProbe, self()}, restart: :temporary)

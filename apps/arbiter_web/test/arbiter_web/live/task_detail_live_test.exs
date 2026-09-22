@@ -1055,6 +1055,29 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "review 1"
     end
 
+    test "an interrupted run shows its reason but is not styled as a failure (bd-aje6fj)",
+         %{conn: conn, task: task} do
+      # The agent took systemd's SIGTERM with the BEAM, so it exited 143 — but
+      # the run was shut down with the server, not failed.
+      {:ok, interrupted} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :interrupted,
+          exit_code: 143,
+          failure_reason: "server shutdown",
+          started_at: ~U[2026-07-01 12:00:00.000000Z],
+          completed_at: ~U[2026-07-01 12:03:00.000000Z]
+        })
+
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      assert html =~ "server shutdown"
+
+      view |> element(~s([phx-value-run="#{interrupted.id}"])) |> render_click()
+      refute has_element?(view, ~s(span[class*="arb-fail-text"]), "server shutdown")
+    end
+
     test "a run row expands in place to its transcript — no navigation",
          %{conn: conn, task: task, main: main} do
       {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")

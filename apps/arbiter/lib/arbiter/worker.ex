@@ -226,6 +226,24 @@ defmodule Arbiter.Worker do
   # Overridable for tests via `config :arbiter, :worker_exit_grace_ms`.
   @exit_grace_ms 500
 
+  # bd-aje6fj / #1896: how long the supervisor waits for `terminate/2` when it
+  # shuts a worker down (an application stop — `systemctl restart`) before it
+  # sends `:kill`. The worker traps exits so that teardown runs at all; this
+  # bounds it. Teardown is a SIGKILL of the agent tree (sub-second), the run-row
+  # write, and a usage flush that may read the session JSONL off disk — a few
+  # seconds at the outside. Every worker spends its grace in PARALLEL (a
+  # DynamicSupervisor signals all children, then waits), so this is the cost of
+  # the whole worker tier, and it has to leave room inside `arbiter.service`'s
+  # `TimeoutStopUSec` (45s, inherited) for the rest of the tree. Past that
+  # timeout systemd's cgroup SIGKILL (SIGABRT on Fedora) wins regardless, so a
+  # longer grace would be a silent no-op.
+  @shutdown_grace_ms 15_000
+
+  # The failure_reason stamped on a run whose worker was shut down cleanly with
+  # the node. Deliberately distinct from the boot reconciler's
+  # "server restarted", which marks a run that MISSED this path.
+  @shutdown_reason "server shutdown"
+
   # bd-4g0fsh: backoff before an auto-resume of a recoverable stop (transient
   # gateway 5xx, or a clean exit-0 without `arb done`). A recoverable stop is
   # re-spawned (bounded by `:resume_cap`) rather than failed — but NOT instantly:
@@ -880,6 +898,13 @@ defmodule Arbiter.Worker do
 
   @impl true
   def init(opts) do
+    # bd-aje6fj / #1896: without this, the supervisor's `:shutdown` exit signal
+    # on an application stop kills the worker outright and `terminate/2` — the
+    # only thing that SIGKILLs the agent tree and closes out the run row — never
+    # runs. Trapping turns every linked exit into a message; see the `:EXIT`
+    # clauses of handle_info/2 for what reaches us that way.
+    Process.flag(:trap_exit, true)
+
     now = DateTime.utc_now()
     task_id = Keyword.fetch!(opts, :task_id)
     meta = Keyword.get(opts, :meta, %{})
@@ -2296,6 +2321,14 @@ defmodule Arbiter.Worker do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
         cond do
+          # bd-aje6fj: systemd's control-group SIGTERM reaches the agent at the
+          # same moment as the BEAM, so on a restart the agent usually exits
+          # before the supervisor gets round to this worker. That is the node
+          # going down, not the run failing: don't classify, escalate or
+          # auto-resume it — terminate/2 records it `:interrupted` shortly.
+          node_stopping?() ->
+            {:noreply, state}
+
           other_session_live?(state, port) ->
             {:noreply, state}
 
@@ -2347,9 +2380,15 @@ defmodule Arbiter.Worker do
         %State{status: status} = state
       )
       when status in @live_statuses do
-    case respawn_with_resume(state, session_id, fingerprint, session) do
-      {:ok, new_state} -> {:noreply, new_state}
-      {:error, _why} -> {:noreply, fail_stopped(state, session)}
+    # bd-aje6fj: a backoff that expires mid-shutdown must not spawn a fresh
+    # agent into a node that is going down — terminate/2 is on its way.
+    if node_stopping?() do
+      {:noreply, state}
+    else
+      case respawn_with_resume(state, session_id, fingerprint, session) do
+        {:ok, new_state} -> {:noreply, new_state}
+        {:error, _why} -> {:noreply, fail_stopped(state, session)}
+      end
     end
   end
 
@@ -2416,6 +2455,30 @@ defmodule Arbiter.Worker do
   # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
   # unrelated monitor) — nothing to do.
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
+  # bd-aje6fj: linked exits, now that the worker traps them. The parent
+  # supervisor's own exit never reaches here — `gen_server` handles it and goes
+  # straight to terminate/2. What does arrive:
+  #
+  #   * `:normal` from every port this process opened — an agent session port
+  #     after its `{:exit_status, _}` or a `Port.close/1`, and the throwaway
+  #     port behind each `System.cmd/3` (git probes, `OsProcess.kill_tree/1`'s
+  #     `kill`) — and from a finished `Task.async/1`. Untrapped, a `:normal`
+  #     exit signal was ignored; ignore it here too.
+  #   * anything else — a port that died on a driver error, a crashed linked
+  #     process. Untrapped, that killed the worker without teardown. Keep it
+  #     fatal, but stop through terminate/2 so the agent is still reaped and the
+  #     run is recorded as the crash it is. Wrapped so a linked process's own
+  #     `:shutdown` can't pass for the node shutting down.
+  def handle_info({:EXIT, _from, :normal}, %State{} = state), do: {:noreply, state}
+
+  def handle_info({:EXIT, from, reason}, %State{} = state) do
+    Logger.warning(
+      "Worker: task=#{state.task_id} linked #{inspect(from)} exited #{inspect(reason)}; stopping"
+    )
+
+    {:stop, {:linked_exit, from, reason}, state}
+  end
 
   # ---- helpers -----------------------------------------------------------
 
@@ -2851,6 +2914,16 @@ defmodule Arbiter.Worker do
 
   defp exit_grace_ms do
     Application.get_env(:arbiter, :worker_exit_grace_ms, @exit_grace_ms)
+  end
+
+  # True once `init:stop/0` has begun — which is what the BEAM's SIGTERM handler
+  # calls, before a single application is taken down. Tests can't stop the node,
+  # so `config :arbiter, :worker_node_stopping_override` stands in for it.
+  defp node_stopping? do
+    case Application.get_env(:arbiter, :worker_node_stopping_override) do
+      override when is_boolean(override) -> override
+      _ -> match?({:stopping, _}, :init.get_status())
+    end
   end
 
   # bd-1pdyov: is a Claude session OTHER than the one that just exited still
@@ -5986,7 +6059,7 @@ defmodule Arbiter.Worker do
   end
 
   @impl true
-  def terminate(_reason, %State{} = state) do
+  def terminate(reason, %State{} = state) do
     # bd-bmmj4w: kill any still-live agent FIRST, on every teardown path — not
     # just the failure path (`fail_now/2`). Erlang does not reap a
     # `:spawn_executable` port's OS process when its owner dies, so without
@@ -6007,8 +6080,8 @@ defmodule Arbiter.Worker do
     # `:close` after-action StopWorker calls `Worker.stop` -> terminate/2
     # from a NON-terminal state (:running/:idle/:awaiting/:awaiting_review).
     # Nothing on that path ever marks the row terminal, so it stayed :running
-    # until the next server boot. See finalize_run_on_terminate/1.
-    finalize_run_on_terminate(state)
+    # until the next server boot. See finalize_run_on_terminate/2.
+    finalize_run_on_terminate(reason, state)
 
     # bd-cryhwk: if the worker is torn down (StopWorker after a task closes,
     # a kill, a crash) while a Claude session's port `:exit_status` message
@@ -6041,20 +6114,58 @@ defmodule Arbiter.Worker do
   #   * :completed / :failed — the row was already stamped by complete_now/2 or
   #     fail_now/2 (the explicit complete/fail paths). Don't double-write.
   #   * any non-terminal status (:idle/:running/:awaiting/:awaiting_review) —
-  #     the worker is being torn down without an explicit terminal transition
-  #     (the normal `arb done` -> task :close -> StopWorker teardown). Treat
-  #     the termination as completion and stamp the row :completed + completed_at
-  #     so `arb worker show` reflects the finished run immediately, with no
-  #     manual reconcile.
-  defp finalize_run_on_terminate(%State{status: status}) when status in [:completed, :failed] do
+  #     the worker is being torn down without an explicit terminal transition.
+  #     What that means depends on WHY (bd-aje6fj):
+  #       - `:normal` — a deliberate `Worker.stop/3` (the normal `arb done` ->
+  #         task :close -> StopWorker teardown). Treat the termination as
+  #         completion and stamp the row :completed + completed_at so `arb
+  #         worker show` reflects the finished run immediately.
+  #       - `:shutdown` / `{:shutdown, _}` — the supervisor shut it down, i.e.
+  #         the node is stopping. The run did not fail and did not finish:
+  #         stamp :interrupted with failure_reason "server shutdown". The task
+  #         is left :in_progress for the boot-time resume sweep.
+  #       - anything else — the worker crashed (a raise in a callback, or a
+  #         linked process dying). Stamp :failed with the crash reason, not
+  #         :completed.
+  defp finalize_run_on_terminate(_reason, %State{status: status})
+       when status in [:completed, :failed] do
     :ok
   end
 
-  defp finalize_run_on_terminate(%State{} = state) do
-    record_run_finished(%State{state | status: :completed})
+  defp finalize_run_on_terminate(reason, %State{} = state) do
+    case terminate_outcome(reason) do
+      :completed ->
+        record_run_finished(%State{state | status: :completed})
+
+      :interrupted ->
+        record_run_finished(%State{
+          state
+          | status: :interrupted,
+            meta: Map.put(state.meta, :failure_reason, @shutdown_reason)
+        })
+
+      :crashed ->
+        record_run_finished(%State{
+          state
+          | status: :failed,
+            meta: Map.put(state.meta, :failure_reason, "worker crashed: #{inspect(reason)}")
+        })
+    end
   end
 
+  defp terminate_outcome(:normal), do: :completed
+  defp terminate_outcome(:shutdown), do: :interrupted
+  defp terminate_outcome({:shutdown, _}), do: :interrupted
+  defp terminate_outcome(_), do: :crashed
+
   # ---- child_spec --------------------------------------------------------
+
+  @doc """
+  How long the supervisor gives a worker's `terminate/2` on shutdown before
+  killing it. See `@shutdown_grace_ms`.
+  """
+  @spec shutdown_grace_ms() :: pos_integer()
+  def shutdown_grace_ms, do: @shutdown_grace_ms
 
   @doc false
   def child_spec(opts) do
@@ -6062,6 +6173,9 @@ defmodule Arbiter.Worker do
       id: __MODULE__,
       start: {__MODULE__, :start_link, [opts]},
       restart: :temporary,
+      # bd-aje6fj: explicit, not the 5s default — the budget terminate/2 gets on
+      # an application stop. Honoured only because init/1 traps exits.
+      shutdown: @shutdown_grace_ms,
       type: :worker
     }
   end
