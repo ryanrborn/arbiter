@@ -31,15 +31,32 @@ defmodule Arbiter.Usage.BudgetPatrol do
   calibration-report material, design §6), and neither is one with no estimate
   at all: `:insufficient_data` has no p90 to be over.
 
+  ## Live spend (bd-8vnuy3)
+
+  The figure assessed is `Arbiter.Usage.LiveSpend`'s: the settled ledger plus
+  whatever the task's in-flight passes have spent so far, read off their
+  session JSONL. Before this, spend only accrued when a session *ended*, so a
+  runaway pass — the case this page exists for — could not trip it until it
+  stopped running away. The page says how much of its figure is an in-flight
+  estimate. The dedupe is unchanged: one page per task, whatever the figure
+  does afterwards.
+
   ## Configuration
 
   Via `config :arbiter, :budget_patrol`:
 
     * `:enabled`     — master switch (default `true`; `false` in test, where
                        tests drive `sweep/1` synchronously instead).
-    * `:interval_ms` — sweep interval (default 10 minutes — spend accrues when
-                       a worker's session ends, so there is nothing to gain
-                       from looking more often).
+    * `:interval_ms` — sweep interval (default 5 minutes). Now that live
+                       spend moves between ticks, the interval is how late a
+                       runaway pass gets paged. Re-reading the in-flight
+                       session files is not what bounds it: a read is ~7 ms at
+                       the p90 worker session file size and ~110 ms for the
+                       largest on the host (5.7 MB), and only tasks with a live
+                       agent are read at all. The sweep's ledger reads (the
+                       settled totals and the estimator sample) are the same
+                       per-tick cost they always were — 5 minutes doubles that
+                       rate, not more, for half the paging lag.
   """
 
   use GenServer
@@ -48,11 +65,12 @@ defmodule Arbiter.Usage.BudgetPatrol do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Usage.Budget
   alias Arbiter.Usage.Estimate
+  alias Arbiter.Usage.LiveSpend
 
   require Ash.Query
   require Logger
 
-  @default_interval_ms :timer.minutes(10)
+  @default_interval_ms :timer.minutes(5)
 
   # Containers, not work: an epic has no worker and no spend of its own.
   @non_dispatchable_types [:epic]
@@ -113,7 +131,8 @@ defmodule Arbiter.Usage.BudgetPatrol do
 
   Options are `Arbiter.Usage.Estimate.for_issue/2`'s (`:now`, `:min_n`,
   `:window_days`, `:sample`), plus `:issues` to supply the open tasks
-  directly.
+  directly and `:workers` to supply the worker snapshots
+  (`Arbiter.Worker.list_children/0` by default).
   """
   @spec sweep(keyword()) :: :ok
   def sweep(opts \\ []) do
@@ -125,16 +144,18 @@ defmodule Arbiter.Usage.BudgetPatrol do
 
       issues ->
         sample = Keyword.get_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
-        spends = Budget.spend_by_task(Enum.map(issues, & &1.id), opts)
+        workers = Keyword.get_lazy(opts, :workers, &list_workers/0)
+        spends = LiveSpend.for_tasks(Enum.map(issues, & &1.id), Keyword.put(opts, :workers, workers))
         opts = Keyword.put(opts, :sample, sample)
-        workers = worker_states()
+        states = worker_states(workers)
 
         issues
-        |> Enum.filter(&(Map.get(spends, &1.id, 0.0) > 0.0))
+        |> Enum.filter(&(total(spends[&1.id]) > 0.0))
         |> Enum.each(fn issue ->
-          assessment = Budget.assess(issue, Keyword.put(opts, :spend, spends[issue.id]))
+          spend = spends[issue.id]
+          assessment = Budget.assess(issue, Keyword.put(opts, :spend, total(spend)))
 
-          if assessment.over_budget?, do: escalate(issue, assessment, workers)
+          if assessment.over_budget?, do: escalate(issue, assessment, spend, states)
         end)
 
         :ok
@@ -147,11 +168,17 @@ defmodule Arbiter.Usage.BudgetPatrol do
     :exit, _ -> :ok
   end
 
-  defp escalate(%Issue{} = issue, assessment, workers) do
+  # `nil` is "nothing priced" (an agy-only task): there is no figure to be over.
+  defp total(%{total_usd: total}) when is_number(total), do: total
+  defp total(_spend), do: 0.0
+
+  defp escalate(%Issue{} = issue, assessment, spend, workers) do
     CoordinatorNotifier.budget_exceeded(
       %{task_id: issue.id, workspace_id: issue.workspace_id},
       %{
         spend: assessment.spend,
+        live_spend: if(spend.live_usd > 0.0, do: spend.live_usd),
+        degraded?: spend.degraded?,
         estimate: assessment.estimate,
         difficulty: issue.difficulty,
         worker_state: Map.get(workers, issue.id) || "no live worker (#{issue.status})"
@@ -170,11 +197,19 @@ defmodule Arbiter.Usage.BudgetPatrol do
     _ -> []
   end
 
+  defp list_workers do
+    Arbiter.Worker.list_children()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
   # `<status> · <step>` for whatever is actually running, keyed by the task the
   # spend belongs to — a reviewer or fix pass runs under a synthetic id, and
   # its state is still this task's state.
-  defp worker_states do
-    Arbiter.Worker.list_children()
+  defp worker_states(workers) do
+    workers
     |> Enum.map(fn w ->
       {Arbiter.Worker.ReviewGate.base_task_id(w.task_id), describe_worker(w)}
     end)
