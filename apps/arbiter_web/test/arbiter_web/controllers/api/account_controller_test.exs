@@ -70,6 +70,30 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       assert %{"error" => %{"type" => "invalid_request"}} =
                json_response(get(conn, ~p"/api/accounts?provider=enabled"), 400)
     end
+
+    test "hides merged-away accounts by default, and shows them with include_merged=true", %{
+      conn: conn
+    } do
+      into = create_account!(%{provider: :claude, slug: "index-merge-survivor"})
+      from = create_account!(%{provider: :claude, slug: "index-merge-away"})
+      {:ok, _} = Accounts.merge_accounts(from.id, into.id)
+
+      default_slugs =
+        get(conn, ~p"/api/accounts")
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Enum.map(& &1["slug"])
+
+      refute "index-merge-away" in default_slugs
+
+      included_slugs =
+        get(conn, ~p"/api/accounts?include_merged=true")
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Enum.map(& &1["slug"])
+
+      assert "index-merge-away" in included_slugs
+    end
   end
 
   describe "GET /api/accounts/:ref" do
@@ -150,6 +174,18 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       assert body["provider_account_id"] == account.id
       assert body["share"] == 7
     end
+
+    test "400s (not a raise/500) on a non-uuid workspace_id", %{conn: conn} do
+      _account = create_account!(%{provider: :claude, slug: "attach-bad-ws-id"})
+
+      conn =
+        post(conn, ~p"/api/accounts/attach-bad-ws-id/attach", %{
+          "workspace_id" => "ws-does-not-exist",
+          "provider" => "claude"
+        })
+
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
   end
 
   describe "POST /api/accounts/:ref/rotate" do
@@ -185,6 +221,19 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
 
       refute log =~ "sk-must-not-leak"
     end
+
+    test "400s (not a raise/500) on an unrecognised kind", %{conn: conn} do
+      _account = create_account!(%{provider: :claude, slug: "rotate-bad-kind"})
+
+      conn =
+        post(conn, ~p"/api/accounts/rotate-bad-kind/rotate", %{
+          "kind" => "not_a_kind",
+          "env_var" => "CLAUDE_CODE_OAUTH_TOKEN",
+          "secret" => "sk-whatever"
+        })
+
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
   end
 
   describe "POST /api/accounts/:ref/merge" do
@@ -209,6 +258,20 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       into = create_account!(%{provider: :codex, slug: "cross-into"})
 
       conn = post(conn, ~p"/api/accounts/cross-from/merge", %{"into" => into.id})
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    test "400s merging an already-merged-away account into a live one, instead of silently re-pointing onto a disabled row",
+         %{conn: conn} do
+      a = create_account!(%{provider: :claude, slug: "chain-a"})
+      b = create_account!(%{provider: :claude, slug: "chain-b"})
+      _live = create_account!(%{provider: :claude, slug: "chain-live"})
+
+      assert {:ok, _} = Accounts.merge_accounts(a.id, b.id)
+
+      # `live` was never merged; only `a` (the merge's `from` side) has been
+      # merged away — attempting to merge `live` into `a` must be rejected.
+      conn = post(conn, ~p"/api/accounts/chain-live/merge", %{"into" => a.id})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
   end

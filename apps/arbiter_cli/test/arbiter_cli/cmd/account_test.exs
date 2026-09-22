@@ -29,6 +29,35 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert out =~ "(no accounts)"
   end
 
+  test "account list --include-merged forwards include_merged=true and renders the merged suffix" do
+    stub_routes([
+      {{"get", "/api/accounts"},
+       fn conn ->
+         conn = Plug.Conn.fetch_query_params(conn)
+         assert conn.query_params["include_merged"] == "true"
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{
+           "data" => [
+             %{
+               "id" => "acct-1",
+               "provider" => "claude",
+               "slug" => "merged-away",
+               "max_concurrent" => nil,
+               "enabled" => false,
+               "merged_into_id" => "acct-2"
+             }
+           ]
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Account.run(["list", "--include-merged"]) end)
+    assert exit_code == 0
+    assert out =~ "[merged -> acct-2]"
+  end
+
   test "account show prints credentials and workspaces, never a secret" do
     stub_get("/api/accounts/personal-max", %{
       "id" => "acct-1",

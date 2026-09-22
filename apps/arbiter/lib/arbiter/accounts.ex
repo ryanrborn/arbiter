@@ -168,6 +168,7 @@ defmodule Arbiter.Accounts do
           {:ok, WorkspaceProviderAccount.t()} | {:error, term()}
   def attach_workspace(workspace_id, provider, account_ref, opts \\ []) do
     with {:ok, provider} <- normalize_provider(provider),
+         {:ok, _workspace} <- get_workspace(workspace_id),
          {:ok, account} <- get_account(account_ref),
          :ok <- ensure_provider_match(account, provider) do
       case existing_link(workspace_id, provider) do
@@ -231,7 +232,8 @@ defmodule Arbiter.Accounts do
   def rotate_credential(account_ref, attrs) when is_map(attrs) do
     with {:ok, account} <- get_account(account_ref),
          {:ok, secret} <- fetch_required(attrs, :secret),
-         {:ok, kind} <- fetch_required(attrs, :kind),
+         {:ok, raw_kind} <- fetch_required(attrs, :kind),
+         {:ok, kind} <- parse_kind(raw_kind),
          {:ok, env_var} <- fetch_required(attrs, :env_var) do
       Arbiter.Repo.transaction(fn ->
         # Retire the current active credential of this kind *first* — the
@@ -253,6 +255,15 @@ defmodule Arbiter.Accounts do
       end)
     end
   end
+
+  @credential_kinds ~w(oauth_token api_key cli_credentials_file)
+
+  defp parse_kind(kind)
+       when is_atom(kind) and kind in [:oauth_token, :api_key, :cli_credentials_file],
+       do: {:ok, kind}
+
+  defp parse_kind(kind) when kind in @credential_kinds, do: {:ok, String.to_existing_atom(kind)}
+  defp parse_kind(kind), do: {:error, {:invalid_kind, kind}}
 
   defp fetch_required(attrs, key) do
     case Map.get(attrs, key) || Map.get(attrs, to_string(key)) do
@@ -279,9 +290,13 @@ defmodule Arbiter.Accounts do
   @doc "Resolve a workspace by UUID id (`arb account attach`'s `<workspace>` arg)."
   @spec get_workspace(String.t()) :: {:ok, Workspace.t()} | {:error, :not_found}
   def get_workspace(id) do
-    case Ash.get(Workspace, id) do
-      {:ok, workspace} -> {:ok, workspace}
-      {:error, _} -> {:error, :not_found}
+    if uuid?(id) do
+      case Ash.get(Workspace, id) do
+        {:ok, workspace} -> {:ok, workspace}
+        {:error, _} -> {:error, :not_found}
+      end
+    else
+      {:error, :not_found}
     end
   end
 end

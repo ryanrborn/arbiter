@@ -7,6 +7,10 @@ defmodule ArbiterCli.Cmd.Account do
   credential itself.
 
       arb account list                              [--provider claude|codex|gemini_cli|antigravity]
+                                     [--include-merged]
+                                     By default merged-away accounts (from a
+                                     prior `arb account merge`) are hidden;
+                                     pass --include-merged to see them too.
       arb account show   <ref>
                                      <ref> is a uuid, "provider:slug", or a
                                      bare slug (only unambiguous if no other
@@ -54,7 +58,8 @@ defmodule ArbiterCli.Cmd.Account do
     secret_file: :string,
     scopes: :string,
     into: :string,
-    json: :boolean
+    json: :boolean,
+    include_merged: :boolean
   ]
 
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
@@ -99,7 +104,10 @@ defmodule ArbiterCli.Cmd.Account do
   # ---- list ----------------------------------------------------------------
 
   defp list(opts, mode) do
-    params = if opts[:provider], do: [provider: opts[:provider]], else: []
+    params =
+      []
+      |> then(fn p -> if opts[:provider], do: [{:provider, opts[:provider]} | p], else: p end)
+      |> then(fn p -> if opts[:include_merged], do: [{:include_merged, "true"} | p], else: p end)
 
     case Client.get("/api/accounts", params) do
       {:ok, %{"data" => accounts}} -> emit_list(accounts, mode)

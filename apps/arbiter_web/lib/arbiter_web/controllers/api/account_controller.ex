@@ -5,7 +5,7 @@ defmodule ArbiterWeb.Api.AccountController do
 
   Routes:
 
-    * `GET    /api/accounts`            — :index (optional `?provider=`)
+    * `GET    /api/accounts`            — :index (optional `?provider=`, `?include_merged=true`)
     * `POST   /api/accounts`            — :create
     * `GET    /api/accounts/:ref`       — :show   (`:ref` — uuid, `provider:slug`, or bare slug)
     * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`)
@@ -24,6 +24,7 @@ defmodule ArbiterWeb.Api.AccountController do
 
   def index(conn, params) do
     with {:ok, opts} <- provider_filter(params) do
+      opts = Keyword.put(opts, :include_merged, truthy?(Map.get(params, "include_merged")))
       render(conn, :index, accounts: Accounts.list_accounts(opts))
     end
   end
@@ -40,6 +41,8 @@ defmodule ArbiterWeb.Api.AccountController do
         end
     end
   end
+
+  defp truthy?(v), do: v in ["true", "1", true]
 
   def show(conn, %{"ref" => ref}) do
     with {:ok, account} <- ref |> Accounts.get_account() |> friendly() do
@@ -132,6 +135,17 @@ defmodule ArbiterWeb.Api.AccountController do
 
   defp friendly({:error, :provider_mismatch}),
     do: {:error, {:invalid_request, "cannot merge accounts across providers"}}
+
+  defp friendly({:error, :already_merged}),
+    do: {:error, {:invalid_request, "the account being merged has already been merged away"}}
+
+  defp friendly({:error, :into_already_merged}),
+    do:
+      {:error,
+       {:invalid_request, "cannot merge into an account that has already been merged away"}}
+
+  defp friendly({:error, {:invalid_kind, kind}}),
+    do: {:error, {:invalid_request, "unknown credential kind #{inspect(kind)}"}}
 
   defp friendly({:error, {:provider_mismatch, provider}}),
     do: {:error, {:invalid_request, "account belongs to provider #{provider}, not the one given"}}

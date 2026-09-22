@@ -90,6 +90,20 @@ defmodule Arbiter.AccountsTest do
 
       assert [%{slug: "only-claude"}] = Accounts.list_accounts(provider: :claude)
     end
+
+    test "include_merged: true also returns merged-away rows" do
+      into = create_account!(%{provider: :claude, slug: "include-merged-survivor"})
+      merged = create_account!(%{provider: :claude, slug: "include-merged-away"})
+
+      merged
+      |> Ash.Changeset.for_update(:update, %{merged_into_id: into.id, enabled: false})
+      |> Ash.update!()
+
+      slugs = Accounts.list_accounts(include_merged: true) |> Enum.map(& &1.slug)
+
+      assert "include-merged-away" in slugs
+      assert "include-merged-survivor" in slugs
+    end
   end
 
   describe "get_account/1" do
@@ -170,6 +184,13 @@ defmodule Arbiter.AccountsTest do
       assert {:error, {:provider_mismatch, :codex}} =
                Accounts.attach_workspace(ws.id, :claude, account.id)
     end
+
+    test "a non-uuid workspace-id is rejected with a plain error tuple, not a raise" do
+      account = create_account!(%{provider: :claude, slug: "attach-bad-ws"})
+
+      assert {:error, :not_found} =
+               Accounts.attach_workspace("ws-does-not-exist", :claude, account.id)
+    end
   end
 
   describe "rotate_credential/2" do
@@ -225,6 +246,17 @@ defmodule Arbiter.AccountsTest do
 
       {:ok, reloaded_oauth} = Ash.get(ProviderCredential, oauth.id)
       assert reloaded_oauth.active == true
+    end
+
+    test "an unrecognised kind is rejected with a plain error tuple, not a raise" do
+      account = create_account!(%{provider: :claude, slug: "rotate-bad-kind"})
+
+      assert {:error, {:invalid_kind, "not_a_kind"}} =
+               Accounts.rotate_credential(account.id, %{
+                 kind: "not_a_kind",
+                 env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+                 secret: "sk-secret"
+               })
     end
   end
 
@@ -407,6 +439,43 @@ defmodule Arbiter.AccountsTest do
       {:ok, reloaded_from} = Ash.get(ProviderAccount, from_account.id)
       assert reloaded_from.merged_into_id == nil
       assert reloaded_from.enabled == true
+    end
+
+    test "rejects merging an already-merged-away account", %{
+      from_account: from_account,
+      into_account: into_account
+    } do
+      other = create_account!(%{provider: :claude, slug: "merge-probe-other"})
+      assert {:ok, _} = Accounts.merge_accounts(from_account.id, into_account.id)
+
+      # from_account is now merged away — merging it again must be rejected,
+      # not silently re-point live data off a disabled row.
+      assert {:error, :already_merged} = Accounts.merge_accounts(from_account.id, other.id)
+    end
+
+    test "rejects merging into an already-merged-away account", %{
+      from_account: from_account,
+      into_account: into_account
+    } do
+      other = create_account!(%{provider: :claude, slug: "merge-probe-other-2"})
+      assert {:ok, _} = Accounts.merge_accounts(from_account.id, into_account.id)
+
+      assert {:error, :into_already_merged} =
+               Accounts.merge_accounts(other.id, from_account.id)
+    end
+
+    test "re-points a stale merge chain onto the current survivor", %{
+      from_account: from_account,
+      into_account: into_account
+    } do
+      third = create_account!(%{provider: :claude, slug: "merge-chain-third"})
+
+      # a -> from_account, then from_account -> into_account (third -> into).
+      assert {:ok, _} = Accounts.merge_accounts(third.id, from_account.id)
+      assert {:ok, _} = Accounts.merge_accounts(from_account.id, into_account.id)
+
+      {:ok, reloaded_third} = Ash.get(ProviderAccount, third.id)
+      assert reloaded_third.merged_into_id == into_account.id
     end
   end
 

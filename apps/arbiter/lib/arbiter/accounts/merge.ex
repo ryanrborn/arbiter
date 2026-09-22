@@ -24,6 +24,12 @@ defmodule Arbiter.Accounts.Merge do
       never both be linked from the same workspace — no conflict is possible.
     * the `from` row — soft-deleted: `merged_into_id` set, `enabled: false`.
 
+  A merge into, or of, an already-merged-away account is rejected
+  (`:already_merged` / `:into_already_merged`) — a merged-away row is never a
+  valid endpoint for another merge. Any earlier chain that pointed at `from`
+  (e.g. `a -> from`) is re-pointed straight at `into`, so `merged_into_id`
+  never names a row that is itself merged away.
+
   All of it runs inside one `Arbiter.Repo` transaction — a `merge` either
   fully lands or fully doesn't.
   """
@@ -56,9 +62,11 @@ defmodule Arbiter.Accounts.Merge do
   @doc """
   Merge `from_ref` into `into_ref` (both accepted by
   `Arbiter.Accounts.get_account/1`). Returns `{:ok, into_account}` on
-  success, `{:error, reason}` otherwise — including `:same_account` and
+  success, `{:error, reason}` otherwise — including `:same_account`,
   `:provider_mismatch` (merging across providers makes no sense: the quota
-  tables and `workspace_provider_accounts` are provider-specific).
+  tables and `workspace_provider_accounts` are provider-specific),
+  `:already_merged` (`from` was already merged away) and
+  `:into_already_merged` (`into` was already merged away).
   """
   @spec merge(String.t(), String.t()) :: {:ok, ProviderAccount.t()} | {:error, term()}
   def merge(from_ref, into_ref) do
@@ -70,6 +78,13 @@ defmodule Arbiter.Accounts.Merge do
   end
 
   defp validate(%{id: id}, %{id: id}), do: {:error, :same_account}
+
+  defp validate(%{merged_into_id: id}, _into) when not is_nil(id),
+    do: {:error, :already_merged}
+
+  defp validate(_from, %{merged_into_id: id}) when not is_nil(id),
+    do: {:error, :into_already_merged}
+
   defp validate(%{provider: p}, %{provider: p}), do: :ok
   defp validate(_from, _into), do: {:error, :provider_mismatch}
 
@@ -80,6 +95,7 @@ defmodule Arbiter.Accounts.Merge do
       collapse_quota(from_account, into_account.id)
       repoint_workspace_links(from_account.id, into_account.id)
       soft_delete!(from_account, into_account.id)
+      repoint_merge_chain(from_account.id, into_account.id)
     end)
   rescue
     error -> {:error, error}
@@ -255,6 +271,19 @@ defmodule Arbiter.Accounts.Merge do
     from_account
     |> Ash.Changeset.for_update(:update, %{merged_into_id: into_id, enabled: false})
     |> Ash.update!()
+
+    :ok
+  end
+
+  # Any earlier merge that pointed at `from_account` (e.g. `a -> from_account`,
+  # now `from_account -> into_account`) must be re-pointed straight at
+  # `into_account` — otherwise `a.merged_into_id` still names a merged-away
+  # row instead of the current survivor.
+  defp repoint_merge_chain(from_id, into_id) do
+    Repo.query!(
+      "UPDATE provider_accounts SET merged_into_id = ?1 WHERE merged_into_id = ?2",
+      [into_id, from_id]
+    )
 
     {:ok, into_account} = Accounts.get_account(into_id)
     into_account
