@@ -56,8 +56,9 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
     * a process that never belonged to a worker at all — an operator's own
       shell sitting in the worktree, say;
     * an *orphaned* agent, whose worker died without `terminate/2` running
-      (`Process.exit(pid, :kill)`, or a linked exit — `Worker` does not trap
-      exits). Nothing killed its OS process, and the registry row for the
+      (`Process.exit(pid, :kill)`, or a teardown that overran its shutdown
+      grace and was killed — `Worker` traps every other exit since
+      bd-aje6fj). Nothing killed its OS process, and the registry row for the
       dead worker is filtered out by `live_for/1` as a corpse, so the drain
       reports `:drained` while the agent is still running in the directory.
       Every path that stops a worker deliberately (`Worker.stop/3`, and so

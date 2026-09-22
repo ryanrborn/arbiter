@@ -322,19 +322,19 @@ defmodule Arbiter.MCP.Tools.Worker do
   @spec worker_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
-      children =
-        Arbiter.Worker.list_children()
-        |> Enum.filter(&(&1.workspace_id == ws_id))
+      all = Arbiter.Worker.list_children()
+      children = Enum.filter(all, &(&1.workspace_id == ws_id))
 
-      task_ids = Enum.map(children, & &1.task_id)
-      costs = Arbiter.Worker.Stats.task_costs_usd(task_ids)
+      # bd-8vnuy3: the task's settled + in-flight spend — the issue page's
+      # figure, so a row never disagrees with the page for the same task.
+      costs = worker_costs(children, all)
 
       workers =
         children
         # bd-aw2cyt: a row's phase depends on its siblings' rounds, so stamp it
         # over the whole list before serializing.
         |> Arbiter.Worker.Phase.annotate()
-        |> Enum.map(&serialize_worker_summary(&1, Map.get(costs, &1.task_id, 0.0)))
+        |> Enum.map(&serialize_worker_summary(&1, Map.get(costs, &1.task_id)))
 
       {:ok, %{workers: workers, count: length(workers), workspace_id: ws_id}}
     end
@@ -379,9 +379,33 @@ defmodule Arbiter.MCP.Tools.Worker do
 
   defp worker_show_historical(task_id, lines) do
     case latest_run(task_id) do
-      %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_run(run, lines)}
-      nil -> {:error, {:not_found, "no worker found for task #{task_id}"}}
+      %Arbiter.Workers.Run{} = run ->
+        {:ok, Map.merge(serialize_worker_run(run, lines), task_cost_fields(task_id))}
+
+      nil ->
+        {:error, {:not_found, "no worker found for task #{task_id}"}}
     end
+  end
+
+  # Best-effort, like every cost read on these surfaces: a failed ledger read
+  # costs the row its cost fields, never the listing.
+  defp worker_costs(snaps, all) do
+    Arbiter.Usage.LiveSpend.by_worker_task(snaps, workers: all)
+  rescue
+    e ->
+      Logger.warning("worker_list: live spend read failed: #{Exception.message(e)}")
+      %{}
+  end
+
+  defp task_cost_fields(task_id) do
+    task_id
+    |> Arbiter.Usage.Estimate.fold_task_id()
+    |> Arbiter.Usage.LiveSpend.for_task()
+    |> Arbiter.Usage.LiveSpend.cost_fields()
+  rescue
+    e ->
+      Logger.warning("worker_show: live spend read failed: #{Exception.message(e)}")
+      Arbiter.Usage.LiveSpend.cost_fields(nil)
   end
 
   defp latest_run(task_id) do
@@ -941,7 +965,7 @@ defmodule Arbiter.MCP.Tools.Worker do
 
   defp phase_of(snap, siblings), do: Arbiter.Worker.Phase.of(snap, siblings)
 
-  defp serialize_worker_summary(snap, cost_usd) do
+  defp serialize_worker_summary(snap, spend) do
     meta = Map.get(snap, :meta, %{}) || %{}
     routing = Map.get(meta, :routing_config) || %{}
     model_id = Map.get(meta, :model) || Map.get(routing, :model)
@@ -968,10 +992,10 @@ defmodule Arbiter.MCP.Tools.Worker do
       activity: Map.get(meta, :activity),
       provider: Map.get(meta, :provider) || Map.get(routing, :provider),
       model: Arbiter.Worker.Stats.short_model_name(model_id),
-      cost_usd: cost_usd,
       resumable: resumable,
       blocked_reason: blocked_reason
     }
+    |> Map.merge(Arbiter.Usage.LiveSpend.cost_fields(spend))
   end
 
   defp serialize_worker_snapshot(snap, lines) do
@@ -1014,6 +1038,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       resumable: resumable,
       blocked_reason: blocked_reason
     }
+    |> Map.merge(task_cost_fields(snap.task_id))
   end
 
   defp serialize_worker_run(%Arbiter.Workers.Run{} = run, lines) do
