@@ -379,10 +379,9 @@ defmodule Arbiter.Agents.ClaudeTest do
     test "never remaps the OAuth token onto ANTHROPIC_API_KEY" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      env = Claude.spawn_env(api_key: "literal-token")
+      env = Claude.spawn_env([])
 
-      assert {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"} in env
-      assert {"ANTHROPIC_API_KEY", "literal-token"} in env
+      refute List.keyfind(env, "ANTHROPIC_API_KEY", 0)
     end
 
     test "composes alongside ANTHROPIC_API_KEY without disturbing it" do
