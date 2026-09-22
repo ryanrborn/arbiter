@@ -139,6 +139,39 @@ defmodule Arbiter.Worker.AuthDeathTest do
       assert_stays(fn -> reload(task).status == :in_progress end)
       assert AuthHold.status(Claude).deaths == 0
     end
+
+    # bd-8praoz: a worker SIGTERMed by the unit's cgroup kill (e.g. a server
+    # restart) must never be treated as an auth death just because its own
+    # transcript happens to contain auth-shaped vocabulary (a worker touching
+    # credential/resume code prints "401"/"invalid"/"credentials expired" in
+    # its own normal output). Before the fix, this stub reproduced the exact
+    # false page from the ticket: the run classified `:auth_expired` from the
+    # output despite dying on signal 15, which both notified
+    # `CredentialWatchdog` and counted toward the `AuthHold` streak.
+    test "a signal-killed worker with an auth-shaped transcript leaves the task " <>
+           ":in_progress and does not count toward the hold or notify the watchdog",
+         %{ws: ws, tmp: tmp} do
+      stub_claude!(tmp, """
+      #!/bin/sh
+      echo 'investigating a 401 error and invalid API key handling'
+      echo 'credentials expired in the fixture, session token invalid'
+      kill -TERM $$
+      sleep 5
+      """)
+
+      task = ready_task!(ws, "killed mid-auth-investigation")
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(task.id)
+      eventually(fn -> Worker.state(pid).status == :failed end)
+
+      reason = Worker.state(pid).meta.stop_reason
+      assert reason.category == :killed
+      assert reason.signal == 15
+
+      assert_stays(fn -> reload(task).status == :in_progress end)
+      assert AuthHold.status(Claude).deaths == 0
+      refute CredentialWatchdog.expired?(Claude)
+    end
   end
 
   describe "the hold (acceptance 1)" do
