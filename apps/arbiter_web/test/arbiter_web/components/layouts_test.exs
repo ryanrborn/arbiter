@@ -38,29 +38,45 @@ defmodule ArbiterWeb.LayoutsTest do
   end
 
   describe "app/1 — nav" do
-    test "renders the 13 nav entries in the new order, with renamed labels" do
+    test "the rail renders the 13 nav entries in order, with their hrefs and group headers" do
+      rail = render_app() |> LazyHTML.from_fragment() |> LazyHTML.query("#nav-rail")
+
+      entries =
+        rail
+        |> LazyHTML.query("a[href]")
+        |> Enum.map(fn a ->
+          {a |> LazyHTML.text() |> String.trim(), a |> LazyHTML.attribute("href") |> hd()}
+        end)
+
+      assert entries == [
+               {"Board", "/"},
+               {"Issues", "/tasks"},
+               {"Epics", "/epics"},
+               {"Merge queues", "/merge_queue"},
+               {"Workers", "/workers"},
+               {"Run history", "/workers/history"},
+               {"Sessions", "/sessions"},
+               {"Usage", "/usage"},
+               {"Reviews", "/reviews"},
+               {"Audit", "/audit"},
+               {"Workspaces", "/workspaces"},
+               {"Skills", "/skills"},
+               {"Loop", "/loop"}
+             ]
+
+      headers =
+        rail
+        |> LazyHTML.query(~s([data-role="nav-group-header"]))
+        |> Enum.map(&(&1 |> LazyHTML.text() |> String.trim()))
+
+      assert headers == ["Work", "Fleet", "Analysis", "Config"]
+    end
+
+    test "the top_nav bar is gone" do
       html = render_app()
 
-      order = [
-        "Board",
-        "Issues",
-        "Epics",
-        "Merge queue",
-        "Workers",
-        "Run history",
-        "Sessions",
-        "Usage",
-        "Reviews",
-        "Audit",
-        "Workspaces",
-        "Skills",
-        "Loop"
-      ]
-
-      indices = Enum.map(order, fn label -> :binary.match(html, label) |> elem(0) end)
-
-      assert indices == Enum.sort(indices)
-      assert html =~ ~s(href="/workers/history")
+      refute html =~ ~s(id="top-nav")
+      refute html =~ "top-nav-mobile-menu"
     end
 
     test "the Epics entry links to /epics and sits directly after Issues" do
@@ -106,6 +122,129 @@ defmodule ArbiterWeb.LayoutsTest do
 
       assert html =~ "arbiter"
       refute html =~ "<img"
+    end
+  end
+
+  describe "app/1 — status bar" do
+    defp status_bar(html),
+      do: html |> LazyHTML.from_fragment() |> LazyHTML.query("#app-status-bar")
+
+    defp classes(node), do: node |> LazyHTML.attribute("class") |> hd() |> String.split()
+
+    test "is a nav-height chrome bar with a bottom border" do
+      bar = status_bar(render_app())
+
+      assert Enum.count(bar) == 1
+      assert "h-[var(--nav-height)]" in classes(bar)
+      assert "bg-[var(--surface-chrome)]" in classes(bar)
+      assert "border-b" in classes(bar)
+    end
+
+    test "carries the wordmark and the whole right cluster, but no nav links" do
+      quota = Arbiter.Quota.blank_view("anthropic")
+      bar = status_bar(render_app(%{quotas: [quota, Arbiter.Quota.blank_view("codex")]}))
+
+      assert bar |> LazyHTML.query("svg, [aria-label]") |> Enum.count() > 0
+      assert bar |> LazyHTML.text() =~ "arbiter"
+      assert bar |> LazyHTML.query("#appshell-live") |> Enum.count() == 1
+      assert bar |> LazyHTML.query("#coordinator-inbox-trigger") |> Enum.count() == 1
+      assert bar |> LazyHTML.query("[data-phx-theme]") |> Enum.count() == 3
+      # One 5h + 7d pair per provider.
+      assert bar |> LazyHTML.text() |> String.split("5h") |> length() == 3
+      assert bar |> LazyHTML.text() |> String.split("7d") |> length() == 3
+
+      assert bar |> LazyHTML.query("nav, a[href]") |> Enum.to_list() == []
+    end
+
+    test "holds the below-lg hamburger that opens the rail as an overlay" do
+      html = render_app()
+      toggle = html |> status_bar() |> LazyHTML.query("#nav-rail-toggle")
+
+      assert Enum.count(toggle) == 1
+      assert "lg:hidden" in classes(toggle)
+      assert toggle |> LazyHTML.attribute("aria-controls") == ["nav-rail"]
+
+      backdrop = html |> LazyHTML.from_fragment() |> LazyHTML.query("#nav-rail-backdrop")
+      assert Enum.count(backdrop) == 1
+      assert "fixed" in classes(backdrop)
+      assert backdrop |> LazyHTML.attribute("phx-click") |> hd() =~ "nav-rail:close"
+    end
+  end
+
+  describe "app/1 — rail geometry" do
+    defp rail(html), do: html |> LazyHTML.from_fragment() |> LazyHTML.query("#nav-rail")
+
+    test "is a fixed column between the status bar and the dock strip" do
+      rail = rail(render_app())
+      class = rail |> LazyHTML.attribute("class") |> hd() |> String.split()
+
+      assert "fixed" in class
+      assert "left-0" in class
+      assert "top-[var(--nav-height)]" in class
+      assert "bottom-[var(--session-dock-strip-height)]" in class
+      assert rail |> LazyHTML.attribute("phx-hook") == ["NavRail"]
+      assert rail |> LazyHTML.query("#sidebar-nav") |> Enum.count() == 1
+    end
+
+    test "sits below the dock's expanded window and the coordinator drawer" do
+      html = render_app()
+
+      [z] =
+        Regex.run(~r/\bz-(\d+)\b/, rail(html) |> LazyHTML.attribute("class") |> hd(),
+          capture: :all_but_first
+        )
+
+      # The dock root is `z-30`; the drawer's backdrop is `z-40`, the drawer `z-50`.
+      assert String.to_integer(z) < 30
+      assert html =~ ~r/id="coordinator-drawer-backdrop"[^>]*z-40/s
+      assert html =~ ~r/id="coordinator-drawer"[^>]*z-50/s
+    end
+
+    test "the hover-expanded layer is fixed and out of <main>'s flow" do
+      doc = render_app() |> LazyHTML.from_fragment()
+
+      assert doc |> LazyHTML.query("main #nav-rail") |> Enum.to_list() == []
+      assert doc |> LazyHTML.query("main #sidebar-nav") |> Enum.to_list() == []
+      assert doc |> LazyHTML.query("main") |> LazyHTML.text() =~ "content"
+    end
+  end
+
+  describe "app.css — rail inset contract" do
+    @css Path.expand("../../../assets/css/app.css", __DIR__)
+
+    # Comments stripped, so a rule's selector is only its selector.
+    defp css, do: @css |> File.read!() |> String.replace(~r{/\*.*?\*/}s, "")
+
+    # Every rule in the stylesheet that assigns `--nav-rail-page-inset`.
+    defp inset_rules do
+      ~r/([^{}]+)\{[^{}]*--nav-rail-page-inset:\s*([^;]+);/
+      |> Regex.scan(css(), capture: :all_but_first)
+      |> Enum.map(fn [selector, value] -> {String.trim(selector), String.trim(value)} end)
+    end
+
+    test "pinned insets the page by the expanded width, unpinned by the collapsed width" do
+      rules = inset_rules()
+
+      assert {~S|html[data-nav-rail="pinned"]:has(#nav-rail)|, "var(--nav-rail-width-expanded)"} in rules
+      assert {"html:has(#nav-rail)", "var(--nav-rail-width)"} in rules
+    end
+
+    test "the inset only exists at lg and up; below it the page keeps its full width" do
+      [lg_block] =
+        Regex.run(~r/@media \(min-width: 64rem\) \{\s*html:has\(#nav-rail\).*?\n\}/s, css())
+
+      assert lg_block =~ "html:has(#nav-rail)"
+      assert lg_block =~ ~S|html[data-nav-rail="pinned"]:has(#nav-rail)|
+      assert css() =~ "--nav-rail-page-inset: 0px"
+    end
+
+    test "hovering never changes the inset — the float is width-only on the fixed rail" do
+      for {selector, _value} <- inset_rules() do
+        refute selector =~ ":hover"
+        refute selector =~ ":focus-within"
+      end
+
+      assert css() =~ ~r/\.nav-rail:hover[^{]*\{[^}]*width: var\(--nav-rail-width-expanded\)/s
     end
   end
 
