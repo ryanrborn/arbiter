@@ -370,31 +370,26 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
-    # P4 (bd-cblemv) deleted the server-env fallback `oauth_token/1` used to
-    # check: a workspace-less spawn no longer reads CLAUDE_CODE_OAUTH_TOKEN
-    # from the server process environment at all, set or not — and now
-    # explicitly unsets whatever value the child process would otherwise
-    # inherit from that server env (bd-6umoh9's dual-refresher race).
-    test "ignores CLAUDE_CODE_OAUTH_TOKEN in the server process env, and unsets it" do
+    test "exports CLAUDE_CODE_OAUTH_TOKEN under its own literal name, unchanged" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"}]
     end
 
-    test "never remaps a configured ANTHROPIC_API_KEY onto CLAUDE_CODE_OAUTH_TOKEN" do
+    test "never remaps the OAuth token onto ANTHROPIC_API_KEY" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
       env = Claude.spawn_env(api_key: "literal-token")
 
-      assert List.keyfind(env, "CLAUDE_CODE_OAUTH_TOKEN", 0) == {"CLAUDE_CODE_OAUTH_TOKEN", false}
+      assert {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"} in env
       assert {"ANTHROPIC_API_KEY", "literal-token"} in env
     end
 
-    test "composes alongside ANTHROPIC_API_KEY without carrying the server env token" do
+    test "composes alongside ANTHROPIC_API_KEY without disturbing it" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
       assert Claude.spawn_env(api_key: "literal-token") == [
-               {"CLAUDE_CODE_OAUTH_TOKEN", false},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"},
                {"ANTHROPIC_API_KEY", "literal-token"}
              ]
     end
@@ -457,20 +452,18 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}]
     end
 
-    # P4 (bd-cblemv) deleted the server-env fallback: a workspace that defines
-    # no token of its own carries none, even with the server env var set.
-    test "carries no token when the workspace defines none, even with a server env var set" do
+    test "falls back to the server env var when the workspace defines no token" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
       ws = workspace_with_worker_env(%{"LOG_LEVEL" => "debug"})
 
-      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
     end
 
-    test "a nil / absent :workspace opt carries no token either, server env var or not" do
+    test "a nil / absent :workspace opt is unchanged from the bd-2zigo1 behaviour" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
 
-      assert Claude.spawn_env(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert Claude.spawn_env(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
     end
   end
 

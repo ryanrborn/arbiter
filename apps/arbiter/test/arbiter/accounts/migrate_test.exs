@@ -18,9 +18,11 @@ defmodule Arbiter.Accounts.MigrateTest do
   4 evidence: no allowlisted key survives in `worker_env` post-migration, the
   backup row is written unconditionally before any strip (so removal without
   a backup cannot happen), and rollback restores a workspace's credential
-  after the destructive step. P4's own new work is deleting `ConfigDir`'s
-  now-dead server-env and install-wide-unambiguous fallbacks
-  (`config_dir_test.exs`, `config_dir_workspace_test.exs`).
+  after the destructive step. P4's own work is in `ConfigDir` — per the
+  operator's ruling on PR #1947 (bd-cblemv round 2), the flag-off legacy
+  chain (server env, then install-wide-unambiguous workspace token) is kept
+  rather than deleted until `:provider_accounts_enabled` flips for good; see
+  `config_dir_test.exs` and `config_dir_workspace_test.exs`.
   """
   use Arbiter.DataCase, async: false
 

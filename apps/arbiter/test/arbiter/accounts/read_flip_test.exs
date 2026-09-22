@@ -249,16 +249,13 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       assert secrets == ["blob-token"]
     end
 
-    # P4 (bd-cblemv) deleted the install-wide-unambiguous fallback this used
-    # to pin: a workspace-less spawn with the flag off now has no workspace to
-    # consult and carries no token, even when exactly one workspace defines it.
-    test "the workspace-less spawn carries no token — the install-wide fallback is gone" do
+    test "the workspace-less install-wide fallback still reads workspaces" do
       ws = token_workspace("blob-token")
       workspace_on_account(ws, "account-token")
 
       flag(false)
 
-      assert ConfigDir.oauth_token() == nil
+      assert ConfigDir.oauth_token() == "blob-token"
     end
   end
 
