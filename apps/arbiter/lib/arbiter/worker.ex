@@ -682,6 +682,7 @@ defmodule Arbiter.Worker do
             repo: run.repo,
             current_step: nil,
             status: :unknown,
+            role: degraded_role(run.role),
             started_at: run.started_at,
             step_started_at: nil,
             meta: %{stale_probe: true}
@@ -704,6 +705,22 @@ defmodule Arbiter.Worker do
           }
         ]
     end
+  end
+
+  # bd-45tkhq / bd-aw2cyt: `Arbiter.Worker.Phase.of/2` classifies a subordinate
+  # pass (fix pass, conflict resolver, review-gate reviewer/implementer) by its
+  # top-level `:role`, matched against a fixed atom set — a degraded entry
+  # with no `:role` falls through to `author_phase/2` and gets misclassified
+  # as the task's own primary worker instead of e.g. `:fixing_ci`. `Run.role`
+  # is durably the same value (`record_run_started/1` writes
+  # `to_string_or_nil(role_from_meta(...))`), just stringified for storage;
+  # convert it back through a fixed allowlist rather than
+  # `String.to_existing_atom/1` on a DB value.
+  @known_subordinate_roles ~w(reviewer implementer fix_pass conflict_resolver)a
+  defp degraded_role(nil), do: nil
+
+  defp degraded_role(role) when is_binary(role) do
+    Enum.find(@known_subordinate_roles, &(Atom.to_string(&1) == role))
   end
 
   defp latest_run(task_id) do

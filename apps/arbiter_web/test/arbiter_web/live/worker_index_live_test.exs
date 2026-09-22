@@ -136,7 +136,8 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   # worker with a real `started_at`.
   test "a degraded entry with nil started_at does not crash the page", %{conn: conn, ws: ws} do
     {:ok, task} = Ash.create(Issue, %{title: "normal-worker", workspace_id: ws.id})
-    {:ok, _normal_pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+    {:ok, normal_pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+    on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, normal_pid) end)
 
     orphan_task_id = "gte-orphan-#{System.unique_integer([:positive])}"
 
@@ -148,13 +149,15 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
         registry_key: "unmatched-registry-key-#{System.unique_integer([:positive])}"
       )
 
+    # bd-5scl0c: `:sys.suspend/2` a worker so `list_children/0` genuinely hits
+    # the degrade path, then hand teardown to `ProcessTeardown.stop_child/3`
+    # rather than a bare `:sys.resume/2` — it quiesces before terminating, so
+    # a suspended worker still holding the shared sandbox connection can't be
+    # killed mid-checkout and take the connection down with it.
     :sys.suspend(wedged_pid)
+    on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, wedged_pid) end)
 
-    try do
-      {:ok, _view, html} = live(conn, ~p"/workers")
-      assert html =~ task.id
-    after
-      :sys.resume(wedged_pid)
-    end
+    {:ok, _view, html} = live(conn, ~p"/workers")
+    assert html =~ task.id
   end
 end

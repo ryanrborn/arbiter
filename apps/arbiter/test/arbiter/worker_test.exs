@@ -447,7 +447,8 @@ defmodule Arbiter.WorkerTest do
         start_worker(
           task_id: task_id,
           workspace_id: "ws-probe",
-          registry_key: task_id <> ":fixpass"
+          registry_key: task_id <> ":fixpass",
+          meta: %{role: :fix_pass}
         )
 
       :sys.suspend(pid)
@@ -458,6 +459,11 @@ defmodule Arbiter.WorkerTest do
         assert entry.task_id == task_id
         assert entry.workspace_id == "ws-probe"
         assert entry.status == :unknown
+        # bd-45tkhq round 3 (self-review after rebasing onto bd-aw2cyt/#1969):
+        # Arbiter.Worker.Phase.of/2 classifies a subordinate by its top-level
+        # `:role`; without it a degraded fix-pass entry falls through to
+        # author_phase/2 and is misread as the task's own primary worker.
+        assert entry.role == :fix_pass
       after
         :sys.resume(pid)
       end
