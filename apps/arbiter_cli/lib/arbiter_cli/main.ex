@@ -90,6 +90,10 @@ defmodule ArbiterCli.Main do
 
       arb quota           [--workspace <id|name>] [--json]
 
+      arb preflip-gate    [--json]
+                                  §6.3's coverage-shadow rollout gate: may
+                                  `merge.coverage_enabled` be flipped?
+
       arb breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
       arb breaker reset   <signature> | --all [--kind <k>] [--json]
 
@@ -254,6 +258,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("queue", args), do: ArbiterCli.Cmd.Queue.run(args)
   defp dispatch_known("scheduler", args), do: ArbiterCli.Cmd.Scheduler.run(args)
   defp dispatch_known("quota", args), do: ArbiterCli.Cmd.Quota.run(args)
+  defp dispatch_known("preflip-gate", args), do: ArbiterCli.Cmd.PreflipGate.run(args)
   defp dispatch_known("breaker", args), do: ArbiterCli.Cmd.Breaker.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)

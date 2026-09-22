@@ -159,6 +159,7 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
       assert gate.merges == 19
       refute gate.pass?
       assert gate.blocking == %{}
+      assert gate.reason =~ "19"
     end
 
     test "the post-approval fix_pass class is deferred to P7, not blocking" do
@@ -177,6 +178,30 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
 
       assert [%{head: head}] = gate.deferred_observations
       assert head == sha("fixpass")
+      assert gate.pass? and gate.reason =~ "pass"
+    end
+
+    test "deferred and blocking observations carry occurred_at, so an operator can see the time distribution" do
+      # bd-cy2mmu: the gate itself still reads the whole topic (no fix-boundary
+      # filter — see the moduledoc), so the surface has to make the time
+      # distribution visible another way: every disagreement observation, not
+      # just its transition count, carries when it happened.
+      for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("ok4-#{i}")})
+
+      seed("disagree", "covered", "uncovered", %{
+        head: sha("fixpass2"),
+        new_reason: "authored_content"
+      })
+
+      seed("disagree", "unknown", "uncovered", %{head: sha("laggy2")})
+
+      gate = CoverageShadow.preflip_gate()
+
+      assert [%{occurred_at: %DateTime{}}] = gate.deferred_observations
+      assert [%{occurred_at: %DateTime{}, head: head}] = gate.blocking_observations
+      assert head == sha("laggy2")
+      refute gate.pass?
+      assert gate.reason =~ "blocking"
     end
 
     test "the W2 grace-window class is NOT deferred — AC3 does not authorise it" do
@@ -245,6 +270,7 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
       assert gate.blocking == %{}
       assert gate.truncated?
       refute gate.pass?
+      assert gate.reason =~ "truncated"
     end
   end
 
