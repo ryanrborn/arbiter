@@ -119,6 +119,63 @@ defmodule Arbiter.MCP.BreakerToolsTest do
     end
   end
 
+  # bd-21bmdh: the auth-shaped dispatch hold's operator surface rides the same
+  # two verbs.
+  describe "auth holds" do
+    setup do
+      {:ok, _} = Arbiter.Agents.AuthHold.reset(:all)
+      Arbiter.Agents.CredentialWatchdog.reset()
+
+      on_exit(fn ->
+        {:ok, _} = Arbiter.Agents.AuthHold.reset(:all)
+        Arbiter.Agents.CredentialWatchdog.reset()
+      end)
+    end
+
+    defp open_claude_hold do
+      reason = %Arbiter.Worker.StopReason{
+        category: :auth_expired,
+        summary: "401",
+        remediation: nil,
+        exit_status: 1,
+        signal: nil
+      }
+
+      :counted = Arbiter.Agents.AuthHold.record_death(Arbiter.Agents.Claude, reason)
+      :opened = Arbiter.Agents.AuthHold.record_death(Arbiter.Agents.Claude, reason)
+    end
+
+    test "breaker_list reports an open auth hold", ctx do
+      assert {:ok, %{auth_holds: []}} = Tools.breaker_list(ctx.coordinator, %{})
+
+      open_claude_hold()
+
+      assert {:ok, %{auth_holds: [hold]}} = Tools.breaker_list(ctx.coordinator, %{})
+      assert hold.provider == "claude"
+      assert hold.open == true
+      assert hold.deaths == 2
+      assert hold.threshold == 2
+      assert {:ok, _, _} = DateTime.from_iso8601(hold.opened_at)
+    end
+
+    test "breaker_reset with `provider` clears the hold and lets dispatch through", ctx do
+      open_claude_hold()
+      assert Arbiter.Agents.AuthHold.open?(Arbiter.Agents.Claude)
+
+      assert {:ok, %{reset: 1, auth_hold: "claude"}} =
+               Tools.breaker_reset(ctx.coordinator, %{"provider" => "claude"})
+
+      refute Arbiter.Agents.AuthHold.open?(Arbiter.Agents.Claude)
+    end
+
+    test "an unknown provider is refused, not silently accepted", ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.breaker_reset(ctx.coordinator, %{"provider" => "clawd"})
+
+      assert message =~ "unknown provider"
+    end
+  end
+
   describe "end-to-end through the catalog dispatch the MCP transport uses" do
     test "breaker_list then breaker_reset, by name, as a coordinator scope", ctx do
       assert {:suppress, info} = trip(ctx.ws)

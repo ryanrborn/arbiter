@@ -1977,7 +1977,9 @@ defmodule Arbiter.MCP.Catalog do
         "List shared circuit-breaker state: which auto-filing / auto-escalating / " <>
           "auto-redispatching signatures have tripped, their trigger counts, bounds and " <>
           "windows — plus the static registry of every gated call site, which is present " <>
-          "even on a freshly-restarted server. Optional `workspace`, `kind`, `open_only`. " <>
+          "even on a freshly-restarted server, and `auth_holds`: each provider whose " <>
+          "dispatch is held after consecutive auth-failed workers. Optional `workspace`, " <>
+          "`kind`, `open_only`. " <>
           "Coordinator only.",
       input_schema: %{
         "type" => "object",
@@ -2002,7 +2004,9 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Close a tripped circuit breaker so the suppressed action can run again. Pass " <>
           "`signature` (from `breaker_list` or the trip escalation) for one breaker, or " <>
-          "`all: true` with an optional `workspace` / `kind` scope. Fix the underlying " <>
+          "`all: true` with an optional `workspace` / `kind` scope. Pass `provider` " <>
+          "(`claude` / `codex` / `gemini`) instead to clear that provider's auth hold — " <>
+          "the dispatch hold N consecutive auth-failed workers open. Fix the underlying " <>
           "condition first: resetting a breaker whose cause is still live just restarts " <>
           "the flood. Coordinator only.",
       input_schema: %{
@@ -2017,7 +2021,13 @@ defmodule Arbiter.MCP.Catalog do
             "description" => "Close every breaker matching `workspace` / `kind`."
           },
           "workspace" => %{"type" => "string", "description" => "Workspace id or name."},
-          "kind" => %{"type" => "string", "description" => "Restrict `all` to one kind."}
+          "kind" => %{"type" => "string", "description" => "Restrict `all` to one kind."},
+          "provider" => %{
+            "type" => "string",
+            "description" =>
+              "Clear this provider's auth hold (`claude`, `codex`, `gemini`) — see " <>
+                "`auth_holds` in `breaker_list`."
+          }
         },
         "additionalProperties" => false
       },

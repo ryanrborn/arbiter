@@ -7,6 +7,14 @@
 //
 // Loaded as a blocking <script> in <head>, deliberately: it must set
 // data-theme before the body renders or the page flashes the wrong theme.
+//
+// bd-d63b1c: the nav rail's pin rides along for the same reason — a pinned
+// rail insets the whole page, so applying it any later than this would lay the
+// page out at the collapsed inset and then shove it sideways on every reload.
+import {applyStoredPin, navRailStorage} from "./nav_rail.mjs";
+
+applyStoredPin(document, navRailStorage(window));
+
 (() => {
   const setTheme = (theme) => {
     if (theme === "system") {

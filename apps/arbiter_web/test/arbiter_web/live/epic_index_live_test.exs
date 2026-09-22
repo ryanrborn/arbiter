@@ -443,7 +443,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
 
       assert has_element?(
                view,
-               ~s(#top-nav a[href="/epics"] [data-role="nav-badge"]),
+               ~s(#nav-rail a[href="/epics"] [data-role="nav-badge"]),
                to_string(before + 2)
              )
     end

@@ -304,6 +304,7 @@ defmodule Arbiter.Worker.DispatchTest do
       prior = Application.get_env(:arbiter, :repo_paths)
       Application.put_env(:arbiter, :repo_paths, %{"test/repo" => "/tmp"})
       on_exit(fn -> CredentialWatchdog.reset() end)
+      on_exit(fn -> {:ok, _} = Arbiter.Agents.AuthHold.reset(:all) end)
 
       on_exit(fn ->
         if prior,
@@ -372,6 +373,9 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.whereis(task.id) == nil
     end
 
+    # bd-21bmdh changed the bound from "the first death" to "N consecutive
+    # deaths" (`Arbiter.Agents.AuthHold`, default N=2): one auth death is now a
+    # retry, the Nth refuses. The wave is still bounded — at N, not 1.
     test "a worker dying with :auth_expired bounds the wave (bd-2jgs2h acceptance 3)",
          %{ws: ws} do
       tmp = Path.join(System.tmp_dir!(), "disp-wave-#{System.unique_integer([:positive])}")
@@ -412,10 +416,23 @@ defmodule Arbiter.Worker.DispatchTest do
       eventually(fn -> Worker.state(pid).status == :failed end)
       assert Worker.state(pid).meta.stop_reason.category == :auth_expired
 
-      # Wait for the (fire-and-forget cast) CredentialWatchdog notification
-      # `Worker.fail_stopped/2` sends before the guard can see it — `:sys.get_state`
-      # does not guarantee this, since system messages can jump the mailbox
-      # ahead of an already-enqueued cast.
+      # One death is a retry: the next dispatch is let through, and dies too.
+      refute Arbiter.Agents.AuthHold.open?(Arbiter.Agents.Claude)
+      {:ok, task_retry} = Ash.create(Issue, %{title: "wave 1b", workspace_id: ws.id})
+
+      assert {:ok, %{worker_pid: pid2}} =
+               Dispatch.dispatch(task_retry.id,
+                 repo: "wave/repo",
+                 start_driver: false,
+                 start_claude: true
+               )
+
+      eventually(fn -> Worker.state(pid2).status == :failed end)
+
+      # The second consecutive death opened the hold, which marked the
+      # watchdog (a cast — wait for it rather than `:sys.get_state`, since
+      # system messages can jump the mailbox ahead of an enqueued cast).
+      assert Arbiter.Agents.AuthHold.open?(Arbiter.Agents.Claude)
       eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Claude) end)
 
       {:ok, task2} = Ash.create(Issue, %{title: "wave 2", workspace_id: ws.id})

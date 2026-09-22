@@ -136,7 +136,11 @@ defmodule Arbiter.Quota.CloudProbe do
 
   Each provider's recovery mirrors the Claude path: a qualifying success
   calls `Arbiter.Agents.CredentialWatchdog.mark_recovered/2` for that
-  provider's adapter, the symmetric counterpart to `mark_expired/3`.
+  provider's adapter, the symmetric counterpart to `mark_expired/3`. It does
+  so after its own failure streak, and also whenever the provider's
+  `Arbiter.Agents.AuthHold` is open (bd-21bmdh) — a passing free check is one
+  of that hold's documented reset paths. Pass `:auth_hold` to target a
+  specific instance (tests).
 
   ## What these free signals cannot catch (bd-1fpjgx)
 
@@ -161,6 +165,7 @@ defmodule Arbiter.Quota.CloudProbe do
   use GenServer
   require Logger
 
+  alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Worker.StopReason
@@ -196,6 +201,7 @@ defmodule Arbiter.Quota.CloudProbe do
       :enabled,
       :oauth_opts,
       :credential_watchdog,
+      :auth_hold,
       :oauth_401_expiry_threshold,
       :codex_401_expiry_threshold,
       :antigravity_auth_expiry_threshold,
@@ -240,6 +246,7 @@ defmodule Arbiter.Quota.CloudProbe do
       refresh_fun: Keyword.get(opts, :refresh_fun) || default_refresh_fun(self()),
       oauth_opts: Keyword.get(opts, :oauth_opts, []),
       credential_watchdog: Keyword.get(opts, :credential_watchdog, CredentialWatchdog),
+      auth_hold: Keyword.get(opts, :auth_hold, AuthHold),
       oauth_401_expiry_threshold:
         cfg(:oauth_401_expiry_threshold, opts, @default_oauth_401_expiry_threshold),
       codex_401_expiry_threshold:
@@ -390,9 +397,7 @@ defmodule Arbiter.Quota.CloudProbe do
 
     cond do
       failed == [] ->
-        if state.oauth_consecutive_401s > 0 do
-          CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, state.credential_watchdog)
-        end
+        note_recovered(state, Arbiter.Agents.Claude, state.oauth_consecutive_401s)
 
         %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
 
@@ -504,6 +509,25 @@ defmodule Arbiter.Quota.CloudProbe do
     CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, reason, state.credential_watchdog)
   end
 
+  # A qualifying success is a recovery signal when this probe's own streak
+  # had started (bd-1pmf9h / bd-1fpjgx), and also whenever the provider's
+  # `AuthHold` is open (bd-21bmdh): a hold opened by N consecutive *worker*
+  # auth deaths marked the watchdog without this probe ever seeing a failure,
+  # so the streak alone would never clear it. `AuthHold.held/2` fails open, so
+  # an unreadable hold never turns every success into a recovery call. Both
+  # casts are idempotent; the direct `recovered/2` also covers a hold whose
+  # watchdog mark was already cleared some other way.
+  defp note_recovered(%State{} = state, adapter, streak) do
+    hold_open? = AuthHold.held(adapter, state.auth_hold) != nil
+
+    if streak > 0 or hold_open? do
+      CredentialWatchdog.mark_recovered(adapter, state.credential_watchdog)
+    end
+
+    if hold_open?, do: AuthHold.recovered(adapter, state.auth_hold)
+    :ok
+  end
+
   # ---- Codex credential-expiry signal (bd-1fpjgx) ------------------------
   #
   # Mirrors `note_oauth_401/3` above, generalised to Codex's usage GET. Only
@@ -527,9 +551,7 @@ defmodule Arbiter.Quota.CloudProbe do
   # "connected but no windows"/"could not be stored"/transport failures are
   # neutral (like a Claude-side rate-limit) and must not reset the streak.
   defp note_codex_result(%State{} = state, %{codex: codex}) when not is_nil(codex) do
-    if state.codex_consecutive_401s > 0 do
-      CredentialWatchdog.mark_recovered(Arbiter.Agents.Codex, state.credential_watchdog)
-    end
+    note_recovered(state, Arbiter.Agents.Codex, state.codex_consecutive_401s)
 
     %{state | codex_consecutive_401s: 0, codex_result_seen_this_cycle: true}
   end
@@ -576,9 +598,7 @@ defmodule Arbiter.Quota.CloudProbe do
 
   # A healthy row carries no message; only that counts as a genuine success.
   defp note_antigravity_result(%State{} = state, %{message: nil}) do
-    if state.antigravity_consecutive_auth_failures > 0 do
-      CredentialWatchdog.mark_recovered(Arbiter.Agents.Gemini, state.credential_watchdog)
-    end
+    note_recovered(state, Arbiter.Agents.Gemini, state.antigravity_consecutive_auth_failures)
 
     %{state | antigravity_consecutive_auth_failures: 0, antigravity_result_seen_this_cycle: true}
   end
