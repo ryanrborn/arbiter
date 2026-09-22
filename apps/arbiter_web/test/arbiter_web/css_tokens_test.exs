@@ -86,6 +86,19 @@ defmodule ArbiterWeb.CssTokensTest do
     assert css =~ "--dur-hover: 150ms"
   end
 
+  # bd-2qqqbp: both halves of the page-inset contract are declared on `:root` at
+  # zero, because the page gives up room on an edge only while something is
+  # actually occupying it. The rail's half ships at zero and stays there until
+  # a rail exists to set it.
+  test "the page-inset contract is declared on both edges, each defaulting to zero", %{css: css} do
+    root_block =
+      Regex.run(~r/\n:root \{(.*?)\n\}/s, css, capture: :all_but_first)
+      |> hd()
+
+    assert root_block =~ "--session-dock-page-inset: 0px"
+    assert root_block =~ "--nav-rail-page-inset: 0px"
+  end
+
   test "Geist and Geist Mono are loaded" do
     assert @css_path
            |> File.read!()

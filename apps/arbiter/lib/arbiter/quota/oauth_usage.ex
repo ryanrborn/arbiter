@@ -37,12 +37,14 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   ## Cadence
 
-  `Arbiter.Quota.CloudProbe` polls this once per cycle for the whole install,
-  authenticating with the credentials-file token (bd-4fbpto; before that,
-  bd-5xuneh had it poll once per distinct workspace OAuth token — see
-  PR #1607 for why that token doesn't work against this endpoint), every
-  `interval_ms` (default 5 min, matching the endpoint's own account-wide
-  budget), and `refresh_and_serialize/2` tops it up on demand when `arb quota`
+  `Arbiter.Quota.CloudProbe` polls this once per cycle for each distinct
+  provider account (P6, `docs/provider-account-design.md` §9), authenticating
+  with that account's own `cli_credentials_file` credential (bd-4fbpto
+  deleted the workspace-token grouping bd-5xuneh had used before that — see
+  PR #1607 for why a workspace's `worker_env` token doesn't work against this
+  endpoint at all), every `interval_ms` (default 5 min, matching the
+  endpoint's own per-account budget), and `refresh_and_serialize/2` tops it up
+  on demand when `arb quota`
   / the `quota_get` MCP tool is invoked. The cadence is deliberately *not*
   faster than 5 min — see `Arbiter.Quota.Gate.staleness_threshold_seconds/1`,
   which buys the gate's margin by trusting a polled row for longer rather than
@@ -99,17 +101,25 @@ defmodule Arbiter.Quota.OAuthUsage do
     * `:plug` — a `Req` plug to inject (tests); otherwise the
       `:arbiter, :oauth_usage_http_stub` app-env flag routes through
       `Req.Test` the same way `Arbiter.GitHub` does.
+    * `:provider_account_id` — when given, the 429 cooldown below is keyed on
+      this account id instead of the token (P6, §5 row 12). The rate limit is
+      per *account*, so a rotated-in second credential on the same account
+      must share the same cooldown window rather than getting its own —
+      `Arbiter.Quota.capture_oauth_usage/2` always passes this once it knows
+      the account. Omitted (or blank), the cooldown falls back to the
+      pre-P6 per-token key.
 
   Returns `{:error, {:backoff, last_status}}` without making a request when
-  this token 429'd within the last 180s — `last_status` is the HTTP status
-  that triggered the cooldown, so a caller can log the actual upstream
-  response behind a client-side skip rather than a bare "rate limited" that
-  looks identical to a fresh 429. Never raises.
+  this token (or account, see `:provider_account_id` above) 429'd within the
+  last 180s — `last_status` is the HTTP status that triggered the cooldown,
+  so a caller can log the actual upstream response behind a client-side skip
+  rather than a bare "rate limited" that looks identical to a fresh 429.
+  Never raises.
   """
   @spec fetch(keyword()) :: {:ok, usage()} | {:error, term()}
   def fetch(opts \\ []) do
     with {:ok, token} <- fetch_token(opts) do
-      key = cooldown_key(token)
+      key = cooldown_key(opts, token)
 
       case cooling_down_status(key) do
         nil -> request(token, key, opts)
@@ -332,7 +342,12 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   # ---- 429 cooldown --------------------------------------------------------
 
-  defp cooldown_key(token), do: {:arbiter_oauth_usage_cooldown, :erlang.phash2(token)}
+  defp cooldown_key(opts, token) do
+    case Keyword.get(opts, :provider_account_id) do
+      id when is_binary(id) and id != "" -> {:arbiter_oauth_usage_cooldown, :account, id}
+      _ -> {:arbiter_oauth_usage_cooldown, :token, :erlang.phash2(token)}
+    end
+  end
 
   # Returns the HTTP status that triggered the still-active cooldown, or
   # `nil` when not cooling down (never started, or lapsed).
@@ -353,7 +368,14 @@ defmodule Arbiter.Quota.OAuthUsage do
   @doc false
   @spec reset_cooldown!(String.t()) :: :ok
   def reset_cooldown!(token) do
-    _ = :persistent_term.erase(cooldown_key(token))
+    _ = :persistent_term.erase(cooldown_key([], token))
+    :ok
+  end
+
+  @doc false
+  @spec reset_account_cooldown!(String.t()) :: :ok
+  def reset_account_cooldown!(account_id) do
+    _ = :persistent_term.erase(cooldown_key([provider_account_id: account_id], nil))
     :ok
   end
 end
