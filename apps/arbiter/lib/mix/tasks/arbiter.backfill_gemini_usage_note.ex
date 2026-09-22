@@ -1,26 +1,21 @@
-defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
-  @shortdoc "Recover zero-token codex usage_events rows from on-disk rollout JSONL"
+defmodule Mix.Tasks.Arbiter.BackfillGeminiUsageNote do
+  @shortdoc "Rewrite the cost_note on historical zero-token gemini usage_events rows"
   @moduledoc """
-  Backfill `usage_events` rows for codex probes whose live capture landed
-  with `tokens_in`/`tokens_out: nil` before bd-96mn8i taught
-  `Arbiter.Usage.Probe` codex's `turn.completed` wire shape (bd-96mn8i round
-  2, finding 1).
+  Rewrite `cost_note` on gemini `usage_events` rows whose `tokens_in` is nil
+  because they predate bd-96mn8i's fix to `Arbiter.Usage.Probe.decoder_for/1`
+  (round 2 finding 1). Unlike codex, there is no on-disk gemini session file
+  to recover tokens from, so this only replaces the note — it never writes
+  token columns.
 
   ## Usage
 
-      mix arbiter.backfill_codex_usage                    # dry-run (default)
-      mix arbiter.backfill_codex_usage --apply             # write the rows
-      mix arbiter.backfill_codex_usage --since 2026-09-14  # rows occurring on/after
-      mix arbiter.backfill_codex_usage --until 2026-09-21  # rows occurring before
-      mix arbiter.backfill_codex_usage --limit 200 --apply # chip away in batches
+      mix arbiter.backfill_gemini_usage_note                    # dry-run (default)
+      mix arbiter.backfill_gemini_usage_note --apply             # write the notes
+      mix arbiter.backfill_gemini_usage_note --since 2026-09-14  # rows occurring on/after
+      mix arbiter.backfill_gemini_usage_note --until 2026-09-21  # rows occurring before
+      mix arbiter.backfill_gemini_usage_note --limit 200 --apply # chip away in batches
 
-  Dry-run is the default and prints exactly what a `--apply` pass would
-  write. The pass only ever touches rows matching `provider == "codex" and
-  is_nil(tokens_in)`, so re-running converges rather than re-writing rows a
-  previous pass already recovered.
-
-  See `Arbiter.Usage.CodexUsageBackfill` for the matching/recovery logic and
-  `Arbiter.Usage.CodexSessionFile` for the on-disk rollout format.
+  See `Arbiter.Usage.GeminiUsageNote` for why no recovery is attempted.
 
   ## It starts the Repo, not the application
 
@@ -33,15 +28,9 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
 
   use Mix.Task
 
-  alias Arbiter.Usage.CodexUsageBackfill
+  alias Arbiter.Usage.GeminiUsageNote
 
-  @switches [
-    apply: :boolean,
-    since: :string,
-    until: :string,
-    limit: :integer,
-    tolerance_ms: :integer
-  ]
+  @switches [apply: :boolean, since: :string, until: :string, limit: :integer]
 
   @impl Mix.Task
   def run(argv) do
@@ -52,7 +41,6 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
     backfill_opts =
       [apply?: apply?]
       |> put_opt(:limit, opts[:limit])
-      |> put_opt(:tolerance_ms, opts[:tolerance_ms])
       |> put_opt(:since, date(opts[:since], "--since"))
       |> put_opt(:until, date(opts[:until], "--until"))
 
@@ -61,7 +49,7 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
     Mix.shell().info(banner(apply?))
 
     backfill_opts
-    |> CodexUsageBackfill.backfill()
+    |> GeminiUsageNote.backfill()
     |> report(apply?)
     |> Mix.shell().info()
   end
@@ -79,19 +67,18 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
     end
   end
 
-  defp banner(true), do: "Backfilling codex usage from on-disk rollout JSONL (writing)…"
-  defp banner(false), do: "Backfilling codex usage — DRY RUN, no writes. Re-run with --apply.\n"
+  defp banner(true), do: "Rewriting gemini usage notes (writing)…"
+
+  defp banner(false),
+    do: "Rewriting gemini usage notes — DRY RUN, no writes. Re-run with --apply.\n"
 
   defp report(r, apply?) do
-    verb = if apply?, do: "backfilled", else: "would backfill"
+    verb = if apply?, do: "noted", else: "would note"
 
     """
 
-    codex rows scanned:  #{r.scanned}
-    #{String.pad_trailing(verb <> ":", 22)}#{r.backfilled + r.would_backfill}
-    no rollout file:      #{r.no_rollout_file}
-    no token_count line:  #{r.no_token_count}
-    unreadable file:      #{r.unreadable}
+    gemini rows scanned:  #{r.scanned}
+    #{String.pad_trailing(verb <> ":", 22)}#{r.noted + r.would_note}
     write failures:        #{r.failed}
     """
   end

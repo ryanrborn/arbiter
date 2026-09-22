@@ -164,6 +164,109 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert event.cost_note =~ "no cost"
   end
 
+  # bd-96mn8i (round 2): a resumed agy conversation observed live carried an
+  # `init` event (so the session had a real, provider-confirmed start) but the
+  # process was stopped before any `result`/`error` terminal event ever
+  # reached the stream — the exact shape of the bug report (worker_stop +
+  # worker_resume on a task, `session_id`/`provider` present on the ledger
+  # row, every token field NULL). Gemini/agy has no on-disk fallback the way
+  # Claude does (`maybe_reconcile_usage_from_disk/3` only reconciles Claude),
+  # so the row's tokens correctly stay nil — but it must say WHY, not look
+  # like an unhandled gap indistinguishable from a genuinely-zero-cost run.
+  test "an agy session stopped before any terminal event still writes an explicitly-unknown row" do
+    task_id = "bd-ledgeragy-noterm-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    init_event =
+      Jason.encode!(%{
+        "event" => "init",
+        "conversation_id" => "89a2b784-6bd5-46e6-a971-2178ca58cdcd"
+      })
+
+    events_path = Path.join(cwd, "agy-noterm-events-#{System.unique_integer([:positive])}.jsonl")
+    # `sleep` keeps the port open (mid-turn) — the child never reaches a
+    # terminal event, mirroring the real run stopping mid tool-call.
+    File.write!(events_path, init_event <> "\n")
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["sh", "-c", "cat #{events_path}; sleep 5"],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok =
+      wait_until(fn ->
+        case Worker.state(pid) do
+          %{meta: %{session_id: "89a2b784-6bd5-46e6-a971-2178ca58cdcd"}} -> true
+          _ -> false
+        end
+      end)
+
+    :ok = GenServer.stop(pid, :normal)
+
+    assert [event] = events_for(task_id)
+    assert event.provider == "gemini"
+    assert event.session_id == "89a2b784-6bd5-46e6-a971-2178ca58cdcd"
+    assert event.tokens_in == nil
+    assert event.tokens_out == nil
+    assert event.cost_usd == nil
+    assert event.cost_note =~ "no usage captured"
+    assert event.cost_note =~ "before any"
+  end
+
+  # bd-96mn8i (round 3 review finding 1): a codex `turn.failed` (or a
+  # Claude/gemini error `result`) IS a terminal stream event — the CLI
+  # reported an outcome, it just reported a failure with no usage attached.
+  # That is a materially different fact from the case above (process killed
+  # mid-turn, no terminal event ever parsed), so it must not share that
+  # note's wording.
+  test "a codex turn.failed still writes a row, noting a terminal event was observed" do
+    task_id = "bd-ledgercodex-failed-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    events =
+      [
+        Jason.encode!(%{"type" => "thread.started", "thread_id" => "thread-failed-1"}),
+        Jason.encode!(%{"type" => "turn.failed", "error" => %{"message" => "sandbox denied"}})
+      ]
+      |> Enum.join("\n")
+
+    events_path =
+      Path.join(cwd, "codex-failed-events-#{System.unique_integer([:positive])}.jsonl")
+
+    File.write!(events_path, events <> "\n")
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", events_path],
+        provider: "codex",
+        model: "gpt-5-codex"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    :ok = GenServer.stop(pid, :normal)
+
+    assert [event] = events_for(task_id)
+    assert event.provider == "codex"
+    assert event.tokens_in == nil
+    assert event.tokens_out == nil
+    assert event.cost_usd == nil
+    assert event.cost_note =~ "no usage captured"
+    assert event.cost_note =~ "terminal event was observed"
+    assert event.cost_note =~ "error"
+  end
+
   # P9 (bd-al9qqe, docs/provider-account-design.md §8): every code path that
   # writes `usage_events.workspace_id` must also write `provider_account_id`.
   test "a task session's ledger row carries the workspace's linked provider_account_id" do

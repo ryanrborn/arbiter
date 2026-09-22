@@ -177,6 +177,10 @@ defmodule ArbiterWeb.WorkerIndexLive do
                     <code class="text-[11px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-secondary)] group-hover:text-[var(--text-link)] transition-colors truncate">
                       {p.task_id}
                     </code>
+                    <.provider_icon
+                      provider={Worker.provider(p.meta)}
+                      class="size-3.5 text-[var(--text-label)] shrink-0"
+                    />
                   </div>
                   <div class="flex items-center gap-2 flex-none">
                     <span

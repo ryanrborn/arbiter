@@ -334,4 +334,30 @@ defmodule Arbiter.WorkerTest do
       end
     end
   end
+
+  describe "provider/1" do
+    test "reads an atom-keyed :provider" do
+      assert Worker.provider(%{provider: :codex}) == "codex"
+    end
+
+    test "reads a string-keyed \"provider\"" do
+      assert Worker.provider(%{"provider" => "gemini"}) == "gemini"
+    end
+
+    test "falls back to routing_config.provider (atom keys)" do
+      assert Worker.provider(%{routing_config: %{provider: :claude}}) == "claude"
+    end
+
+    test "falls back to routing_config[\"provider\"] (string keys)" do
+      assert Worker.provider(%{"routing_config" => %{"provider" => "codex"}}) == "codex"
+    end
+
+    test "returns nil for empty meta" do
+      assert Worker.provider(%{}) == nil
+    end
+
+    test "returns nil for nil meta" do
+      assert Worker.provider(nil) == nil
+    end
+  end
 end
