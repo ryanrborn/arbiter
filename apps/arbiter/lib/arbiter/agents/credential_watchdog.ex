@@ -49,7 +49,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   That makes this module's own periodic probe (below) the *only* live probe
   left anywhere in the fleet, and an entirely optional one: the dispatch
-  guard, `mark_expired/2` (from a dying worker) and `mark_recovered/2` (from
+  guard, `mark_expired/2` (from `AuthHold`, after N dying workers) and `mark_recovered/2` (from
   the usage-poll signal) all keep working off held state with **no probing at
   all**. Setting `:adapters` to `[]` — as already done for `gemini` here,
   cutting it from ~180 probes/day to 26 — is a supported, intentional

@@ -1682,10 +1682,11 @@ defmodule Arbiter.Worker.Dispatch do
   # the cheaper policy is: dispatch, and let a dead credential fail fast. What
   # still has to be bounded is a *wave* of those fast failures against the same
   # dead credential — that is what this guard does, for free, off state
-  # `Arbiter.Worker.fail_stopped/2` already writes via `CredentialWatchdog.mark_expired/2`
-  # when a worker dies with `:auth_expired`. See `Arbiter.Agents.CredentialWatchdog`'s
-  # moduledoc for the full posture, including how (and whether) an expired mark
-  # ever clears without a live probe.
+  # `Arbiter.Worker.fail_stopped/2` already writes: each `:auth_expired` death
+  # feeds `Arbiter.Agents.AuthHold`, which opens (and marks the
+  # CredentialWatchdog) after N consecutive deaths (bd-21bmdh). See both
+  # moduledocs for the full posture, including how an open hold and an expired
+  # mark clear without a live probe.
   #
   # Only runs on the real-agent path: skipped unless `start_claude: true`.
   # Opt out entirely with `preflight: false`.
