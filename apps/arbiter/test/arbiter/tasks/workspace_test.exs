@@ -320,6 +320,35 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  # #1973
+  describe "tracker_child_policy/1" do
+    test "defaults to :context_only when unset" do
+      assert Workspace.tracker_child_policy(%Workspace{config: %{}}) == :context_only
+      assert Workspace.tracker_child_policy(nil) == :context_only
+    end
+
+    test "reads each accepted value as an atom" do
+      for policy <- ~w(context_only inherit_parent mint) do
+        ws = %Workspace{config: %{"tracker" => %{"child_policy" => policy}}}
+        assert Workspace.tracker_child_policy(ws) == String.to_existing_atom(policy)
+      end
+    end
+
+    test "config validation accepts each value and rejects anything else" do
+      for policy <- Workspace.valid_tracker_child_policies() do
+        config = %{"tracker" => %{"type" => "jira", "child_policy" => policy}}
+        assert {:ok, _} = Ash.create(Workspace, %{name: "cp-#{policy}", config: config})
+      end
+
+      config = %{"tracker" => %{"type" => "jira", "child_policy" => "mnit"}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "cp-typo", config: config})
+
+      assert err |> Exception.message() |> String.contains?("tracker.child_policy must be one of")
+    end
+  end
+
   describe "valid_merger_strategies/0" do
     test "includes direct, gitlab, and github" do
       assert Workspace.valid_merger_strategies() == ~w(direct gitlab github)

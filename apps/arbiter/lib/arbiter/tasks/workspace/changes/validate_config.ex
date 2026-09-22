@@ -9,6 +9,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"tracker.type"` is present, it must be one of the values in
       `Arbiter.Tasks.Workspace.valid_tracker_types/0` (`"none"`, `"jira"`,
       `"shortcut"`, `"linear"`, `"github"`, `"gitlab"`).
+    * If `"tracker.child_policy"` is present, it must be one of the values in
+      `Arbiter.Tasks.Workspace.valid_tracker_child_policies/0` (`"context_only"`,
+      `"inherit_parent"`, `"mint"`) — a typo would otherwise read as the
+      `context_only` default without a word (#1973).
     * If `"tracker.config"` is present, it must be a map.
     * If `"merge"` is present, it must be a map.
     * If `"merge.strategy"` is present, it must be one of the values in
@@ -94,6 +98,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           end
       end
     end)
+    |> validate_child_policy(Map.get(tracker, "child_policy"))
     |> then(fn cs ->
       case Map.get(tracker, "config") do
         nil -> cs
@@ -105,6 +110,22 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_tracker(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "tracker must be a map")
+  end
+
+  defp validate_child_policy(changeset, nil), do: changeset
+
+  defp validate_child_policy(changeset, policy) do
+    valid = Arbiter.Tasks.Workspace.valid_tracker_child_policies()
+
+    if policy in valid do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "tracker.child_policy must be one of #{Enum.join(valid, ", ")}; got: #{inspect(policy)}"
+      )
+    end
   end
 
   defp validate_merge(changeset, nil), do: changeset

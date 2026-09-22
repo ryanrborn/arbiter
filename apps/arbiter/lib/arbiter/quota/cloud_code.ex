@@ -162,7 +162,8 @@ defmodule Arbiter.Quota.CloudCode do
           plan: String.t(),
           models: [model_quota()],
           message: String.t() | nil,
-          captured_at: String.t()
+          captured_at: String.t(),
+          auth_expired: boolean()
         }
 
   # ---- Gemini CLI --------------------------------------------------------
@@ -195,7 +196,13 @@ defmodule Arbiter.Quota.CloudCode do
           snapshot("gemini-cli", plan, gemini_models(body), nil)
 
         {:ok, %Req.Response{status: 401}} ->
-          snapshot("gemini-cli", plan, [], "Gemini CLI quota auth expired; reconnect the CLI.")
+          snapshot(
+            "gemini-cli",
+            plan,
+            [],
+            "Gemini CLI quota auth expired; reconnect the CLI.",
+            true
+          )
 
         {:ok, %Req.Response{status: status}} ->
           snapshot("gemini-cli", plan, [], "Gemini CLI quota error (#{status}).")
@@ -268,7 +275,8 @@ defmodule Arbiter.Quota.CloudCode do
           "antigravity",
           "Unknown",
           [],
-          "Antigravity CLI (agy) is not authenticated (exit #{status}); run `agy` to sign in."
+          "Antigravity CLI (agy) is not authenticated (exit #{status}); run `agy` to sign in.",
+          true
         )
 
       {:error, :malformed} ->
@@ -544,13 +552,14 @@ defmodule Arbiter.Quota.CloudCode do
     if is_binary(display_name), do: Map.put(base, :display_name, display_name), else: base
   end
 
-  defp snapshot(provider, plan, models, message) do
+  defp snapshot(provider, plan, models, message, auth_expired \\ false) do
     %{
       provider: provider,
       plan: plan,
       models: models,
       message: message,
-      captured_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      auth_expired: auth_expired
     }
   end
 

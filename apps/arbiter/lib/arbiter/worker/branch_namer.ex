@@ -17,9 +17,13 @@ defmodule Arbiter.Worker.BranchNamer do
       :epic                -> "epic"
       :chore, :decision    -> "chore"
 
-  The ref segment uses `issue.tracker_ref` when non-empty (e.g. `"AX-17585"`),
-  otherwise falls back to `issue.id` (e.g. `"gte-010"`). This makes `derive/1`
-  total: every well-formed Issue yields a branch name.
+  The ref segment uses `issue.tracker_ref` when non-empty (e.g. `"AX-17585"`).
+  Failing that, a context-only task (#1973 — e.g. a child filed under a tracked
+  story) uses `tracker_context_ref` followed by its own id
+  (`"VR-19083-lt-59tbre"`): the key links the branch to the ticket, the id keeps
+  sibling slices from sharing a branch and worktree. Otherwise it falls back to
+  `issue.id` (e.g. `"gte-010"`). This makes `derive/1` total: every well-formed
+  Issue yields a branch name.
 
   The slug is derived from `issue.title`:
 
@@ -78,6 +82,11 @@ defmodule Arbiter.Worker.BranchNamer do
   # ---- ref ----
 
   defp ref_for(%Issue{tracker_ref: ref}) when is_binary(ref) and ref != "", do: ref
+
+  # #1973: siblings share their parent's context ref, so the id keeps them apart.
+  defp ref_for(%Issue{tracker_context_ref: ref, id: id})
+       when is_binary(ref) and ref != "" and is_binary(id) and id != "",
+       do: "#{ref}-#{id}"
 
   defp ref_for(%Issue{id: id}) when is_binary(id) and id != "", do: id
 

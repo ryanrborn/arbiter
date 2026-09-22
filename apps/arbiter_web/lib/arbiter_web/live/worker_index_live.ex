@@ -62,6 +62,9 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
     all =
       list_children()
+      # bd-aw2cyt: a row's phase depends on the task's other live rounds, so
+      # stamp it over the whole list before filtering or paging.
+      |> Arbiter.Worker.Phase.annotate()
       |> Enum.map(fn p ->
         Map.put(p, :workspace_name, workspace_name(workspaces_by_id, p.workspace_id))
       end)
@@ -188,6 +191,22 @@ defmodule ArbiterWeb.WorkerIndexLive do
                       title="Elapsed"
                     >
                       {humanize_seconds(runtime_seconds(p.started_at, @now))}
+                    </span>
+                    <%!-- bd-aw2cyt: the status badge is the record's state; the
+                    phase chip beside it is what is actually happening, and it
+                    dims when no agent is live for this row. --%>
+                    <span
+                      :if={p[:phase]}
+                      data-phase={p[:phase]}
+                      data-agent-live={to_string(p[:agent_live])}
+                      class={[
+                        "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)]",
+                        "font-[family-name:var(--font-mono)] border border-solid",
+                        "border-[var(--border-strong)] text-[var(--text-label)]",
+                        p[:agent_live] != true && "opacity-60"
+                      ]}
+                    >
+                      {Arbiter.Worker.Phase.label(p[:phase])}
                     </span>
                     <span class={[
                       "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",

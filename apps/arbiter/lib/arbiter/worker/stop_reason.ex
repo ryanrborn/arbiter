@@ -389,7 +389,30 @@ defmodule Arbiter.Worker.StopReason do
     signal = signal_for(exit_status)
 
     cond do
-      # bd-6nr53z: checked FIRST, ahead of every provider-error signature. The
+      # bd-8praoz: a signal-terminated run is checked FIRST, ahead of every
+      # output signature (including the auth/quota/credit/rate-limit/gateway
+      # ones below). A SIGTERM/SIGKILL is an external kill — the unit's
+      # cgroup (`KillMode=control-group`) kills every live worker CLI on a
+      # server restart — and says nothing about *why* the CLI itself stopped.
+      # If the worker's own transcript happens to contain auth-shaped
+      # vocabulary (e.g. it was working on credential/resume code, or grepped
+      # a fixture full of "401"/"invalid"/"expired"), the previous ordering
+      # let that incidental text outrank the exit status and mislabel an
+      # external kill as `:auth_expired`, which then paged CredentialWatchdog
+      # with a false "credentials expired" alert. The exit status/signal is
+      # authoritative for a killed run; there is no CLI failure to refine.
+      is_integer(signal) ->
+        %__MODULE__{
+          category: :killed,
+          summary: "agent subprocess was killed by signal #{signal}",
+          remediation:
+            "External kill, OOM, or host restart. Check dmesg/host health, then re-dispatch.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # bd-6nr53z: checked FIRST among the output signatures, ahead of every
+      # other provider-error signature. The
       # autocompact-thrash message is the CLI's own deterministic loop
       # detector and the run's genuine terminal signal — it must win even
       # when the same tail window also contains incidental "rate-limit" /
@@ -509,16 +532,6 @@ defmodule Arbiter.Worker.StopReason do
 
       is_nil(exit_status) ->
         stalled(output_lines)
-
-      is_integer(signal) ->
-        %__MODULE__{
-          category: :killed,
-          summary: "agent subprocess was killed by signal #{signal}",
-          remediation:
-            "External kill, OOM, or host restart. Check dmesg/host health, then re-dispatch.",
-          exit_status: exit_status,
-          signal: signal
-        }
 
       exit_status == 7 and blank_output?(output_lines) ->
         %__MODULE__{

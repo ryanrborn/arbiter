@@ -180,6 +180,76 @@ defmodule Arbiter.Board.SnapshotLoadTest do
     end
   end
 
+  describe "slot_basis is read from config at the impure boundary (bd-aw2cyt)" do
+    setup do
+      prior = Application.fetch_env(:arbiter, :conductor_slot_basis)
+
+      on_exit(fn ->
+        case prior do
+          {:ok, v} -> Application.put_env(:arbiter, :conductor_slot_basis, v)
+          :error -> Application.delete_env(:arbiter, :conductor_slot_basis)
+        end
+      end)
+
+      :ok
+    end
+
+    test "unset counts live agents, so a record with no agent holds no slot", %{ws: ws} do
+      Application.delete_env(:arbiter, :conductor_slot_basis)
+
+      board =
+        Snapshot.load(workspace_id: ws.id, issues: [], workers: [stale_author(ws)], deps: [])
+
+      assert board.agents_live == 0
+    end
+
+    test ":issues restores record-based counting on the live board", %{ws: ws} do
+      # The operator's escape hatch has to work through `load/1` — the board,
+      # the header and dispatch all come through here, and none of them passes
+      # a `:slot_basis` of its own.
+      Application.put_env(:arbiter, :conductor_slot_basis, :issues)
+
+      board =
+        Snapshot.load(workspace_id: ws.id, issues: [], workers: [stale_author(ws)], deps: [])
+
+      assert board.agents_live == 1
+    end
+
+    test "an explicit :slot_basis still overrides the config", %{ws: ws} do
+      Application.put_env(:arbiter, :conductor_slot_basis, :issues)
+
+      board =
+        Snapshot.load(
+          workspace_id: ws.id,
+          issues: [],
+          workers: [stale_author(ws)],
+          deps: [],
+          slot_basis: :agents
+        )
+
+      assert board.agents_live == 0
+    end
+  end
+
+  # An author record still in a slot-holding status whose agent has exited:
+  # one slot under the `:issues` rule, none under `:agents`.
+  defp stale_author(ws) do
+    %{
+      task_id: "bd-stale",
+      registry_key: "bd-stale",
+      status: :running,
+      role: nil,
+      workspace_id: ws.id,
+      current_step: :implement,
+      started_at: DateTime.utc_now(),
+      step_started_at: DateTime.utc_now(),
+      mr_ref: nil,
+      merger_url: nil,
+      agent_live: false,
+      meta: %{}
+    }
+  end
+
   defp spend!(task_id, cost, ws) do
     {:ok, ev} =
       Ash.create(Arbiter.Usage.Event, %{

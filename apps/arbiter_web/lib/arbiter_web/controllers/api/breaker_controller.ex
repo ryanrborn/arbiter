@@ -8,7 +8,9 @@ defmodule ArbiterWeb.Api.BreakerController do
     * `GET  /api/breakers` — live breaker state plus the static registry of
       gated call sites (`?workspace=`, `?kind=`, `?open_only=true`)
     * `POST /api/breakers/reset` — close one breaker by `signature`, or every
-      breaker matching `workspace` / `kind` when `all` is set
+      breaker matching `workspace` / `kind` when `all` is set, or clear one
+      provider's auth-shaped dispatch hold with `provider` (bd-21bmdh; the
+      listing reports those under `auth_holds`)
 
   The registry is returned unconditionally so a freshly-restarted server still
   answers "what is gated?" before any breaker has fired.
@@ -16,6 +18,7 @@ defmodule ArbiterWeb.Api.BreakerController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Agents.AuthHold
   alias Arbiter.CircuitBreaker
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -34,12 +37,24 @@ defmodule ArbiterWeb.Api.BreakerController do
       json(conn, %{
         breakers: Enum.map(breakers, &serialize/1),
         open_count: Enum.count(breakers, & &1.open?),
-        call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1)
+        call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1),
+        auth_holds: Enum.map(AuthHold.list(), &AuthHold.serialize/1)
       })
     end
   end
 
   @doc "Close one breaker by signature, or a whole scope with `all`."
+  def reset(conn, %{"provider" => name}) do
+    case AuthHold.resolve_provider(name) do
+      {:ok, adapter} ->
+        {:ok, cleared} = AuthHold.reset(adapter)
+        json(conn, %{reset: length(cleared), auth_hold: name})
+
+      :error ->
+        {:error, {:invalid_request, "unknown provider #{inspect(name)}"}}
+    end
+  end
+
   def reset(conn, params) do
     case blank_to_nil(params["signature"]) do
       nil ->

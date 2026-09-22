@@ -335,7 +335,9 @@ defmodule ArbiterWeb.Api.WorkerController do
       pid ->
         case Worker.state(pid) do
           %{} = snap ->
-            render(conn, :show, snapshot: Map.put(snap, :pid, pid))
+            # bd-aw2cyt: the task's other live rounds decide this row's phase.
+            snap = Map.put(snap, :pid, pid)
+            render(conn, :show, snapshot: Map.put(snap, :phase, worker_phase(snap)))
 
           _ ->
             show_historical(conn, task_id)
@@ -344,6 +346,16 @@ defmodule ArbiterWeb.Api.WorkerController do
   end
 
   def show(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
+
+  # Best-effort sibling read: an unreadable supervisor just means the phase is
+  # derived from this row alone.
+  defp worker_phase(snap) do
+    Arbiter.Worker.Phase.of(snap, Worker.list_children())
+  rescue
+    _ -> Arbiter.Worker.Phase.of(snap, [])
+  catch
+    :exit, _ -> Arbiter.Worker.Phase.of(snap, [])
+  end
 
   # No live worker for this task — fall back to the most recent durable
   # `Run` row so a finished/exited run is still inspectable. 404 only when no

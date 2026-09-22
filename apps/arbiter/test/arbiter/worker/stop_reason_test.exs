@@ -568,6 +568,40 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — a signal-terminated run outranks any output signature (bd-8praoz)" do
+    # A worker killed by the unit's cgroup (KillMode=control-group) on a
+    # server restart surfaces as SIGTERM (exit 143). If the worker's own
+    # transcript happened to contain auth-shaped vocabulary (e.g. it was
+    # working on credential/resume code), the exit-status/signal is still
+    # authoritative: an external kill is not a CLI auth failure.
+    test "SIGTERM with an auth-signature-laden transcript is :killed, not :auth_expired" do
+      reason =
+        StopReason.classify(143, [
+          "investigating a 401 error and invalid API key handling",
+          "credentials expired in the fixture, session token invalid"
+        ])
+
+      assert reason.category == :killed
+      assert reason.signal == 15
+    end
+
+    test "SIGKILL with a quota-signature-laden transcript is :killed, not :quota_exhausted" do
+      reason =
+        StopReason.classify(137, [
+          "Claude AI usage limit reached|1735689600"
+        ])
+
+      assert reason.category == :killed
+      assert reason.signal == 9
+    end
+
+    test "a non-signal auth failure still classifies as :auth_expired (unaffected by the fix)" do
+      reason = StopReason.classify(1, ["API Error: 401 Invalid authentication credentials"])
+      assert reason.category == :auth_expired
+      assert reason.signal == nil
+    end
+  end
+
   describe "classify/2 — spawn_exec_failed (bd-11abk2, zero-output crashes)" do
     test "exit 7 with zero output is classified as the E2BIG/MAX_ARG_STRLEN case" do
       reason = StopReason.classify(7, [])

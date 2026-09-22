@@ -67,7 +67,7 @@ defmodule Arbiter.Quota.Codex do
           unlimited: false
         }
 
-  @type result :: %{codex: map() | nil, message: String.t() | nil}
+  @type result :: %{codex: map() | nil, message: String.t() | nil, auth_expired: boolean()}
 
   # ---- fetch -------------------------------------------------------------
 
@@ -79,16 +79,25 @@ defmodule Arbiter.Quota.Codex do
   `docs/provider-account-design.md` §6), resolved here so the probe's call
   site is unchanged; two workspaces on one Codex plan write the same row.
 
-  Never raises. Returns `%{codex: map() | nil, message: String.t() | nil}`:
+  Never raises. Returns `%{codex: map() | nil, message: String.t() | nil,
+  auth_expired: boolean()}`:
 
     * creds absent → `%{codex: nil, message: "Codex CLI not authenticated…"}`,
       no HTTP call.
-    * non-200 (e.g. expired-token `401`) → `%{codex: nil, message: "Codex
-      connected. Usage API temporarily unavailable (401)."}`, no snapshot
-      written.
-    * `200` with no window data → `%{codex: nil, message: …}`.
-    * `200` with windows → `%{codex: serialized, message: nil}` and a fresh
-      `CodexQuota` row.
+    * expired-token `401` → `%{codex: nil, message: "Codex connected. Usage
+      API temporarily unavailable (401).", auth_expired: true}`, no snapshot
+      written. `auth_expired` is the free credential-expiry signal
+      `Arbiter.Quota.CloudProbe` feeds to `Arbiter.Agents.CredentialWatchdog`
+      after N consecutive 401s (bd-1fpjgx) — a dedicated boolean rather than
+      something parsed back out of the message text, since any other non-200
+      status produces the same message shape with a different number spliced
+      in.
+    * other non-200 → `%{codex: nil, message: …, auth_expired: false}`, no
+      snapshot written.
+    * `200` with no window data → `%{codex: nil, message: …, auth_expired:
+      false}`.
+    * `200` with windows → `%{codex: serialized, message: nil, auth_expired:
+      false}` and a fresh `CodexQuota` row.
 
   Options:
 
@@ -103,12 +112,16 @@ defmodule Arbiter.Quota.Codex do
         fetch_with_credentials(workspace_id, creds, opts)
 
       {:error, _reason} ->
-        %{codex: nil, message: "Codex CLI not authenticated for this workspace"}
+        %{
+          codex: nil,
+          message: "Codex CLI not authenticated for this workspace",
+          auth_expired: false
+        }
     end
   rescue
     e ->
       Logger.debug("Arbiter.Quota.Codex.fetch raised: #{Exception.message(e)}")
-      %{codex: nil, message: "Codex quota unavailable"}
+      %{codex: nil, message: "Codex quota unavailable", auth_expired: false}
   end
 
   defp fetch_with_credentials(workspace_id, creds, opts) do
@@ -116,15 +129,23 @@ defmodule Arbiter.Quota.Codex do
       {:ok, 200, body} ->
         handle_ok_body(workspace_id, body)
 
+      {:ok, 401, _body} ->
+        %{
+          codex: nil,
+          message: "Codex connected. Usage API temporarily unavailable (401).",
+          auth_expired: true
+        }
+
       {:ok, status, _body} ->
         %{
           codex: nil,
-          message: "Codex connected. Usage API temporarily unavailable (#{status})."
+          message: "Codex connected. Usage API temporarily unavailable (#{status}).",
+          auth_expired: false
         }
 
       {:error, reason} ->
         Logger.debug("Arbiter.Quota.Codex: usage request failed: #{inspect(reason)}")
-        %{codex: nil, message: "Codex connected. Usage API unreachable."}
+        %{codex: nil, message: "Codex connected. Usage API unreachable.", auth_expired: false}
     end
   end
 
@@ -132,12 +153,19 @@ defmodule Arbiter.Quota.Codex do
     case normalize(body) do
       {:ok, attrs} ->
         case upsert(workspace_id, attrs) do
-          {:ok, row} -> %{codex: serialize(row), message: nil}
-          {:error, _} -> %{codex: nil, message: "Codex quota could not be stored"}
+          {:ok, row} ->
+            %{codex: serialize(row), message: nil, auth_expired: false}
+
+          {:error, _} ->
+            %{codex: nil, message: "Codex quota could not be stored", auth_expired: false}
         end
 
       :noop ->
-        %{codex: nil, message: "Codex connected. Usage API returned no rate-limit windows."}
+        %{
+          codex: nil,
+          message: "Codex connected. Usage API returned no rate-limit windows.",
+          auth_expired: false
+        }
     end
   end
 

@@ -151,7 +151,10 @@ defmodule Arbiter.MCP.Tools.Task do
   the new task upstream.
 
   An optional `parent_id` attaches the new task as a `parent_of` child of an
-  existing task in the same workspace, in one call.
+  existing task in the same workspace, in one call. It is also handed to
+  `Issue.create`, so a child of a tracker-linked parent defaults from the
+  parent's ticket per `tracker.child_policy` instead of minting its own (#1973);
+  a refine session's children are always context-only.
 
   For a `:refine` scope (bd-3uy2hn) the parent is not optional: it defaults to the
   bound issue and must be the bound issue or one of its descendants, so a refine
@@ -170,7 +173,11 @@ defmodule Arbiter.MCP.Tools.Task do
          # Gate *before* title/workspace_id are forced on: those two are set by
          # the tool, not by the caller, and a refine session is allowed both.
          {:ok, attrs} <- refine_field_gate(scope, attrs) do
-      attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
+      attrs =
+        attrs
+        |> Map.put("title", title)
+        |> Map.put("workspace_id", ws_id)
+        |> put_tracker_parent(scope, parent_id)
 
       case Ash.create(Issue, attrs) do
         {:ok, issue} ->
@@ -185,6 +192,20 @@ defmodule Arbiter.MCP.Tools.Task do
       end
     end
   end
+
+  # #1973: tell `Issue.create` who the parent is, so a child of a tracker-linked
+  # parent defaults from the parent's linkage (per `tracker.child_policy`) rather
+  # than minting its own ticket. A refine session is by definition decomposing an
+  # already-tracked issue, so its children are context-only whatever the policy.
+  defp put_tracker_parent(attrs, _scope, nil), do: attrs
+
+  defp put_tracker_parent(attrs, %Scope{tier: :refine}, parent_id) do
+    attrs
+    |> Map.put("parent_id", parent_id)
+    |> Map.put("tracker_child_policy", :context_only)
+  end
+
+  defp put_tracker_parent(attrs, %Scope{}, parent_id), do: Map.put(attrs, "parent_id", parent_id)
 
   # Resolve and authorize the `parent_of` parent for a create. `{:ok, nil}` means
   # "file it unparented", which only a non-refine scope can ask for.

@@ -9,6 +9,44 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
   end
 
   describe "POST /api/issues" do
+    # #1973: `arb create --parent` sends the parent along, so a child of a
+    # tracker-linked parent stays local with the parent's ticket as context
+    # instead of minting its own upstream ticket.
+    test "parent_id naming a tracker-linked parent defaults the child to context-only", %{
+      conn: conn
+    } do
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn _ -> flunk("must not call Jira") end)
+
+      {:ok, jira_ws} =
+        Ash.create(Workspace, %{
+          name: "api-jira-ws",
+          prefix: "apj",
+          config: %{"tracker" => %{"type" => "jira"}}
+        })
+
+      {:ok, parent} =
+        Ash.create(Issue, %{
+          title: "tracked story",
+          workspace_id: jira_ws.id,
+          tracker_type: :jira,
+          tracker_ref: "VR-19083"
+        })
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "a slice",
+          workspace_id: jira_ws.id,
+          parent_id: parent.id
+        })
+
+      assert %{"id" => id, "tracker_type" => "none"} = json_response(conn, 201)
+
+      child = Ash.get!(Issue, id)
+      assert child.tracker_ref == nil
+      assert child.tracker_context_type == :jira
+      assert child.tracker_context_ref == "VR-19083"
+    end
+
     test "creates issue with valid attrs", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/issues", %{

@@ -87,6 +87,34 @@ defmodule Arbiter.Mergers.PRTitleTest do
       assert PRTitle.format(i, ws) == "feat: add something cool"
     end
 
+    # #1973: a context-only child of a tracked story still opens a PR keyed to it.
+    test "falls back to tracker_context_ref when tracker_ref is blank" do
+      i =
+        issue(%{
+          issue_type: :feature,
+          title: "slice one (VR-19083)",
+          tracker_ref: nil,
+          tracker_context_type: :jira,
+          tracker_context_ref: "VR-19083"
+        })
+
+      ws = workspace_with_format("conventional_commit")
+      assert PRTitle.format(i, ws) == "feat: [VR-19083] slice one"
+    end
+
+    test "tracker_ref outranks tracker_context_ref" do
+      i =
+        issue(%{
+          issue_type: :feature,
+          title: "slice one",
+          tracker_ref: "VR-30000",
+          tracker_context_ref: "VR-19083"
+        })
+
+      ws = workspace_with_format("conventional_commit")
+      assert PRTitle.format(i, ws) == "feat: [VR-30000] slice one"
+    end
+
     test "unknown issue_type defaults to chore" do
       i = issue(%{issue_type: :decision, title: "choose a direction", tracker_ref: nil})
       ws = workspace_with_format("conventional_commit")

@@ -184,6 +184,9 @@ defmodule Arbiter.Worker do
       # write failed (best-effort — see record_run_started/1). Subsequent
       # status updates skip the DB write when this is nil.
       :run_id,
+      # bd-aw2cyt: the phase last announced on the event stream, so a
+      # transition that does not change the phase does not narrate a non-event.
+      :last_phase,
       # Map of port -> session config + accumulator. Internal — never exposed
       # via snapshot/1; relevant fields (output_lines, exit_status) are
       # mirrored into meta for snapshot consumers.
@@ -894,6 +897,11 @@ defmodule Arbiter.Worker do
       run_id: nil
     }
 
+    # bd-aw2cyt: seed the announced phase from the boot state, so the stream
+    # carries *transitions* rather than a "worker is idle" event nobody asked
+    # for the instant a worker registers.
+    state = %State{state | last_phase: Arbiter.Worker.Phase.of(snapshot(state))}
+
     state = record_run_started(state)
 
     # P8 (`docs/provider-account-design.md` §4.2): stamp this worker's dispatch
@@ -981,7 +989,11 @@ defmodule Arbiter.Worker do
         {:worker_done, task_id}
       )
 
-      Arbiter.Events.broadcast(ws_id, "worker_done", %{task_id: task_id})
+      Arbiter.Events.broadcast(ws_id, "worker_done", %{
+        task_id: task_id,
+        status: to_string(state.status),
+        phase: to_string(Arbiter.Worker.Phase.of(snapshot(state)))
+      })
     end
 
     # The message queue is the single source of truth for the notification
@@ -999,6 +1011,58 @@ defmodule Arbiter.Worker do
       :ok
   end
 
+  @doc """
+  Announce this worker's phase on the `/events` stream when it changes
+  (bd-aw2cyt).
+
+  The record's `status` outlives its agent, so an operator watching the stream
+  could not tell "still implementing" from "the agent exited twenty minutes
+  ago and we are waiting on CI". `worker_phase` is that distinction, and it
+  carries `status` + `agent_live` alongside so a consumer never has to choose
+  between the old field and the new one.
+
+  Self-derived: a worker can only see its own row, so an author reports
+  `:implementing` / `:waiting_ci_merge` / `:waiting_on_you` / `:handing_off`
+  and a reviewer / implementer / fix pass reports its own round. The board and
+  the worker-list surfaces, which see the whole fleet, fold a live round back
+  into the author's card.
+
+  Returns the state with `:last_phase` updated; emits nothing when the phase
+  is unchanged.
+  """
+  @spec announce_phase(struct()) :: struct()
+  def announce_phase(%State{} = state) do
+    phase = Arbiter.Worker.Phase.of(snapshot(state))
+
+    if phase == state.last_phase do
+      state
+    else
+      broadcast_phase(state, phase)
+      %State{state | last_phase: phase}
+    end
+  end
+
+  defp broadcast_phase(%State{workspace_id: ws_id} = state, phase) when is_binary(ws_id) do
+    Arbiter.Events.broadcast(ws_id, "worker_phase", %{
+      task_id: state.task_id,
+      registry_key: state.registry_key || state.task_id,
+      role: to_string_or_nil(role_from_meta(state.meta)),
+      status: to_string(state.status),
+      phase: to_string(phase),
+      phase_label: Arbiter.Worker.Phase.label(phase),
+      agent_live: session_live?(state)
+    })
+  rescue
+    e ->
+      Logger.debug("Worker.broadcast_phase/2 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp broadcast_phase(_state, _phase), do: :ok
+
+  defp to_string_or_nil(nil), do: nil
+  defp to_string_or_nil(v), do: to_string(v)
+
   defp broadcast_worker_failed(%State{workspace_id: nil}), do: :ok
 
   defp broadcast_worker_failed(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
@@ -1009,7 +1073,12 @@ defmodule Arbiter.Worker do
     # bd-8lq2g7 adds the subordinate passes, which run under the same task_id
     # while the primary is parked at :awaiting_review (see subordinate?/1).
     unless review_only?(meta) or subordinate?(state) do
-      Arbiter.Events.broadcast(ws_id, "worker_failed", %{task_id: task_id})
+      Arbiter.Events.broadcast(ws_id, "worker_failed", %{
+        task_id: task_id,
+        # bd-aw2cyt: additive — the event used to carry an id and nothing else.
+        status: to_string(state.status),
+        phase: to_string(Arbiter.Worker.Phase.of(snapshot(state)))
+      })
     end
 
     :ok
@@ -1830,13 +1899,8 @@ defmodule Arbiter.Worker do
     do: {:reply, do_restart_watchdog(state), state}
 
   # bd-2aslx6: see `agent_session_live?/1`.
-  def handle_call(:agent_session_live?, _from, %State{claude_sessions: sessions} = state) do
-    live? =
-      Enum.any?(sessions, fn {port, session} ->
-        is_nil(Map.get(session, :exited_at)) and is_port(port) and Port.info(port) != nil
-      end)
-
-    {:reply, live?, state}
+  def handle_call(:agent_session_live?, _from, %State{} = state) do
+    {:reply, session_live?(state), state}
   end
 
   def handle_call({:advance, step}, _from, %State{status: status} = state)
@@ -1848,7 +1912,7 @@ defmodule Arbiter.Worker do
         step_started_at: DateTime.utc_now()
     }
 
-    {:reply, :ok, new_state}
+    {:reply, :ok, announce_phase(new_state)}
   end
 
   def handle_call({:advance, step}, _from, %State{status: :running} = state) do
@@ -1869,7 +1933,7 @@ defmodule Arbiter.Worker do
 
     new_state = %State{state | status: :awaiting, meta: meta}
     Arbiter.Messages.CoordinatorNotifier.awaiting_review(snapshot(new_state))
-    {:reply, :ok, new_state}
+    {:reply, :ok, announce_phase(new_state)}
   end
 
   def handle_call({:await, _reason}, _from, %State{status: status} = state) do
@@ -1877,7 +1941,8 @@ defmodule Arbiter.Worker do
   end
 
   def handle_call(:resume, _from, %State{status: :awaiting} = state) do
-    {:reply, :ok, %State{state | status: :running, meta: Map.delete(state.meta, :await_reason)}}
+    new_state = %State{state | status: :running, meta: Map.delete(state.meta, :await_reason)}
+    {:reply, :ok, announce_phase(new_state)}
   end
 
   def handle_call(:resume, _from, %State{status: status} = state) do
@@ -2069,7 +2134,9 @@ defmodule Arbiter.Worker do
       session_config
     )
 
-    {:reply, {:ok, port}, new_state}
+    # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
+    # honest starts and ends at the port.
+    {:reply, {:ok, port}, announce_phase(new_state)}
   rescue
     e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
   end
@@ -2195,7 +2262,9 @@ defmodule Arbiter.Worker do
           Process.send_after(self(), {:__worker_stopped__, port}, exit_grace_ms())
         end
 
-        {:noreply, new_state}
+        # bd-aw2cyt: the main agent just exited. The record is still `:running`
+        # and will stay that way through review, CI and the merge — say so.
+        {:noreply, announce_phase(new_state)}
 
       :error ->
         {:noreply, state}
@@ -2606,6 +2675,7 @@ defmodule Arbiter.Worker do
     meta = if is_nil(result), do: state.meta, else: Map.put(state.meta, :result, result)
     new_state = %State{state | status: :completed, meta: meta}
     record_run_finished(new_state)
+    notify_auth_hold_success(new_state)
     broadcast_done(new_state)
     new_state
   end
@@ -2628,7 +2698,7 @@ defmodule Arbiter.Worker do
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
-    new_state
+    announce_phase(new_state)
   end
 
   defp fail_now(%State{} = state, reason) do
@@ -2640,7 +2710,7 @@ defmodule Arbiter.Worker do
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
-    new_state
+    announce_phase(new_state)
   end
 
   # bd-7a0pi8: a terminal failure must never leave a live agent behind. The
@@ -2725,9 +2795,11 @@ defmodule Arbiter.Worker do
   # fail_now/2's generic "exit code N" notification: the StopReason carries the
   # actionable classification (auth expiry, credit exhaustion, kill, …).
   #
-  # bd-5wchp1: when the stop category is :auth_expired, also notify the
-  # CredentialWatchdog so it records the expiry and blocks future dispatches
-  # immediately, without waiting for the next periodic probe.
+  # bd-21bmdh: when the stop category is :auth_expired, count the death toward
+  # the provider's `Arbiter.Agents.AuthHold` streak. N consecutive deaths open
+  # the hold (which is what marks the CredentialWatchdog and refuses further
+  # dispatches); a single death is a retry — `Arbiter.Worker.AuthDeath` returns
+  # the task to Ready once the Driver sees this worker failed.
   defp fail_stopped(%State{} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
@@ -2744,7 +2816,7 @@ defmodule Arbiter.Worker do
     )
 
     if reason.category == :auth_expired do
-      notify_credential_watchdog(state, reason)
+      notify_auth_hold(state, reason)
     end
 
     meta =
@@ -2761,9 +2833,25 @@ defmodule Arbiter.Worker do
   end
 
   # Resolve the agent adapter from the worker's routing config (set by Dispatch
-  # via Worker.report/3) and notify the CredentialWatchdog. Best-effort —
+  # via Worker.report/3) and record the death on the AuthHold. Best-effort —
   # missing routing info or an unknown provider just skips the notification.
-  defp notify_credential_watchdog(%State{meta: meta}, reason) do
+  defp notify_auth_hold(%State{} = state, reason) do
+    case routed_adapter(state) do
+      nil -> :ok
+      adapter -> Arbiter.Agents.AuthHold.record_death(adapter, reason)
+    end
+  end
+
+  # bd-21bmdh: a completed run proved the provider's credential works, which is
+  # what makes the AuthHold's streak *consecutive* deaths.
+  defp notify_auth_hold_success(%State{} = state) do
+    case routed_adapter(state) do
+      nil -> :ok
+      adapter -> Arbiter.Agents.AuthHold.record_success(adapter)
+    end
+  end
+
+  defp routed_adapter(%State{meta: meta}) do
     provider = meta && (Map.get(meta, :routing_config) || %{}) |> Map.get(:provider)
 
     adapter =
@@ -2775,9 +2863,7 @@ defmodule Arbiter.Worker do
         end
       end
 
-    if is_atom(adapter) and not is_nil(adapter) do
-      Arbiter.Agents.CredentialWatchdog.mark_expired(adapter, reason)
-    end
+    if is_atom(adapter), do: adapter
   end
 
   defp exit_grace_ms do
@@ -3266,7 +3352,10 @@ defmodule Arbiter.Worker do
 
     unless watchdog_ok?, do: escalate_watchdog_failure(new_state)
 
-    new_state
+    # bd-aw2cyt: parked at :awaiting_review with no agent — phase
+    # :waiting_ci_merge. Announced after the Watchdog branch resolves so the
+    # event reflects the state we actually settle in.
+    announce_phase(new_state)
   end
 
   # Broadcast {:worker_done, task_id} to the workspace MergeQueue when the
@@ -4916,12 +5005,16 @@ defmodule Arbiter.Worker do
         _ -> meta
       end
 
-    parked = %State{
-      state
-      | status: :awaiting_review_gate,
-        step_started_at: DateTime.utc_now(),
-        meta: meta
-    }
+    # bd-aw2cyt: the author's agent has already exited by now, so this park is
+    # exactly the `:running` -> `:in_review` transition the `worker_phase`
+    # topic exists to report. Announce it before the gate spawns.
+    parked =
+      announce_phase(%State{
+        state
+        | status: :awaiting_review_gate,
+          step_started_at: DateTime.utc_now(),
+          meta: meta
+      })
 
     case spawn_review_gate(parked, branch) do
       # Stash the monitor ref so a ReviewGate that dies before reporting can't
@@ -5334,7 +5427,7 @@ defmodule Arbiter.Worker do
 
     merged =
       apply_review_gate_verdict(
-        %State{state | status: :awaiting_review_gate, meta: meta},
+        announce_phase(%State{state | status: :awaiting_review_gate, meta: meta}),
         verdict
       )
 
@@ -6001,6 +6094,16 @@ defmodule Arbiter.Worker do
     end
   end
 
+  # The one definition of "this worker owns an agent subprocess right now".
+  # Read by `agent_session_live?/1` (the re-dispatch guard) and stamped onto
+  # every snapshot as `:agent_live` (bd-aw2cyt), so slot accounting and the
+  # phase model cannot disagree with the guard about what is running.
+  defp session_live?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {port, session} ->
+      is_nil(Map.get(session, :exited_at)) and is_port(port) and Port.info(port) != nil
+    end)
+  end
+
   defp snapshot(%State{} = s) do
     %{
       task_id: s.task_id,
@@ -6015,6 +6118,11 @@ defmodule Arbiter.Worker do
       repo: s.repo,
       current_step: s.current_step,
       status: s.status,
+      # bd-aw2cyt: a slot is a live agent, not a live record. Stamped here so
+      # every surface that already reads a snapshot — the board, `arb worker
+      # list`, the MCP tools, the worker lifecycle broadcast — gets the answer
+      # without a second call into this process.
+      agent_live: session_live?(s),
       started_at: s.started_at,
       step_started_at: s.step_started_at,
       mr_ref: s.mr_ref,
@@ -6175,7 +6283,9 @@ defmodule Arbiter.Worker do
       escalate_watchdog_failure(new_state)
     end
 
-    {:ok, mr_ref, new_state}
+    # bd-aw2cyt: same park as adopt_pr_and_spawn_watchdog/5 — announce
+    # :waiting_ci_merge once the Watchdog branch has resolved.
+    {:ok, mr_ref, announce_phase(new_state)}
   end
 
   # bd-129xh4: open the PR for `branch` BEFORE the reviewer runs, WITHOUT

@@ -196,10 +196,10 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3298` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
-| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:4978` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it writes `Run.status = :review_parked` and pages once; without one (a genuine REQUEST_CHANGES only) it is the pre-P9 `Run.status = :failed` via `apps/arbiter/lib/arbiter/worker.ex:5091` (`fail_reason_for`) | `fail_now` | 2 |
-| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:5109` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
-| C4 | `{:awaiting_review_timeout, N}` → `review_not_started` | `apps/arbiter/lib/arbiter/worker.ex:1419` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Terminal non-failure status | 1 |
+| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3407` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
+| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:5154` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it writes `Run.status = :review_parked` and pages once; without one (a genuine REQUEST_CHANGES only) it is the pre-P9 `Run.status = :failed` via `apps/arbiter/lib/arbiter/worker.ex:5194` (`fail_reason_for`) | `fail_now` | 2 |
+| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:5218` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
+| C4 | `{:awaiting_review_timeout, N}` → `review_not_started` | `apps/arbiter/lib/arbiter/worker.ex:1513` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Terminal non-failure status | 1 |
 
 ### 2.5 ReviewPatrol and PRPatrol
 
@@ -756,7 +756,7 @@ disagree" is not enough on its own — the coordinator's journal-grep habits
 break in release mode, where `:debug` is dropped and the journal is rotated.
 So shadow mode keeps a **durable** counter as well.
 `Arbiter.Reviews.CoverageShadow`
-(`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:118` (`observe`)) is
+(`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:180` (`observe`)) is
 called from both merge paths —
 `apps/arbiter/lib/arbiter/worker/watchdog.ex:3077` (`observe_coverage`) and
 `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1356`
@@ -800,19 +800,22 @@ a review that was skipped.
 **Reading the gate (P4).** The SQL above counts every row, including the ones a
 workspace that has *already* flipped produced — which are no longer evidence
 about whether it may flip. `Arbiter.Reviews.CoverageShadow.preflip_gate/0`
-(`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:277` (`preflip_gate`)) is
-the query with that distinction and §4.5's deferral built in:
+(`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:307` (`preflip_gate`)) is
+the query with that distinction and §4.5's deferral built in. It has an
+operator-invocable surface (bd-cy2mmu): `arb preflip-gate` /
+`GET /api/coverage_shadow/preflip_gate`, or straight from `iex`:
 
 ```
 MIX_ENV=prod mix run --no-start -e \
   'IO.inspect(Arbiter.Reviews.CoverageShadow.preflip_gate(), pretty: true)'
 ```
 
-It answers `%{merges:, agreements:, blocking:, deferred:,
-deferred_observations:, truncated?:, pass?:}` where `:merges` counts only
-observations the old guard decided, `:blocking` must be empty, `:truncated?`
-must be false (the read is capped at 10 000 rows, newest `seq` first; a gate
-cannot pass on evidence it knows is partial), and `:deferred` holds the **one**
+It answers `%{merges:, agreements:, blocking:, blocking_observations:,
+deferred:, deferred_observations:, truncated?:, pass?:, reason:}` where
+`:merges` counts only observations the old guard decided, `:blocking` must be
+empty, `:truncated?` must be false (the read is capped at 10 000 rows, newest
+`seq` first; a gate cannot pass on evidence it knows is partial), `:reason`
+names why `:pass?` came out the way it did, and `:deferred` holds the **one**
 documented exception #1736's AC3 authorises (`deferred_reasons/0`), listed
 observation by observation so it can be eyeballed rather than trusted:
 
@@ -836,6 +839,19 @@ inspection:
   coordinator's call on the evidence, not the gate's to make for them. An
   operator who reads the observation and agrees it is this shape can flip on
   that judgement; the gate will not do it silently.
+
+**No fix-boundary filter (bd-cy2mmu).** `preflip_gate/0` reads the whole
+topic — it does not exclude rows older than some "the bug was fixed here"
+timestamp. A gate that silently dropped old rows could hide a live regression
+as easily as evidence of an old one, and the function has no reliable source
+for "when did fix X land" — that's git history, not the shadow log. The
+tradeoff is a real false negative for up to `Arbiter.Events.Retention`'s
+window (7 days by default) after any fix that resolves a blocking class: the
+pre-fix rows keep `:blocking` non-empty until they age out. `preflip_gate/0`
+makes that visible instead of hiding it — every `blocking_observations` /
+`deferred_observations` entry carries `:occurred_at`, so an operator can see
+directly whether the blocking rows all predate a specific fix and choose to
+wait out retention rather than treat the gate's `false` as "still broken".
 
 The live P3 evidence read, immediately before P4 landed: 31 `covered->covered`
 and 1 `uncovered->uncovered` agreements, 5 `covered->uncovered`, 3

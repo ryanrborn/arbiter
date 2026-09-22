@@ -95,26 +95,77 @@ defmodule Arbiter.Quota.CloudProbe do
   `Arbiter.Agents.CredentialWatchdog` instance (tests); defaults to the named
   application singleton.
 
-  ## Credential-expiry signal (bd-1pmf9h)
+  ## Credential-expiry signals (bd-1pmf9h, generalised bd-1fpjgx)
 
-  A `{:http_error, 401}` from `/api/oauth/usage` is a strong expiry signal in
-  its own right, independent of `CredentialWatchdog`'s own periodic CLI probe.
-  `:oauth_401_expiry_threshold` consecutive 401s (via `start_link/1` opts,
-  `config :arbiter, :cloud_quota_probe`, default 2) call
-  `Arbiter.Agents.CredentialWatchdog.mark_expired/3` for
-  `Arbiter.Agents.Claude`, tripping the dispatch guard and the coordinator
-  escalation immediately rather than waiting for the credentials file to be
-  removed outright. Any other failure (`:rate_limited`, `{:backoff, _}`, a
-  transport error, …) is neutral — it does not reset the streak, because a
-  real 429 can legitimately interleave with 401s here (the endpoint's own
-  burst bucket refills at ~1 request/5min, tight against this poll's own
-  5-minute cadence — see `docs/oauth-usage-ratelimit.md`). Only a genuine
-  success resets it.
+  Claude, Codex and Gemini/Antigravity each get a **free** expiry signal off
+  the same poll cycle that already fetches their quota — no extra billed
+  calls, no worker has to die first:
+
+    * **Claude** — a `{:http_error, 401}` from `/api/oauth/usage`.
+      `:oauth_401_expiry_threshold` consecutive 401s (via `start_link/1`
+      opts, `config :arbiter, :cloud_quota_probe`, default 2) call
+      `Arbiter.Agents.CredentialWatchdog.mark_expired/3` for
+      `Arbiter.Agents.Claude`. Any other failure (`:rate_limited`,
+      `{:backoff, _}`, a transport error, …) is neutral — it does not reset
+      the streak, because a real 429 can legitimately interleave with 401s
+      here (the endpoint's own burst bucket refills at ~1 request/5min,
+      tight against this poll's own 5-minute cadence — see
+      `docs/oauth-usage-ratelimit.md`). Only a genuine success resets it.
+    * **Codex** — a `401` from the OpenAI usage GET
+      (`Arbiter.Quota.Codex.fetch/2`'s `auth_expired` flag).
+      `:codex_401_expiry_threshold` consecutive 401s (default: same as
+      Claude's) call `mark_expired/3` for `Arbiter.Agents.Codex`. Every other
+      outcome (no local credentials, a non-401 error, a transport failure) is
+      neutral for the same reason as Claude's case above; only a `200` reply
+      resets the streak.
+    * **Gemini/Antigravity** — an `agy --print "/usage"` row whose `agy`
+      subprocess exited non-zero, the one outcome `Arbiter.Quota.CloudCode`
+      itself distinguishes as "not authenticated" (its `auth_expired` flag;
+      see that module's moduledoc). `:antigravity_auth_expiry_threshold`
+      consecutive occurrences (default: same as Claude's) call
+      `mark_expired/3` for `Arbiter.Agents.Gemini` — the adapter both Gemini
+      CLI and Antigravity run under (`Arbiter.Agents.adapters/0`). `agy`
+      simply not being installed, a subprocess timeout, or unparseable JSON
+      say nothing about the credential, so none of them touch the streak;
+      only a row with model data (`message: nil`) resets it.
+
+  Each streak is host-global (Codex/Gemini/Antigravity credentials aren't
+  per-workspace), so only the *first* result observed in a probe cycle is
+  counted — every workspace's independent fetch would otherwise inflate one
+  bad cycle into several.
+
+  Each provider's recovery mirrors the Claude path: a qualifying success
+  calls `Arbiter.Agents.CredentialWatchdog.mark_recovered/2` for that
+  provider's adapter, the symmetric counterpart to `mark_expired/3`. It does
+  so after its own failure streak, and also whenever the provider's
+  `Arbiter.Agents.AuthHold` is open (bd-21bmdh) — a passing free check is one
+  of that hold's documented reset paths. Pass `:auth_hold` to target a
+  specific instance (tests).
+
+  ## What these free signals cannot catch (bd-1fpjgx)
+
+  All three checks read the *operator's* host-global CLI credentials
+  (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `agy`'s own
+  keyring/ADC), the same ones every workspace's worker inherits by default.
+  They therefore:
+
+    * **Cannot see a bad per-workspace token.** A workspace whose
+      `worker_env` overrides the CLI credential with its own, broken value
+      (the failure bd-bw3466 fixed) still reads as healthy here — the probe
+      never touches that override, only the operator's own copy.
+    * **Do not prove model-level entitlement.** A `200`/exit-`0` response
+      only means the credential authenticates against the *usage* endpoint;
+      it says nothing about whether the account is entitled to the specific
+      model a worker is about to dispatch against.
+    * **Never surface credit exhaustion.** Running out of credits/balance is
+      its own `StopReason` category (`:credit_exhausted`), not an
+      authentication failure, and no branch here maps into it.
   """
 
   use GenServer
   require Logger
 
+  alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Worker.StopReason
@@ -137,6 +188,11 @@ defmodule Arbiter.Quota.CloudProbe do
   # so a single flaky response doesn't trip the fleet-wide dispatch guard.
   @default_oauth_401_expiry_threshold 2
 
+  # Same posture as `@default_oauth_401_expiry_threshold`, generalised to
+  # Codex and Gemini/Antigravity (bd-1fpjgx) — default matches Claude's.
+  @default_codex_401_expiry_threshold 2
+  @default_antigravity_auth_expiry_threshold 2
+
   defmodule State do
     @moduledoc false
     defstruct [
@@ -145,10 +201,17 @@ defmodule Arbiter.Quota.CloudProbe do
       :enabled,
       :oauth_opts,
       :credential_watchdog,
+      :auth_hold,
       :oauth_401_expiry_threshold,
+      :codex_401_expiry_threshold,
+      :antigravity_auth_expiry_threshold,
       probe_count: 0,
       oauth_consecutive_failures: 0,
-      oauth_consecutive_401s: 0
+      oauth_consecutive_401s: 0,
+      codex_consecutive_401s: 0,
+      antigravity_consecutive_auth_failures: 0,
+      codex_result_seen_this_cycle: false,
+      antigravity_result_seen_this_cycle: false
     ]
   end
 
@@ -180,11 +243,20 @@ defmodule Arbiter.Quota.CloudProbe do
     state = %State{
       enabled: cfg(:enabled, opts, true),
       interval_ms: cfg(:interval_ms, opts, @default_interval_ms),
-      refresh_fun: Keyword.get(opts, :refresh_fun) || (&default_refresh/1),
+      refresh_fun: Keyword.get(opts, :refresh_fun) || default_refresh_fun(self()),
       oauth_opts: Keyword.get(opts, :oauth_opts, []),
       credential_watchdog: Keyword.get(opts, :credential_watchdog, CredentialWatchdog),
+      auth_hold: Keyword.get(opts, :auth_hold, AuthHold),
       oauth_401_expiry_threshold:
-        cfg(:oauth_401_expiry_threshold, opts, @default_oauth_401_expiry_threshold)
+        cfg(:oauth_401_expiry_threshold, opts, @default_oauth_401_expiry_threshold),
+      codex_401_expiry_threshold:
+        cfg(:codex_401_expiry_threshold, opts, @default_codex_401_expiry_threshold),
+      antigravity_auth_expiry_threshold:
+        cfg(
+          :antigravity_auth_expiry_threshold,
+          opts,
+          @default_antigravity_auth_expiry_threshold
+        )
     }
 
     if state.enabled, do: schedule(self(), state.interval_ms)
@@ -198,7 +270,9 @@ defmodule Arbiter.Quota.CloudProbe do
        probe_count: state.probe_count,
        enabled: state.enabled,
        oauth_consecutive_failures: state.oauth_consecutive_failures,
-       oauth_consecutive_401s: state.oauth_consecutive_401s
+       oauth_consecutive_401s: state.oauth_consecutive_401s,
+       codex_consecutive_401s: state.codex_consecutive_401s,
+       antigravity_consecutive_auth_failures: state.antigravity_consecutive_auth_failures
      }, state}
   end
 
@@ -222,6 +296,14 @@ defmodule Arbiter.Quota.CloudProbe do
     {:noreply, note_oauth_result(state, workspace_ids, result)}
   end
 
+  def handle_info({:codex_refresh_result, result}, %State{} = state) do
+    {:noreply, note_codex_result(state, result)}
+  end
+
+  def handle_info({:antigravity_refresh_result, result}, %State{} = state) do
+    {:noreply, note_antigravity_result(state, result)}
+  end
+
   def handle_info(_msg, %State{} = state), do: {:noreply, state}
 
   # ---- probe logic -------------------------------------------------------
@@ -237,7 +319,16 @@ defmodule Arbiter.Quota.CloudProbe do
       Enum.each(workspaces, &spawn_refresh(state.refresh_fun, &1.id))
     end
 
-    %{state | probe_count: state.probe_count + 1}
+    # Codex/Gemini/Antigravity credentials are host-global, so every
+    # workspace's independent fetch this cycle reports the same outcome —
+    # only the first result observed per cycle should move the streak (see
+    # the moduledoc's "Credential-expiry signals" section).
+    %{
+      state
+      | probe_count: state.probe_count + 1,
+        codex_result_seen_this_cycle: false,
+        antigravity_result_seen_this_cycle: false
+    }
   end
 
   # `/api/oauth/usage` is account-wide: `Quota.capture_oauth_usage_for_group/2`
@@ -306,9 +397,7 @@ defmodule Arbiter.Quota.CloudProbe do
 
     cond do
       failed == [] ->
-        if state.oauth_consecutive_401s > 0 do
-          CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, state.credential_watchdog)
-        end
+        note_recovered(state, Arbiter.Agents.Claude, state.oauth_consecutive_401s)
 
         %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
 
@@ -420,6 +509,115 @@ defmodule Arbiter.Quota.CloudProbe do
     CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, reason, state.credential_watchdog)
   end
 
+  # A qualifying success is a recovery signal when this probe's own streak
+  # had started (bd-1pmf9h / bd-1fpjgx), and also whenever the provider's
+  # `AuthHold` is open (bd-21bmdh): a hold opened by N consecutive *worker*
+  # auth deaths marked the watchdog without this probe ever seeing a failure,
+  # so the streak alone would never clear it. `AuthHold.held/2` fails open, so
+  # an unreadable hold never turns every success into a recovery call. Both
+  # casts are idempotent; the direct `recovered/2` also covers a hold whose
+  # watchdog mark was already cleared some other way.
+  defp note_recovered(%State{} = state, adapter, streak) do
+    hold_open? = AuthHold.held(adapter, state.auth_hold) != nil
+
+    if streak > 0 or hold_open? do
+      CredentialWatchdog.mark_recovered(adapter, state.credential_watchdog)
+    end
+
+    if hold_open?, do: AuthHold.recovered(adapter, state.auth_hold)
+    :ok
+  end
+
+  # ---- Codex credential-expiry signal (bd-1fpjgx) ------------------------
+  #
+  # Mirrors `note_oauth_401/3` above, generalised to Codex's usage GET. Only
+  # the first result observed this cycle moves the streak (see
+  # `do_probe_cycle/1`) — Codex credentials are host-global, so every
+  # workspace's independent fetch this cycle would otherwise report the same
+  # outcome and double-count it.
+  defp note_codex_result(%State{codex_result_seen_this_cycle: true} = state, _result), do: state
+
+  defp note_codex_result(%State{} = state, %{auth_expired: true}) do
+    count = state.codex_consecutive_401s + 1
+
+    if count >= state.codex_401_expiry_threshold do
+      mark_codex_expired(state, count)
+    end
+
+    %{state | codex_consecutive_401s: count, codex_result_seen_this_cycle: true}
+  end
+
+  # A real window reading is the only outcome treated as a genuine success —
+  # "connected but no windows"/"could not be stored"/transport failures are
+  # neutral (like a Claude-side rate-limit) and must not reset the streak.
+  defp note_codex_result(%State{} = state, %{codex: codex}) when not is_nil(codex) do
+    note_recovered(state, Arbiter.Agents.Codex, state.codex_consecutive_401s)
+
+    %{state | codex_consecutive_401s: 0, codex_result_seen_this_cycle: true}
+  end
+
+  defp note_codex_result(%State{} = state, _neutral),
+    do: %{state | codex_result_seen_this_cycle: true}
+
+  defp mark_codex_expired(%State{} = state, count) do
+    reason = %StopReason{
+      category: :auth_expired,
+      summary: "#{count} consecutive 401s from the Codex usage poll",
+      remediation: "re-authenticate the operator's Codex CLI (`codex login`)",
+      exit_status: nil,
+      signal: nil
+    }
+
+    CredentialWatchdog.mark_expired(Arbiter.Agents.Codex, reason, state.credential_watchdog)
+  end
+
+  # ---- Gemini/Antigravity credential-expiry signal (bd-1fpjgx) -----------
+  #
+  # Mirrors `note_codex_result/2` above, keyed off `CloudCode.antigravity/1`'s
+  # `auth_expired` flag (only set on the "agy exited non-zero" outcome —
+  # `agy` not installed, a subprocess timeout, or unparseable JSON say
+  # nothing about the credential and are left neutral). Gemini CLI and
+  # Antigravity share `Arbiter.Agents.Gemini`, so both this and the CLI probe
+  # target the same adapter.
+  defp note_antigravity_result(%State{antigravity_result_seen_this_cycle: true} = state, _snap),
+    do: state
+
+  defp note_antigravity_result(%State{} = state, %{auth_expired: true}) do
+    count = state.antigravity_consecutive_auth_failures + 1
+
+    if count >= state.antigravity_auth_expiry_threshold do
+      mark_antigravity_expired(state, count)
+    end
+
+    %{
+      state
+      | antigravity_consecutive_auth_failures: count,
+        antigravity_result_seen_this_cycle: true
+    }
+  end
+
+  # A healthy row carries no message; only that counts as a genuine success.
+  defp note_antigravity_result(%State{} = state, %{message: nil}) do
+    note_recovered(state, Arbiter.Agents.Gemini, state.antigravity_consecutive_auth_failures)
+
+    %{state | antigravity_consecutive_auth_failures: 0, antigravity_result_seen_this_cycle: true}
+  end
+
+  defp note_antigravity_result(%State{} = state, _neutral),
+    do: %{state | antigravity_result_seen_this_cycle: true}
+
+  defp mark_antigravity_expired(%State{} = state, count) do
+    reason = %StopReason{
+      category: :auth_expired,
+      summary: "#{count} consecutive auth failures from the Antigravity (agy) usage poll",
+      remediation: "re-authenticate Antigravity — run `agy` once on this host to sign in",
+      exit_status: nil,
+      signal: nil
+    }
+
+    CredentialWatchdog.mark_expired(Arbiter.Agents.Gemini, reason, state.credential_watchdog)
+  end
+
   defp safe_escalate(fun) do
     fun.()
   rescue
@@ -459,16 +657,34 @@ defmodule Arbiter.Quota.CloudProbe do
       Logger.debug("Arbiter.Quota.CloudProbe: refresh for #{workspace_id} exited: #{inspect(r)}")
   end
 
+  # `refresh_fun`'s default is bound to the CloudProbe GenServer's own pid at
+  # `init/1` time (`self()` there *is* this process) so the spawned refresh
+  # Tasks below can report the Codex/Antigravity results back for the
+  # credential-expiry streaks in `note_codex_result/2` /
+  # `note_antigravity_result/2` — mirroring how `spawn_oauth_usage_refresh/2`
+  # reports back for Claude. A caller-supplied `:refresh_fun` (tests) replaces
+  # this wholesale and sends no such messages, which is why those tests never
+  # see `codex_consecutive_401s` / `antigravity_consecutive_auth_failures`
+  # move.
+  defp default_refresh_fun(parent) do
+    fn workspace_id -> default_refresh(workspace_id, parent) end
+  end
+
   # The real per-workspace provider refresh. Each call persists + broadcasts
   # on success and no-ops (no row written) when its credentials aren't
   # present on this host. Anthropic's `/api/oauth/usage` source (per-model
   # weekly + overage + the primary gate columns) is refreshed separately, once
   # per cycle for the whole fleet, by `spawn_oauth_usage_refresh/2` — see that
   # function and bd-4fbpto for why it isn't fanned out per workspace here.
-  defp default_refresh(workspace_id) do
-    Arbiter.Quota.Codex.fetch(workspace_id)
+  defp default_refresh(workspace_id, parent) do
+    codex_result = Arbiter.Quota.Codex.fetch(workspace_id)
+    send(parent, {:codex_refresh_result, codex_result})
+
     Arbiter.Quota.CloudCode.refresh(workspace_id, :gemini)
-    Arbiter.Quota.CloudCode.refresh(workspace_id, :antigravity)
+
+    antigravity_result = Arbiter.Quota.CloudCode.refresh(workspace_id, :antigravity)
+    send(parent, {:antigravity_refresh_result, antigravity_result})
+
     :ok
   end
 
