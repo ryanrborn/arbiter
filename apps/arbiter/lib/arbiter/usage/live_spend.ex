@@ -296,7 +296,9 @@ defmodule Arbiter.Usage.LiveSpend do
   # figure incomplete (a worker we cannot locate, a known session with no file).
   defp plan(task, mine, dir_tasks) do
     {claude, other} = Enum.split_with(mine, & &1.claude?)
-    {located, unlocated} = Enum.split_with(claude, &(&1.dir && match?(%DateTime{}, &1.started_at)))
+
+    {located, unlocated} =
+      Enum.split_with(claude, &(&1.dir && match?(%DateTime{}, &1.started_at)))
 
     {files, missing?} =
       located

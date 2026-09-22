@@ -956,7 +956,9 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> Map.put(:live, live)
   end
 
-  defp refresh_live_spend(%{assigns: %{task: %Issue{} = task, budget: %{live: _} = budget}} = socket) do
+  defp refresh_live_spend(
+         %{assigns: %{task: %Issue{} = task, budget: %{live: _} = budget}} = socket
+       ) do
     live = LiveSpend.for_task(task.id)
     spend = live.total_usd || 0.0
     state = Budget.state(spend, budget.estimate)
@@ -2045,7 +2047,10 @@ defmodule ArbiterWeb.TaskDetailLive do
               title={live_spend_title()}
               class="inline-flex items-center gap-1.5 px-[7px] py-[1px] rounded-[var(--radius-chip)] border border-dashed border-[var(--arb-live-edge)] bg-[var(--arb-live-wash)] text-[var(--arb-live-ink)] tabular-nums"
             >
-              <span class="size-1.5 rounded-full bg-[var(--arb-live)] animate-pulse" aria-hidden="true">
+              <span
+                class="size-1.5 rounded-full bg-[var(--arb-live)] animate-pulse"
+                aria-hidden="true"
+              >
               </span>
               live · {money(@budget.live.settled_usd)} settled + {money(@budget.live.live_usd)} in flight
             </span>

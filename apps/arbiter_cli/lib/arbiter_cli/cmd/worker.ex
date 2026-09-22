@@ -392,7 +392,7 @@ defmodule ArbiterCli.Cmd.Worker do
     else
       [
         if(live?, do: "~#{dollars(cost)}", else: dollars(cost)),
-        live? and is_number(in_flight) and in_flight > 0 &&
+        (live? and is_number(in_flight) and in_flight > 0) &&
           " (incl. ~#{dollars(in_flight)} in flight)",
         row["cost_unpriced"] == true && " + n/a unpriced",
         row["cost_degraded"] == true && " (live read incomplete)"

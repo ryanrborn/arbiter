@@ -207,7 +207,8 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       assert api_show["cost_live"] == true
     end
 
-    test "a torn session file falls back to the settled figure and says so", %{conn: conn} = ctx do
+    test "a torn session file falls back to the settled figure and says so",
+         %{conn: conn} = ctx do
       task = task!(ctx.ws)
       settle!(ctx.ws, task.id, %{cost_usd: 2.0})
       live_worker!(ctx, task.id)

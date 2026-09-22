@@ -336,6 +336,7 @@ defmodule ArbiterWeb.Api.WorkerController do
           %{} = snap ->
             # bd-aw2cyt: the task's other live rounds decide this row's phase.
             snap = Map.put(snap, :pid, pid)
+
             render(conn, :show,
               snapshot: Map.put(snap, :phase, worker_phase(snap)),
               cost: task_cost(task_id)

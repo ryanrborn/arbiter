@@ -322,7 +322,10 @@ defmodule Arbiter.Usage.LiveSpendTest do
          ctx do
       id = task_id()
       settle!(ctx, id, %{cost_usd: 2.0})
-      File.mkdir_p!(Path.join([ctx.config_dir, "projects", ClaudeSessionFile.project_slug(ctx.cwd)]))
+
+      File.mkdir_p!(
+        Path.join([ctx.config_dir, "projects", ClaudeSessionFile.project_slug(ctx.cwd)])
+      )
 
       spend =
         LiveSpend.for_task(id, workers: [worker(ctx, id, %{meta: %{session_id: "sid-missing"}})])

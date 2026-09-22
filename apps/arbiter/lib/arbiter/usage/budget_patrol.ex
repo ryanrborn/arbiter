@@ -145,7 +145,10 @@ defmodule Arbiter.Usage.BudgetPatrol do
       issues ->
         sample = Keyword.get_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
         workers = Keyword.get_lazy(opts, :workers, &list_workers/0)
-        spends = LiveSpend.for_tasks(Enum.map(issues, & &1.id), Keyword.put(opts, :workers, workers))
+
+        spends =
+          LiveSpend.for_tasks(Enum.map(issues, & &1.id), Keyword.put(opts, :workers, workers))
+
         opts = Keyword.put(opts, :sample, sample)
         states = worker_states(workers)
 
