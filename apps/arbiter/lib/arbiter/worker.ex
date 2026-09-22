@@ -266,8 +266,22 @@ defmodule Arbiter.Worker do
   # that is *known* to report nothing (e.g. agy's own no-cost note). Stamp an
   # explicit reason so the row reads as "we looked and found nothing" rather
   # than looking like an unhandled gap.
-  @no_stream_usage_note "no usage captured: the session ended before any " <>
-                          "terminal usage event was observed on its stream"
+  @no_terminal_event_note "no usage captured: the session ended before any " <>
+                             "terminal usage event was observed on its stream"
+
+  # bd-96mn8i (round 3 fix): a terminal event CAN arrive and still carry no
+  # tokens — a codex `turn.failed`, an upstream gemini error `result`, or a
+  # Claude `result` with `is_error: true` and no `usage` object. Each of those
+  # sets `result_status`/`is_error` on the usage map (see
+  # `Arbiter.Agents.Codex.Stream.usage_fields/2`,
+  # `Arbiter.Agents.Gemini.Stream.usage_fields/2`, and
+  # `ClaudeSession.absorb_usage/2`'s `"result"` clause) even though `drop_nil`
+  # strips the absent token fields. Claiming "the session ended before any
+  # terminal usage event was observed" on THOSE rows is false — a terminal
+  # event was observed, it just reported a failure with no usage. Distinguish
+  # the two so the note never lies about which case produced the nil.
+  @terminal_event_no_usage_note "no usage captured: a terminal event was observed on the " <>
+                                   "stream but reported no usage (status: "
 
   # ---- public API ---------------------------------------------------------
 
@@ -1701,8 +1715,28 @@ defmodule Arbiter.Worker do
   # row (tokens present, cost_usd nil) untouched.
   defp maybe_note_missing_usage(usage) do
     case Map.get(usage, :tokens_in) do
-      nil -> maybe_put_cost_note(usage, @no_stream_usage_note)
+      nil -> maybe_put_cost_note(usage, missing_usage_note(usage))
       _ -> usage
+    end
+  end
+
+  # A terminal event was observed if the stream's own error/status clause ran
+  # — `is_error` is explicitly `true`/`false` (never absent-then-dropped, see
+  # each provider's `usage_fields/2` clause above) or `result_status`/
+  # `result_subtype` carries a value. Any of those means the CLI reported an
+  # outcome with no usage attached, which is a materially different fact from
+  # "the port closed and nothing was ever parsed".
+  defp missing_usage_note(usage) do
+    status =
+      Map.get(usage, :result_status) || Map.get(usage, :result_subtype)
+
+    observed_terminal_event? =
+      is_boolean(Map.get(usage, :is_error)) or not is_nil(status)
+
+    if observed_terminal_event? do
+      @terminal_event_no_usage_note <> "#{status || Map.get(usage, :is_error)})"
+    else
+      @no_terminal_event_note
     end
   end
 
