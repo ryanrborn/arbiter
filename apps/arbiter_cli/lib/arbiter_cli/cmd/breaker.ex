@@ -93,19 +93,7 @@ defmodule ArbiterCli.Cmd.Breaker do
 
     case Client.post("/api/breakers/reset", body) do
       {:ok, resp} ->
-        cond do
-          mode == :json ->
-            IO.puts(Jason.encode!(resp))
-
-          resp["auth_hold"] && resp["reset"] == 0 ->
-            IO.puts("No #{resp["auth_hold"]} auth hold was open.")
-
-          resp["auth_hold"] ->
-            IO.puts("Cleared the #{resp["auth_hold"]} auth hold.")
-
-          true ->
-            IO.puts("Closed #{resp["reset"]} circuit breaker(s).")
-        end
+        if mode == :json, do: IO.puts(Jason.encode!(resp)), else: print_reset(resp)
 
       error ->
         die(error)
@@ -148,6 +136,14 @@ defmodule ArbiterCli.Cmd.Breaker do
       )
     end)
   end
+
+  defp print_reset(%{"auth_hold" => provider, "reset" => 0}) when is_binary(provider),
+    do: IO.puts("No #{provider} auth hold was open.")
+
+  defp print_reset(%{"auth_hold" => provider}) when is_binary(provider),
+    do: IO.puts("Cleared the #{provider} auth hold.")
+
+  defp print_reset(resp), do: IO.puts("Closed #{resp["reset"]} circuit breaker(s).")
 
   defp print_auth_holds([]), do: :ok
 

@@ -628,24 +628,27 @@ defmodule Arbiter.Worker.Worktree do
       when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_ref) do
     _ = run_git(["worktree", "prune"], cd: repo_path)
 
-    case run_git(["rev-parse", "--verify", "--quiet", "refs/heads/" <> branch_name],
-           cd: repo_path
-         ) do
-      {:error, _} ->
+    if local_branch?(repo_path, branch_name) do
+      with :ok <- branch_only_base?(repo_path, branch_name, base_ref),
+           {:ok, _} <- run_git(["branch", "-D", branch_name], cd: repo_path) do
         :ok
+      end
+    else
+      :ok
+    end
+  end
 
-      {:ok, _} ->
-        case run_git(["rev-list", "--count", base_ref <> ".." <> branch_name], cd: repo_path) do
-          {:ok, count} ->
-            if String.trim(count) == "0" do
-              with {:ok, _} <- run_git(["branch", "-D", branch_name], cd: repo_path), do: :ok
-            else
-              {:error, :has_commits}
-            end
+  defp local_branch?(repo_path, branch_name) do
+    match?(
+      {:ok, _},
+      run_git(["rev-parse", "--verify", "--quiet", "refs/heads/" <> branch_name], cd: repo_path)
+    )
+  end
 
-          {:error, _} ->
-            {:error, :has_commits}
-        end
+  defp branch_only_base?(repo_path, branch_name, base_ref) do
+    case run_git(["rev-list", "--count", base_ref <> ".." <> branch_name], cd: repo_path) do
+      {:ok, count} -> if String.trim(count) == "0", do: :ok, else: {:error, :has_commits}
+      {:error, _} -> {:error, :has_commits}
     end
   end
 
