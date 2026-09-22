@@ -34,11 +34,20 @@ defmodule Arbiter.Worker.Watchdog do
   forge's own atomic precondition. A refusal is a normal merge failure: the
   lane stays parked and the coordinator is paged.
 
-  The latch is deliberately *suspended* whenever the fleet advances the branch
-  itself (update-branch, CI fix pass, conflict resolution) — see
-  `clear_reviewed_latch/1`. Those pushes land asynchronously, several polls
-  after they are issued, so the suspension has to survive until the head
-  actually moves rather than being a one-shot nil the next poll re-latches.
+  The latch is deliberately *suspended* when the fleet advances the branch with
+  an update-branch — a base merge, which carries no content of its own — see
+  `clear_reviewed_latch/1`. That push lands asynchronously, several polls
+  after it is issued, so the suspension has to survive until the head actually
+  moves rather than being a one-shot nil the next poll re-latches.
+
+  A CI fix pass or a conflict resolution is different: it AUTHORS content after
+  the approval, so since P7 (bd-60r6wp / #1738, design §4.5) it keeps the
+  approved baseline pinned instead (`note_authored_push/1`). Its head is then
+  judged on content: an unchanged net diff merges on a `:mechanical` coverage
+  row, anything else goes back to a review round the ReviewGate scopes to the
+  delta since the covered commit. Before P7 the suspension re-latched onto the
+  fix-pass head, which is how #1702, #1723 and #1725 merged commits no review
+  had seen.
   `Arbiter.Mergers.ReviewedSha` records the rest of the reasoning, including
   why "no baseline" merges unguarded rather than refusing.
 

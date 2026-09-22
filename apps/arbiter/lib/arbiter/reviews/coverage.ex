@@ -31,6 +31,11 @@ defmodule Arbiter.Reviews.Coverage do
   `decide/3`'s answer and the old guard shadows *it*, still logging every
   disagreement. The flag is only turned on for a workspace whose shadow
   evidence passes `Arbiter.Reviews.CoverageShadow.preflip_gate/0`.
+
+  P7 (bd-60r6wp / #1738, §4.5) adds two readers that decide nothing:
+  `mechanical_for_diff/5`, the `:mechanical` row a merge path's own
+  content-equality proof implies, and `covered_heads/1`, which the ReviewGate
+  reads to scope a re-review to the delta since the last covered commit.
   """
 
   require Ash.Query
