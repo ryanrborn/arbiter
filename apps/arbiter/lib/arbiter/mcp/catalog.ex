@@ -365,7 +365,12 @@ defmodule Arbiter.MCP.Catalog do
               "Attach the new task as a `parent_of` child of this existing task, in the same " <>
                 "workspace, in one call (equivalent to a follow-up `dep_add` with " <>
                 "type `parent_of`). Optional. For a refine session it defaults to the bound " <>
-                "issue and may only name the bound issue or one of its descendants."
+                "issue and may only name the bound issue or one of its descendants. " <>
+                "#1973: when the parent is linked to a tracker ticket and `tracker_type` is " <>
+                "omitted, the child follows the workspace's `tracker.child_policy` — by " <>
+                "default it stays local (`tracker_type: none`) with the parent's ticket as " <>
+                "`tracker_context_ref`, so no upstream ticket is minted. Refine-session " <>
+                "children are always context-only. Pass `tracker_type` to mint anyway."
           },
           "description" => %{"type" => "string", "description" => "Markdown body."},
           "acceptance" => %{"type" => "string", "description" => "Markdown acceptance criteria."},

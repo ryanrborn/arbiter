@@ -52,6 +52,16 @@ defmodule Arbiter.Tasks.Issue do
   falling back to `:none` if the workspace doesn't specify one. Override per-task by
   passing `tracker_type:` to the create action.
 
+  A task created with a `parent_id` whose parent is tracker-linked defaults from
+  the parent instead (#1973), per the workspace's `tracker.child_policy`: by
+  default it stays local (`tracker_type: :none`) and copies the parent's ticket
+  into `tracker_context_type`/`tracker_context_ref`, so no ticket is minted. See
+  `Arbiter.Tasks.Issue.Changes.InheritTrackerType`.
+
+  The ticket key a task's branch name and conventional-commit PR title carry is
+  `tracker_ref` when set, else `tracker_context_ref` (see
+  `Arbiter.Worker.BranchNamer` and `Arbiter.Mergers.PRTitle`).
+
   ## Audit
 
   Via `AshPaperTrail.Resource` extension. Every create / update / close / reopen
@@ -154,6 +164,21 @@ defmodule Arbiter.Tasks.Issue do
       # CreateUpstream hook skips the outbound-create call even when the
       # workspace has a tracker configured.
       argument :skip_upstream_create, :boolean, default: false
+
+      # #1973: the parent this task is being filed under. Informs the tracker
+      # default only — a child of a tracker-linked parent defaults from the
+      # parent's linkage instead of minting its own ticket (see
+      # `InheritTrackerType`). The caller still attaches the `parent_of` edge
+      # itself (`task_create`, `POST /api/dependencies`).
+      argument :parent_id, :string, allow_nil?: true
+
+      # #1973: overrides the workspace's `tracker.child_policy` for this create.
+      # A refine session passes `:context_only` — it is by definition
+      # decomposing an already-tracked issue.
+      argument :tracker_child_policy, :atom do
+        allow_nil? true
+        constraints one_of: [:context_only, :inherit_parent, :mint]
+      end
 
       change {Arbiter.Tasks.Issue.Changes.GenerateId, []}
       change {Arbiter.Tasks.Issue.Changes.InheritTrackerType, []}
@@ -700,7 +725,8 @@ defmodule Arbiter.Tasks.Issue do
       constraints one_of: @tracker_types
 
       description """
-      Tracker type for a context-only reference on a review task (e.g. `:jira`).
+      Tracker type for a context-only reference (e.g. `:jira`) — on a review
+      task, or on a child filed under a tracker-linked parent (#1973).
       Paired with `tracker_context_ref`. No claim semantics and never synced back
       to the tracker — used only to fetch acceptance criteria at dispatch time to
       give the reviewer the ticket's intent. Safe to use on coworker-owned tickets.
@@ -716,7 +742,10 @@ defmodule Arbiter.Tasks.Issue do
       Tracker issue ref for context-only use on a review task (e.g. \"AX-18004\").
       Paired with `tracker_context_type`. The referenced ticket's description is
       fetched at dispatch and injected into the reviewer's prompt. No assignment
-      check, no write-back (no status transition, no assignee change).
+      check, no write-back (no status transition, no assignee change). When
+      `tracker_ref` is blank it is also the ticket key in the branch name and
+      conventional-commit PR title (#1973), so a context-only child of
+      `VR-19083` still opens a `[VR-19083]` PR.
       """
     end
 

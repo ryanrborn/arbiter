@@ -18,6 +18,8 @@ defmodule Arbiter.Tasks.Workspace do
       %{
         "tracker" => %{
           "type" => "jira",                    # one of: "none", "jira", "shortcut", "linear", "github", "gitlab"
+          "child_policy" => "context_only",    # one of: "context_only" (default), "inherit_parent",
+                                               # "mint". See tracker_child_policy/1.
           "config" => %{
             "host" => "acme.atlassian.net",
             "project_key" => "AX",
@@ -379,6 +381,38 @@ defmodule Arbiter.Tasks.Workspace do
   Returns the list of valid tracker type strings.
   """
   def valid_tracker_types, do: @valid_tracker_types
+
+  @valid_tracker_child_policies ~w(context_only inherit_parent mint)
+
+  @doc """
+  Returns the list of valid `tracker.child_policy` strings.
+  """
+  @spec valid_tracker_child_policies() :: [String.t()]
+  def valid_tracker_child_policies, do: @valid_tracker_child_policies
+
+  @doc """
+  How a task created under a tracker-linked parent defaults its tracker linkage
+  when the caller does not pass `tracker_type` (#1973), from
+  `config["tracker"]["child_policy"]`:
+
+    * `:context_only` (default) — the child stays local (`tracker_type: :none`)
+      and copies the parent's ticket into `tracker_context_type`/`_ref`, so
+      workers still read its acceptance criteria but no ticket is minted.
+    * `:inherit_parent` — the child is bound to the parent's own ticket
+      (`tracker_type`/`tracker_ref` copied), so its lifecycle writes back to that
+      shared ticket. No ticket is minted.
+    * `:mint` — the pre-#1973 behavior: the workspace tracker type applies and
+      the child mints its own upstream ticket.
+
+  Unset or unrecognized values read as `:context_only`.
+  """
+  @spec tracker_child_policy(t() | map() | nil) :: :context_only | :inherit_parent | :mint
+  def tracker_child_policy(workspace) do
+    case get_in(safe_config(workspace), ["tracker", "child_policy"]) do
+      policy when policy in @valid_tracker_child_policies -> String.to_existing_atom(policy)
+      _ -> :context_only
+    end
+  end
 
   @doc """
   Returns the list of valid merger strategy strings.
