@@ -1313,6 +1313,14 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # First hit wins. This lets workspaces override the global default
   # without changing application config.
+  #
+  # `resume/2` and `resume_session/2` both always set `:resume` to `true`
+  # before delegating to `dispatch/2` (`resume_session_id` is only set on top
+  # of that, never on its own) — so `:resume` alone is a reliable signal that
+  # this dispatch is re-attaching to a preserved worktree rather than cutting
+  # a fresh one.
+  defp resuming?(opts), do: Keyword.get(opts, :resume) == true
+
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -1341,27 +1349,62 @@ defmodule Arbiter.Worker.Dispatch do
             branch = BranchNamer.derive(task)
             target_branch = resolve_target_branch(task, opts)
 
-            case Worktree.create(repo_path, branch, target_branch) do
-              {:ok, path} ->
-                {:ok, path}
+            # bd-8ssxap: a redispatch can find its OLD per-task branch still on
+            # disk with commits that are already merged upstream (a prior round
+            # verified-failed post-merge, or was simply reopened after merge).
+            # `create/3` alone would reuse that branch as-is — the worker gets
+            # nothing new to add and can submit an empty PR. Reset it to current
+            # upstream first; a branch with genuine unmerged work is left alone.
+            #
+            # `force: true` when the task's last transition was a failed
+            # verification: this repo's default GitHub merge method is squash
+            # (`lib/arbiter/mergers/github/config.ex`), which produces a brand
+            # new commit on the base branch that the old per-task branch tip is
+            # NEVER an ancestor of — plain merge-base ancestry (still used for
+            # every other redispatch) would never catch that case, which is
+            # exactly the bd-96mn8i incident this exists to prevent.
+            #
+            # A resume (`opts[:resume]`) skips this reset entirely rather than
+            # passing `force: true` through: `Dispatch.resume/2` exists to
+            # preserve a stopped worker's committed *and* uncommitted worktree
+            # state, and this branch's whole point on a resume is continuity,
+            # not a clean slate.
+            reset_result =
+              if resuming?(opts) do
+                {:ok, :kept}
+              else
+                Worktree.reset_if_merged(repo_path, branch, target_branch,
+                  force: task.verification_outcome == :failed
+                )
+              end
 
-              {:error, {:git_failed, msg}} when is_binary(msg) ->
-                cond do
-                  String.contains?(msg, "already exists") ->
-                    # Pre-existing nesting 5 — baselined when bd-4x2yhq first
-                    # wired Credo up. Thresholds stay at the tool's own default so new
-                    # code is held to it; see the note in .credo.exs.
-                    # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-                    case Worktree.attach(repo_path, branch) do
-                      {:ok, path} -> {:ok, path}
-                      {:error, reason} -> {:error, {:worktree_failed, reason}}
+            case reset_result do
+              {:ok, _} ->
+                case Worktree.create(repo_path, branch, target_branch) do
+                  {:ok, path} ->
+                    {:ok, path}
+
+                  {:error, {:git_failed, msg}} when is_binary(msg) ->
+                    cond do
+                      String.contains?(msg, "already exists") ->
+                        # Pre-existing nesting 5 — baselined when bd-4x2yhq first
+                        # wired Credo up. Thresholds stay at the tool's own default so new
+                        # code is held to it; see the note in .credo.exs.
+                        # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+                        case Worktree.attach(repo_path, branch) do
+                          {:ok, path} -> {:ok, path}
+                          {:error, reason} -> {:error, {:worktree_failed, reason}}
+                        end
+
+                      String.contains?(msg, "different branch") ->
+                        recover_from_detached_worktree(repo_path, branch, target_branch, msg)
+
+                      true ->
+                        {:error, {:worktree_failed, {:git_failed, msg}}}
                     end
 
-                  String.contains?(msg, "different branch") ->
-                    recover_from_detached_worktree(repo_path, branch, target_branch, msg)
-
-                  true ->
-                    {:error, {:worktree_failed, {:git_failed, msg}}}
+                  {:error, reason} ->
+                    {:error, {:worktree_failed, reason}}
                 end
 
               {:error, reason} ->

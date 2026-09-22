@@ -371,6 +371,171 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  If `branch_name` already exists — either as a live worktree, or merely as a
+  branch ref left behind after its worktree was torn down (`:await_verification`
+  runs `CleanupWorktree` the moment a PR merges, well before a `task_verify
+  failed` reopen can redispatch onto it) — reset it to `origin/<base_branch>`
+  so a redispatch starts clean instead of reusing a branch with nothing left
+  to contribute (bd-8ssxap). Two independent signals trigger the reset:
+
+    * **Ancestry** — the branch's own tip is already an ancestor of the
+      freshly-fetched `origin/<base_branch>`. This only fires for a
+      merge-commit-preserving merge strategy; it never fires after a squash
+      merge, since a squash produces a brand-new commit on the base branch
+      that the old branch tip is never an ancestor of.
+    * **`force: true`** (caller-supplied, via `opts`) — the caller believes,
+      from task state (e.g. `verification_outcome == :failed`, which only
+      happens after a PR merged and then failed verification in production),
+      that the branch MAY already be fully upstream via a squash merge,
+      where ancestry never fires. But `verification_outcome == :failed`
+      stays true for the whole re-work round — it only clears once the
+      *next* PR merges — so `force` alone would also fire on every later
+      dispatch in that round, after round-2 work is committed. To guard
+      against that, `force: true` only resets when the branch's *tree
+      content* is already identical to `ref` (no diff between them): true
+      right after the squash lands, false again the moment anything new is
+      committed on the branch.
+
+  Call this BEFORE `create/3`, which is otherwise idempotent-without-a-fetch
+  for an already-existing worktree, and whose "already exists" fallback
+  (`attach/2`) simply checks out whatever a pre-existing *branch ref* already
+  points to — either path would happily hand the stale, fully-merged branch
+  straight back to the worker, the empty-PR redispatch bug this function
+  exists to prevent.
+
+  A live worktree is never hard-reset while it has uncommitted changes
+  (staged, unstaged, or untracked — see `has_uncommitted?/1`), even under
+  `force: true`: those changes are exactly what `Dispatch.resume/2` exists to
+  preserve, and destroying them silently would be worse than leaving a stale
+  branch in place. Callers on a resume path should additionally avoid calling
+  this function at all (skip straight to `{:ok, :kept}`), since a resumed
+  worktree's whole point is continuity from its preserved state.
+
+  Returns:
+
+    * `{:ok, :reset}` — the branch was merged (by ancestry or `force:
+      true`) and had no uncommitted changes; hard-reset (in place, if a
+      worktree exists) or force-moved (if only the ref survived) to the
+      current `origin/<base_branch>` tip.
+    * `{:ok, :kept}` — `branch_name` does not exist yet at all (nothing to
+      reset; `create/3` will cut a fresh one), it has commits that are NOT
+      merged and `force` was not given (genuine unmerged work — a normal
+      changes-requested redispatch must keep it), or a live worktree has
+      uncommitted changes that a hard reset would destroy.
+    * `{:error, reason}` — `origin` is missing, the fetch failed, or the reset
+      itself failed. Callers should fail the dispatch rather than silently
+      reusing an un-checked branch.
+  """
+  @spec reset_if_merged(path(), String.t(), String.t(), keyword()) ::
+          {:ok, :reset | :kept} | {:error, error_reason()}
+  def reset_if_merged(repo_path, branch_name, base_branch, opts \\ [])
+      when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) and
+             is_list(opts) do
+    path = worktree_path(branch_name)
+    force? = Keyword.get(opts, :force, false)
+
+    with :ok <- ensure_origin_remote(repo_path),
+         :ok <- fetch_origin_branch(repo_path, base_branch),
+         :ok <- ensure_origin_ref(repo_path, base_branch) do
+      ref = "origin/" <> base_branch
+
+      cond do
+        File.dir?(path) ->
+          reset_worktree_if_merged(path, branch_name, ref, force?)
+
+        branch_ref_exists?(repo_path, branch_name) ->
+          reset_branch_ref_if_merged(repo_path, branch_name, ref, force?)
+
+        true ->
+          {:ok, :kept}
+      end
+    end
+  end
+
+  defp reset_worktree_if_merged(path, branch_name, ref, force?) do
+    if should_reset?(branch_name, ref, path, force?) do
+      case has_uncommitted?(path) do
+        {:ok, true} ->
+          {:ok, :kept}
+
+        {:ok, false} ->
+          with {:ok, _} <- run_git(["checkout", branch_name], cd: path),
+               {:ok, _} <- run_git(["reset", "--hard", ref], cd: path) do
+            {:ok, :reset}
+          end
+
+        {:error, _} = err ->
+          err
+      end
+    else
+      {:ok, :kept}
+    end
+  end
+
+  defp reset_branch_ref_if_merged(repo_path, branch_name, ref, force?) do
+    if should_reset?(branch_name, ref, repo_path, force?) do
+      case run_git(["branch", "-f", branch_name, ref], cd: repo_path) do
+        {:ok, _} -> {:ok, :reset}
+        {:error, _} = err -> err
+      end
+    else
+      {:ok, :kept}
+    end
+  end
+
+  # `force?` alone is not enough: it stays true for the whole re-work round
+  # (`verification_outcome` only clears once the NEXT pr merges), so a
+  # naive `force? or ancestor?` would also blow away round-2 commits made
+  # after the first, legitimate reset. Only treat the branch as stale when
+  # merging it into `ref` would change nothing — i.e. every change on the
+  # branch is already contained in `ref`. That is true right after a
+  # squash-merge lands it on the base (however many commits were squashed,
+  # and regardless of how much `ref` has since moved on with unrelated
+  # merges), and false again the moment new work is committed on the branch.
+  #
+  # A plain `git diff --quiet ref branch` (tried in an earlier round) only
+  # catches the instant-after-squash case: once anything else merges into
+  # `ref`, the two trees diverge even though the branch itself still has no
+  # unique content, and the stale branch would wrongly be kept. `git cherry`
+  # does not work either — a squash of more than one commit produces a
+  # patch-id matching neither original commit.
+  defp should_reset?(branch_name, ref, cd, force?) do
+    ancestor?(branch_name, ref, cd) or (force? and merge_is_noop?(branch_name, ref, cd))
+  end
+
+  defp ancestor?(branch_name, ref, cd) do
+    case run_git(["merge-base", "--is-ancestor", branch_name, ref], cd: cd) do
+      {:ok, _} -> true
+      {:error, _not_ancestor} -> false
+    end
+  end
+
+  # True when merging `branch_name` into `ref` produces a tree identical to
+  # `ref`'s own tree — the branch contributes nothing `ref` doesn't already
+  # have.
+  defp merge_is_noop?(branch_name, ref, cd) do
+    with {:ok, ref_tree} <- run_git(["rev-parse", ref <> "^{tree}"], cd: cd),
+         {:ok, merged_tree} <- run_git(["merge-tree", "--write-tree", ref, branch_name], cd: cd) do
+      String.trim(ref_tree) == first_line(merged_tree)
+    else
+      {:error, _} -> false
+    end
+  end
+
+  defp first_line(output) do
+    output |> String.split("\n", parts: 2) |> hd() |> String.trim()
+  end
+
+  defp branch_ref_exists?(repo_path, branch_name) do
+    case run_git(["rev-parse", "--verify", "--quiet", "refs/heads/" <> branch_name],
+           cd: repo_path
+         ) do
+      {:ok, _} -> true
+      {:error, _} -> false
+    end
+  end
+
+  @doc """
   Attach a worktree at `<worktree_root>/<sanitized_branch_name>/` to an
   **existing** branch — no `-b`, no new branch creation.
 

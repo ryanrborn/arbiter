@@ -2405,6 +2405,94 @@ defmodule Arbiter.Worker.DispatchTest do
       assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
       assert %{target_branch: "dolphin"} = Worker.state(result.worker_pid).meta
     end
+
+    # bd-8ssxap: `task_verify failed` reopens a task but leaves its old
+    # per-task branch on disk. That branch's commits are already merged into
+    # main (the round that got verified) — redispatching onto it as-is gives
+    # the worker nothing new to add, and it can just merge main back in and
+    # submit an empty PR (the bd-96mn8i incident).
+    test "redispatch resets an already-merged branch to current main (bd-8ssxap)",
+         %{ws: ws, repo: repo} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "fix the null guard",
+          workspace_id: ws.id,
+          issue_type: :bug
+        })
+
+      branch = BranchNamer.derive(task)
+
+      # Simulate the PRIOR dispatch: a fix was committed, pushed, and merged
+      # into main via a real `git merge --squash` — this repo's default
+      # GitHub merge method (lib/arbiter/mergers/github/config.ex) and exactly
+      # what actually happened in the bd-96mn8i incident (601c8877/c83ca747
+      # squashed into a04cc0f4). A squash lands a brand-new single-parent
+      # commit on main that the old branch tip is NEVER an ancestor of, unlike
+      # a `--no-ff` merge commit — so this reproduces the case plain
+      # merge-base ancestry cannot catch on its own.
+      assert {:ok, wt_path} = Arbiter.Worker.Worktree.create(repo, branch, "main")
+      File.write!(Path.join(wt_path, "FIX.md"), "the fix\n")
+      {_, 0} = System.cmd("git", ["-C", wt_path, "add", "FIX.md"])
+      {_, 0} = System.cmd("git", ["-C", wt_path, "commit", "-q", "-m", "the fix"])
+      {_, 0} = System.cmd("git", ["-C", wt_path, "push", "-q", "origin", branch])
+
+      {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", branch])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+      {_, 0} = System.cmd("git", ["-C", repo, "merge", "-q", "--squash", "origin/" <> branch])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "the fix (squashed) (#1)"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # main keeps moving — an unrelated PR merges after the squash, before
+      # the redispatch. On a busy fleet this is the normal case, and it must
+      # not stop the stale branch from being detected (bd-8ssxap round 3).
+      File.write!(Path.join(repo, "UNRELATED.md"), "unrelated\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "UNRELATED.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "unrelated PR (#2)"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # The task parks for post-merge verification and comes back :failed —
+      # exactly the bd-96mn8i sequence.
+      {:ok, task} = Ash.update(task, %{}, action: :await_verification)
+      {:ok, task} = Arbiter.Tasks.Verification.failed(task, "still broken in prod")
+
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+
+      assert result.worktree_path == wt_path
+      # No commits ahead of the current upstream main — the stale, already-
+      # merged branch was reset, not reused as-is.
+      assert {:ok, false} =
+               Arbiter.Worker.Worktree.has_commits_ahead?(wt_path, "origin/main")
+
+      # HEAD lands exactly on the current upstream main tip, not merely
+      # "somewhere that happens to have no commits ahead".
+      {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", "main"])
+
+      assert Arbiter.Worker.Worktree.head_sha(wt_path) ==
+               String.trim(elem(System.cmd("git", ["-C", repo, "rev-parse", "origin/main"]), 0))
+    end
+
+    test "redispatch keeps a branch whose commits have NOT merged (normal changes-requested)",
+         %{ws: ws, repo: repo} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "still being reviewed",
+          workspace_id: ws.id,
+          issue_type: :bug
+        })
+
+      branch = BranchNamer.derive(task)
+
+      assert {:ok, wt_path} = Arbiter.Worker.Worktree.create(repo, branch, "main")
+      File.write!(Path.join(wt_path, "WIP.md"), "wip\n")
+      {_, 0} = System.cmd("git", ["-C", wt_path, "add", "WIP.md"])
+      {_, 0} = System.cmd("git", ["-C", wt_path, "commit", "-q", "-m", "wip, not merged yet"])
+
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+
+      assert result.worktree_path == wt_path
+      assert File.exists?(Path.join(wt_path, "WIP.md"))
+      assert {:ok, true} = Arbiter.Worker.Worktree.has_commits_ahead?(wt_path, "origin/main")
+    end
   end
 
   describe "work prompt fix-pass sections (bd-bw93c3)" do
@@ -2863,6 +2951,57 @@ defmodule Arbiter.Worker.DispatchTest do
       new_run = latest_run(task.id)
       assert new_run.id != prior_run.id
       assert new_run.resumed_from_run_id == prior_run.id
+    end
+
+    # bd-8ssxap round 2 (reviewer finding 2): `maybe_provision_worktree`'s
+    # bd-8ssxap reset-if-merged pre-check must never run on a resume. Take a
+    # branch whose commits are ALREADY merged into main (so plain ancestry
+    # alone would call it a reset candidate) with an uncommitted, never-
+    # committed edit sitting on top — exactly what a worker crash or timeout
+    # leaves behind. A resume must reattach to that file, not hard-reset it
+    # away.
+    test "resume never hard-resets the worktree, preserving uncommitted work", %{
+      ws: ws,
+      repo: repo
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "resume onto merged branch", workspace_id: ws.id})
+      first = stop_worker_with_outpost(task.id)
+
+      branch = BranchNamer.derive(task)
+
+      # The dispatched branch is local-only until pushed — push it so it can
+      # be merged, then merge its (empty) history into main so it reads as
+      # already-merged.
+      {_, 0} = System.cmd("git", ["-C", first.worktree_path, "push", "-q", "origin", branch])
+      {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", branch])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          repo,
+          "merge",
+          "-q",
+          "--no-ff",
+          "-m",
+          "merge (nothing to add)",
+          "origin/" <> branch
+        ])
+
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # Leave an uncommitted edit in the preserved worktree, as a crashed or
+      # timed-out worker would.
+      File.write!(Path.join(first.worktree_path, "in_progress.md"), "not committed yet\n")
+
+      {:ok, result} =
+        Dispatch.resume(task.id, start_driver: false, claude_command: ["true"])
+
+      assert result.worktree_path == first.worktree_path
+      assert File.exists?(Path.join(result.worktree_path, "in_progress.md"))
+
+      assert File.read!(Path.join(result.worktree_path, "in_progress.md")) ==
+               "not committed yet\n"
     end
 
     # bd-985tkl — the ordering that stranded bd-3qkbch/#1724 and bd-bsdeb2/#1732.
