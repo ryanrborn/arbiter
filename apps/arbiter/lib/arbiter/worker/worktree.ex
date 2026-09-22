@@ -383,13 +383,18 @@ defmodule Arbiter.Worker.Worktree do
       merge-commit-preserving merge strategy; it never fires after a squash
       merge, since a squash produces a brand-new commit on the base branch
       that the old branch tip is never an ancestor of.
-    * **`force: true`** (caller-supplied, via `opts`) — the caller already
-      knows from task state (e.g. `verification_outcome == :failed`, which
-      only happens after a PR merged and then failed verification in
-      production) that the branch's content is already upstream, regardless
-      of what git ancestry says. This is what actually catches the squash
-      case, which is this repo's default merge method
-      (`lib/arbiter/mergers/github/config.ex`).
+    * **`force: true`** (caller-supplied, via `opts`) — the caller believes,
+      from task state (e.g. `verification_outcome == :failed`, which only
+      happens after a PR merged and then failed verification in production),
+      that the branch MAY already be fully upstream via a squash merge,
+      where ancestry never fires. But `verification_outcome == :failed`
+      stays true for the whole re-work round — it only clears once the
+      *next* PR merges — so `force` alone would also fire on every later
+      dispatch in that round, after round-2 work is committed. To guard
+      against that, `force: true` only resets when the branch's *tree
+      content* is already identical to `ref` (no diff between them): true
+      right after the squash lands, false again the moment anything new is
+      committed on the branch.
 
   Call this BEFORE `create/3`, which is otherwise idempotent-without-a-fetch
   for an already-existing worktree, and whose "already exists" fallback
@@ -448,7 +453,7 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   defp reset_worktree_if_merged(path, branch_name, ref, force?) do
-    if force? or ancestor?(branch_name, ref, path) do
+    if should_reset?(branch_name, ref, path, force?) do
       case has_uncommitted?(path) do
         {:ok, true} ->
           {:ok, :kept}
@@ -468,7 +473,7 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   defp reset_branch_ref_if_merged(repo_path, branch_name, ref, force?) do
-    if force? or ancestor?(branch_name, ref, repo_path) do
+    if should_reset?(branch_name, ref, repo_path, force?) do
       case run_git(["branch", "-f", branch_name, ref], cd: repo_path) do
         {:ok, _} -> {:ok, :reset}
         {:error, _} = err -> err
@@ -478,10 +483,28 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
+  # `force?` alone is not enough: it stays true for the whole re-work round
+  # (`verification_outcome` only clears once the NEXT pr merges), so a
+  # naive `force? or ancestor?` would also blow away round-2 commits made
+  # after the first, legitimate reset. Only treat the branch as stale when
+  # its tree content is already fully present in `ref` — i.e. nothing on
+  # the branch is unique — which is true right after a squash-merge lands
+  # it on the base, and false again the moment new work is committed.
+  defp should_reset?(branch_name, ref, cd, force?) do
+    ancestor?(branch_name, ref, cd) or (force? and tree_matches?(branch_name, ref, cd))
+  end
+
   defp ancestor?(branch_name, ref, cd) do
     case run_git(["merge-base", "--is-ancestor", branch_name, ref], cd: cd) do
       {:ok, _} -> true
       {:error, _not_ancestor} -> false
+    end
+  end
+
+  defp tree_matches?(branch_name, ref, cd) do
+    case run_git(["diff", "--quiet", ref, branch_name], cd: cd) do
+      {:ok, _} -> true
+      {:error, _differs} -> false
     end
   end
 

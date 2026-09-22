@@ -274,6 +274,49 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert head_sha == remote_main_sha
     end
 
+    # bd-8ssxap round 3 (reviewer finding 1): `task.verification_outcome` stays
+    # `:failed` for the WHOLE re-work round — it only clears once the next PR
+    # merges (`Issue.await_verification/…`) — so `Dispatch` passes `force:
+    # true` on every dispatch in that round, not just the first. A naive
+    # `force? or ancestor?` would hard-reset the branch again even after the
+    # worker already committed the real round-2 fix on top of the reset,
+    # throwing the new work away. `reset_if_merged/3` must only actually reset
+    # when the branch's tree content is still identical to the base tip.
+    test "does NOT reset a force: true branch once new work is committed on it",
+         %{repo: repo, remote: remote} do
+      assert {:ok, path} = Worktree.create(repo, "bugfix/round-two", "main")
+      File.write!(Path.join(path, "fix.md"), "the fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "fix.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the fix"])
+      {_, 0} = System.cmd("git", ["-C", path, "push", "-q", "origin", "bugfix/round-two"])
+
+      squash_merge_onto_main(repo, "bugfix/round-two", "the fix (squashed)")
+
+      # Redispatch 1: the branch is stale (squash-merged, no unique content) —
+      # force resets it to the current main tip.
+      assert {:ok, :reset} =
+               Worktree.reset_if_merged(repo, "bugfix/round-two", "main", force: true)
+
+      # The worker commits the real round-2 fix on top of the reset branch.
+      File.write!(Path.join(path, "real_fix.md"), "the actual fix\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "real_fix.md"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "the actual fix"])
+      {:ok, round_two_sha} = git_rev_parse(path, "HEAD")
+
+      # Redispatch 2: `verification_outcome` is still `:failed` (it hasn't
+      # merged yet), so `force: true` is passed again — but the branch now
+      # has unique content, so it must be kept, not reset.
+      assert {:ok, :kept} =
+               Worktree.reset_if_merged(repo, "bugfix/round-two", "main", force: true)
+
+      {:ok, head_sha} = git_rev_parse(path, "HEAD")
+      assert head_sha == round_two_sha
+      assert File.exists?(Path.join(path, "real_fix.md"))
+
+      {:ok, remote_main_sha} = git_rev_parse(remote, "main")
+      refute head_sha == remote_main_sha
+    end
+
     # bd-8ssxap round 2 (reviewer finding 2): `force: true` must never destroy
     # uncommitted work sitting on a branch that git-level state alone can't
     # distinguish from a genuinely already-merged one — e.g. a resumed

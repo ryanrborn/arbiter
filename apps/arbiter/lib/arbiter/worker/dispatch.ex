@@ -1313,10 +1313,7 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # First hit wins. This lets workspaces override the global default
   # without changing application config.
-  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  #
   # `resume/2` and `resume_session/2` both always set `:resume` to `true`
   # before delegating to `dispatch/2` (`resume_session_id` is only set on top
   # of that, never on its own) — so `:resume` alone is a reliable signal that
@@ -1324,6 +1321,10 @@ defmodule Arbiter.Worker.Dispatch do
   # a fresh one.
   defp resuming?(opts), do: Keyword.get(opts, :resume) == true
 
+  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
