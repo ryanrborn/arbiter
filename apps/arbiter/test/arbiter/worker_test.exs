@@ -45,6 +45,21 @@ defmodule Arbiter.WorkerTest do
       assert snap.meta == %{}
     end
 
+    # bd-aw2cyt: slot accounting and the phase model both read this off the
+    # snapshot, so every consumer gets the same answer without a second call.
+    test "the snapshot reports whether an agent subprocess is live" do
+      {pid, task_id} = start_worker()
+
+      snap = Worker.state(pid)
+      assert snap.agent_live == false
+      assert snap.agent_live == Worker.agent_session_live?(task_id)
+
+      assert Enum.any?(
+               Worker.list_children(),
+               &(&1.task_id == task_id and &1.agent_live == false)
+             )
+    end
+
     test "state/1 accepts task_id strings" do
       {_pid, task_id} = start_worker()
       assert %{task_id: ^task_id} = Worker.state(task_id)

@@ -22,6 +22,26 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "arb done"
     end
 
+    test "shows the phase and agent liveness" do
+      stub_get("/api/workers/bd-002", %{
+        "task_id" => "bd-002",
+        "status" => "running",
+        "phase" => "in_review",
+        "phase_label" => "in review",
+        "agent_live" => false,
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => []
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-002"]) end)
+      assert exit_code == 0
+      assert out =~ "Phase:"
+      assert out =~ "in review"
+      assert out =~ "no live agent"
+    end
+
     test "missing task_id returns a friendly error" do
       {_out, _err, exit_code} = capture(fn -> Worker.run(["show"]) end)
       assert exit_code != 0
@@ -161,6 +181,43 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "Active workers (1)"
       assert out =~ "bd-001"
       assert out =~ "status=running"
+    end
+
+    # bd-aw2cyt: a row whose agent has exited must not read as running work.
+    test "renders the phase, and marks a row with no live agent" do
+      stub_get("/api/workers", %{
+        "data" => [
+          %{
+            "task_id" => "bd-001",
+            "status" => "running",
+            "phase" => "waiting_ci_merge",
+            "phase_label" => "waiting on CI / merge",
+            "agent_live" => false,
+            "current_step" => "implement",
+            "repo" => "test/repo",
+            "started_at" => "2026-05-20T19:00:00Z"
+          },
+          %{
+            "task_id" => "bd-002",
+            "status" => "running",
+            "phase" => "implementing",
+            "phase_label" => "implementing",
+            "agent_live" => true,
+            "current_step" => "implement",
+            "repo" => "test/repo",
+            "started_at" => "2026-05-20T19:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["list"]) end)
+      assert exit_code == 0
+      assert out =~ "phase=waiting_ci_merge"
+      assert out =~ "phase=implementing"
+      # The dead row is called out; the live one is not.
+      [dead, live] = out |> String.split("\n") |> Enum.filter(&(&1 =~ "bd-00"))
+      assert dead =~ "no agent"
+      refute live =~ "no agent"
     end
 
     test "(none) when no active workers" do

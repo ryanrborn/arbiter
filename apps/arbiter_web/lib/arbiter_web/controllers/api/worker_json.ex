@@ -20,8 +20,12 @@ defmodule ArbiterWeb.Api.WorkerJSON do
 
   def index(%{children: children, costs: costs}) do
     %{
+      # bd-aw2cyt: a row's phase depends on the task's other live rounds, so
+      # stamp it over the whole list first.
       data:
-        Enum.map(children, fn snap ->
+        children
+        |> Arbiter.Worker.Phase.annotate()
+        |> Enum.map(fn snap ->
           meta = Map.get(snap, :meta, %{}) || %{}
           model_id = Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
 
@@ -38,6 +42,11 @@ defmodule ArbiterWeb.Api.WorkerJSON do
             claude_session: Map.get(meta, :claude_session, false),
             activity: Map.get(meta, :activity),
             status: snap.status,
+            # bd-aw2cyt: additive — `status` keeps its meaning for every
+            # existing consumer, and these two say whether a process exists.
+            phase: phase(snap),
+            phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
+            agent_live: Map.get(snap, :agent_live),
             started_at: snap.started_at,
             mr_ref: Map.get(snap, :mr_ref),
             merger_url: Map.get(snap, :merger_url),
@@ -64,6 +73,10 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       claude_session: Map.get(meta, :claude_session, false),
       activity: Map.get(meta, :activity),
       status: snap.status,
+      # See index/1 — additive alongside the unchanged status (bd-aw2cyt).
+      phase: phase(snap),
+      phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
+      agent_live: Map.get(snap, :agent_live),
       started_at: snap.started_at,
       step_started_at: Map.get(snap, :step_started_at),
       mr_ref: Map.get(snap, :mr_ref),
@@ -103,6 +116,8 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       failure_reason: run.failure_reason
     }
   end
+
+  defp phase(snap), do: to_string_atom(Map.get(snap, :phase))
 
   defp stringify(nil), do: nil
   defp stringify(v) when is_binary(v), do: v

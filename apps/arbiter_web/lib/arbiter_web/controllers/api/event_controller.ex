@@ -14,8 +14,20 @@ defmodule ArbiterWeb.Api.EventController do
   Topics (default: inbox,review_gate,worker_failed):
     * inbox          — a message arrived in the coordinator's mailbox
     * review_gate       — a review_gate escalation requires coordinator ruling
-    * worker_failed — a worker stopped unexpectedly (status → failed)
-    * worker_done   — a worker completed (status → completed)
+    * worker_failed — a worker stopped unexpectedly (status → failed).
+                      Carries `status` + `phase` (bd-aw2cyt).
+    * worker_done   — a worker completed (status → completed).
+                      Carries `status` + `phase` (bd-aw2cyt).
+    * worker_phase  — a worker's phase changed (bd-aw2cyt): `implementing`,
+                      `in_review`, `addressing_review`, `fixing_ci`,
+                      `resolving_conflict`, `waiting_ci_merge`,
+                      `waiting_on_you`, `handing_off`, `done`. Carries
+                      `task_id`, `registry_key`, `role`, `status`, `phase`,
+                      `phase_label` and `agent_live`. The record's `status`
+                      outlives its agent — a `running` worker whose main agent
+                      exited is shepherding review / CI / the merge and spends
+                      no quota; `phase` is what says which. Opt-in only
+                      (pass `subscribe=...,worker_phase`).
     * task_state     — any task FSM transition (noisier — opt-in only)
     * external_review — an ExternalReview lifecycle transition: running / completed /
                         failed (opt-in only — pass subscribe=...,external_review)

@@ -322,7 +322,11 @@ defmodule Arbiter.MCP.Tools.Worker do
       costs = Arbiter.Worker.Stats.task_costs_usd(task_ids)
 
       workers =
-        Enum.map(children, &serialize_worker_summary(&1, Map.get(costs, &1.task_id, 0.0)))
+        children
+        # bd-aw2cyt: a row's phase depends on its siblings' rounds, so stamp it
+        # over the whole list before serializing.
+        |> Arbiter.Worker.Phase.annotate()
+        |> Enum.map(&serialize_worker_summary(&1, Map.get(costs, &1.task_id, 0.0)))
 
       {:ok, %{workers: workers, count: length(workers)}}
     end
@@ -350,8 +354,16 @@ defmodule Arbiter.MCP.Tools.Worker do
 
         pid ->
           case Worker.state(pid) do
-            %{} = snap -> {:ok, serialize_worker_snapshot(Map.put(snap, :pid, pid), lines)}
-            _ -> worker_show_historical(task_id, lines)
+            %{} = snap ->
+              snap = Map.put(snap, :pid, pid)
+              # bd-aw2cyt: the task's other rounds decide this row's phase.
+              siblings = live_siblings()
+
+              {:ok,
+               serialize_worker_snapshot(Map.put(snap, :phase, phase_of(snap, siblings)), lines)}
+
+            _ ->
+              worker_show_historical(task_id, lines)
           end
       end
     end
@@ -908,6 +920,19 @@ defmodule Arbiter.MCP.Tools.Worker do
     }
   end
 
+  # The live rows a single-worker read needs in order to know which round is
+  # running for its task. Best-effort: an unreadable supervisor just means the
+  # phase is derived from this row alone.
+  defp live_siblings do
+    Arbiter.Worker.list_children()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp phase_of(snap, siblings), do: Arbiter.Worker.Phase.of(snap, siblings)
+
   defp serialize_worker_summary(snap, cost_usd) do
     meta = Map.get(snap, :meta, %{}) || %{}
     routing = Map.get(meta, :routing_config) || %{}
@@ -924,6 +949,12 @@ defmodule Arbiter.MCP.Tools.Worker do
       registry_key: Map.get(snap, :registry_key) || snap.task_id,
       role: Tools.to_str(Map.get(snap, :role)),
       status: Tools.to_str(snap.status),
+      # bd-aw2cyt: `status` is unchanged for every existing consumer; `phase`
+      # and `agent_live` are additive, and are what say whether a process
+      # actually exists behind this row.
+      phase: Tools.to_str(Map.get(snap, :phase)),
+      phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
+      agent_live: Map.get(snap, :agent_live),
       repo: snap.repo,
       started_at: Tools.iso(snap.started_at),
       activity: Map.get(meta, :activity),
@@ -955,6 +986,10 @@ defmodule Arbiter.MCP.Tools.Worker do
       claude_session: Map.get(meta, :claude_session, false),
       activity: Map.get(meta, :activity),
       status: Tools.to_str(snap.status),
+      # See serialize_worker_summary/2 — additive, `status` is untouched.
+      phase: Tools.to_str(Map.get(snap, :phase)),
+      phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
+      agent_live: Map.get(snap, :agent_live),
       started_at: Tools.iso(snap.started_at),
       step_started_at: Tools.iso(Map.get(snap, :step_started_at)),
       mr_ref: Map.get(snap, :mr_ref),

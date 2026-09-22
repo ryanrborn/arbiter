@@ -211,6 +211,13 @@ defmodule ArbiterCli.Cmd.Worker do
     end
 
     IO.puts("Status:     #{snap["status"]}")
+
+    # bd-aw2cyt: the record's status outlives its agent. Say which phase the
+    # work is actually in, and whether anything is running for it at all.
+    if snap["phase"] do
+      IO.puts("Phase:      #{snap["phase_label"] || snap["phase"]}#{agent_note(snap, :long)}")
+    end
+
     # A claude-driven worker has no ticking workflow step; show the live
     # activity derived from its stream instead of a frozen step. See bd-c919xj.
     if snap["claude_session"] do
@@ -343,12 +350,23 @@ defmodule ArbiterCli.Cmd.Worker do
 
       model_part = if p["model"], do: "  model=#{p["model"]}", else: ""
       cost_part = format_cost(p["cost_usd"])
+      phase_part = if p["phase"], do: "  phase=#{p["phase"]}", else: ""
 
       IO.puts(
-        "  #{p["task_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
+        "  #{p["task_id"]}  status=#{p["status"]}#{phase_part}#{agent_note(p)}  #{step}  " <>
+          "repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
       )
     end)
   end
+
+  # bd-aw2cyt: `agent_live == false` is the whole point of the phase model —
+  # a row that looks like work in progress with no process behind it. Only the
+  # negative is worth ink; a live row is the unremarkable case, and an unknown
+  # one (an older server that does not send the field) says nothing.
+  defp agent_note(row, style \\ :short)
+  defp agent_note(%{"agent_live" => false}, :long), do: " — no live agent"
+  defp agent_note(%{"agent_live" => false}, :short), do: "  (no agent)"
+  defp agent_note(_row, _style), do: ""
 
   defp format_cost(nil), do: ""
   defp format_cost(cost) when cost <= 0, do: ""

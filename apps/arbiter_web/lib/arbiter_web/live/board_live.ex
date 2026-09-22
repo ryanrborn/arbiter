@@ -552,6 +552,21 @@ defmodule ArbiterWeb.BoardLive do
 
   # ---- formatting -----------------------------------------------------------
 
+  # bd-aw2cyt: how many agents are actually burning quota. `agents_live` is
+  # what `Snapshot.derive/1` counted; an older board map (a stubbed snapshot in
+  # a test, a replayed payload) falls back to the number of running cards,
+  # which is what the header used to say.
+  defp agents_live(board),
+    do: Map.get(board, :agents_live) || length(Map.get(board, :running, []))
+
+  # The card's own line under the title: the phase it is in, which is what an
+  # operator wants once the main agent has exited, falling back to the
+  # workflow step for a card that has no phase (an older snapshot).
+  defp card_footer(%{phase: phase}) when not is_nil(phase),
+    do: Arbiter.Worker.Phase.label(phase)
+
+  defp card_footer(card), do: Map.get(card, :step) && to_string(Map.get(card, :step))
+
   defp elapsed(nil, _now), do: nil
 
   defp elapsed(%DateTime{} = since, %DateTime{} = now) do
@@ -664,7 +679,7 @@ defmodule ArbiterWeb.BoardLive do
                 id="board-slots"
                 class="hidden sm:inline text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
               >
-                {length(@board.running)} {plural(@worker_label)} · {@board.slots_free} slots free
+                agents live: {agents_live(@board)} of {@board.slots_total} · {@board.slots_free} slots free
               </span>
 
               <button
@@ -850,7 +865,7 @@ defmodule ArbiterWeb.BoardLive do
                   activity={card.activity}
                   activity_href={~p"/workers/#{card.id}"}
                   difficulty={card.difficulty}
-                  footer={card.step && to_string(card.step)}
+                  footer={card_footer(card)}
                   draggable="true"
                   class="cursor-pointer"
                   data-card={card.id}
@@ -866,7 +881,22 @@ defmodule ArbiterWeb.BoardLive do
                         provider={card.provider}
                         class="size-3.5 text-[var(--text-label)]"
                       />
-                      <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]">
+                      <%!-- bd-aw2cyt: the pulse is a claim that something is
+                      running. Only a card with a live agent gets it; a card
+                      whose agent has exited (in review, waiting on CI, between
+                      rounds) goes quiet and says so. --%>
+                      <span
+                        data-phase={card.phase}
+                        data-agent-live={to_string(card.agent_live)}
+                        class={[
+                          "text-[10px] font-medium font-[family-name:var(--font-mono)]",
+                          if(card.agent_live,
+                            do:
+                              "text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]",
+                            else: "text-[var(--text-label)] opacity-70"
+                          )
+                        ]}
+                      >
                         {elapsed(card.since, @now)}
                       </span>
                     </span>
