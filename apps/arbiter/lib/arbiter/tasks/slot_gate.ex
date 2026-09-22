@@ -4,11 +4,12 @@ defmodule Arbiter.Tasks.SlotGate do
   `Arbiter.Tasks.EdgeGate`, for the other half of the same dispatch decision.
 
   `EdgeGate` answers *may* this task be dispatched given its edges.
-  `SlotGate` answers *is there room* to dispatch anything at all. Arbiter's
-  two schedulers — `Arbiter.Workflows.Conductor` for a graph's members, and
-  `Arbiter.Board.Snapshot` → `Arbiter.Board.Scheduler` →
-  `Arbiter.Board.Autopilot` for the Ready queue — both need it, and both used
-  to answer it themselves. They live here together so they cannot drift.
+  `SlotGate` answers *is there room* to dispatch anything at all. The board
+  scheduler (`Arbiter.Board.Snapshot` → `Arbiter.Board.Scheduler` →
+  `Arbiter.Board.Autopilot`) is the only dispatcher, and it used to answer
+  this itself, inline in `derive/1`. Both halves of the dispatch decision now
+  live beside each other as pure predicates so neither can drift from what the
+  board renders.
 
   ## A slot is a live agent, not a record (bd-aw2cyt)
 
@@ -36,9 +37,9 @@ defmodule Arbiter.Tasks.SlotGate do
   round, because the round could not start and the author could never finish.
   So the rounds always spawn when the work needs them, and the cap they push
   over is only consulted when deciding whether to start something **new**.
-  The callers enforce that by construction — only the two schedulers'
-  admission paths ask this module anything — and
-  `Arbiter.Worker.ReviewGate` / the merge-queue dispatchers never do.
+  The callers enforce that by construction — only the board scheduler's
+  admission path asks this module anything — and `Arbiter.Worker.ReviewGate` /
+  the merge-queue dispatchers never do.
 
   ## Liveness is an input
 
