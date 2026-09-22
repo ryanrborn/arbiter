@@ -224,7 +224,7 @@ defmodule ArbiterCli.Cmd.Account do
     ref = one_ref!(args, "rotate")
     kind = opts[:kind] || Output.die("account rotate requires --kind")
     env_var = opts[:env_var] || Output.die("account rotate requires --env-var")
-    secret = resolve_secret!(opts)
+    secret = resolve_secret!(opts, args)
 
     payload =
       %{"kind" => kind, "env_var" => env_var, "secret" => secret}
@@ -249,7 +249,7 @@ defmodule ArbiterCli.Cmd.Account do
     IO.puts("rotated #{credential["kind"]} credential (fingerprint=#{credential["fingerprint"]})")
   end
 
-  defp resolve_secret!(opts) do
+  defp resolve_secret!(opts, args) do
     cond do
       opts[:secret] && opts[:secret_file] ->
         Output.die("pass only one of --secret / --secret-file")
@@ -266,7 +266,7 @@ defmodule ArbiterCli.Cmd.Account do
             Output.die("cannot read --secret-file: #{:file.format_error(reason)}")
         end
 
-      "-" in System.argv() ->
+      "-" in args ->
         IO.read(:stdio, :eof) |> to_string() |> String.trim()
 
       true ->

@@ -23,15 +23,22 @@ defmodule ArbiterWeb.Api.AccountController do
   action_fallback ArbiterWeb.Api.FallbackController
 
   def index(conn, params) do
-    opts =
-      case Map.get(params, "provider") do
-        nil -> []
-        provider -> [provider: String.to_existing_atom(provider)]
-      end
+    with {:ok, opts} <- provider_filter(params) do
+      render(conn, :index, accounts: Accounts.list_accounts(opts))
+    end
+  end
 
-    render(conn, :index, accounts: Accounts.list_accounts(opts))
-  rescue
-    ArgumentError -> {:error, {:invalid_request, "unknown provider"}}
+  defp provider_filter(params) do
+    case Map.get(params, "provider") do
+      nil ->
+        {:ok, []}
+
+      provider ->
+        case Accounts.parse_provider(provider) do
+          {:ok, p} -> {:ok, [provider: p]}
+          :error -> {:error, {:invalid_request, "unknown provider"}}
+        end
+    end
   end
 
   def show(conn, %{"ref" => ref}) do
@@ -65,11 +72,21 @@ defmodule ArbiterWeb.Api.AccountController do
     with {:ok, workspace_id} <- require_param(params, "workspace_id"),
          {:ok, provider} <- require_param(params, "provider"),
          {:ok, link} <-
-           Accounts.attach_workspace(workspace_id, provider, ref, share: Map.get(params, "share"))
+           Accounts.attach_workspace(workspace_id, provider, ref, share_opts(params))
            |> friendly() do
       conn
       |> put_status(:created)
       |> render(:attach, link: link)
+    end
+  end
+
+  # `share` is only forwarded when the caller actually sent it — an absent
+  # key must leave an existing share untouched (Accounts.attach_workspace/4),
+  # not clobber it back to nil.
+  defp share_opts(params) do
+    case Map.get(params, "share") do
+      nil -> []
+      share -> [share: share]
     end
   end
 

@@ -40,15 +40,18 @@ defmodule Arbiter.Accounts.Merge do
     utilization_5h reset_5h_at status_5h utilization_7d reset_7d_at status_7d
     representative_claim overage_status captured_at capture_source
     per_model_utilization extra_usage oauth_utilization_5h oauth_utilization_7d
-    oauth_captured_at
+    oauth_captured_at inserted_at updated_at
   )a
 
   @codex_columns ~w(
     plan session_used_percent session_reset_at weekly_used_percent
-    weekly_reset_at limit_reached captured_at
+    weekly_reset_at limit_reached captured_at inserted_at updated_at
   )a
 
-  @cloud_code_columns ~w(plan message used_percent reset_at snapshot captured_at)a
+  @cloud_code_columns ~w(
+    plan message used_percent reset_at snapshot captured_at inserted_at
+    updated_at
+  )a
 
   @doc """
   Merge `from_ref` into `into_ref` (both accepted by
@@ -192,10 +195,10 @@ defmodule Arbiter.Accounts.Merge do
 
         :ok
 
-      [_, _] = pair ->
+      [_ | _] = rows ->
         keys = Enum.map(cols, &String.to_atom/1)
-        maps = Enum.map(pair, &(keys |> Enum.zip(&1) |> Map.new()))
-        merged = collapse_fun.(maps)
+        maps = Enum.map(rows, &(keys |> Enum.zip(&1) |> Map.new()))
+        merged = collapse_fun.(maps) |> Map.put(:updated_at, timestamp())
 
         Repo.query!(
           "DELETE FROM #{table} WHERE provider_account_id IN (?1, ?2) AND provider = ?3",
@@ -217,6 +220,10 @@ defmodule Arbiter.Accounts.Merge do
 
         :ok
     end
+  end
+
+  defp timestamp do
+    DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.to_naive()
   end
 
   # ---- workspace_provider_accounts ------------------------------------------

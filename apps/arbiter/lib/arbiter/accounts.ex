@@ -131,7 +131,14 @@ defmodule Arbiter.Accounts do
     end
   end
 
-  defp parse_provider(str) do
+  @doc """
+  Parse a provider string against the known set of provider atoms
+  (`claude`, `codex`, `gemini_cli`, `antigravity`). Returns `:error` for
+  anything else, whether or not that string happens to already be an atom
+  elsewhere in the VM.
+  """
+  @spec parse_provider(String.t()) :: {:ok, atom()} | :error
+  def parse_provider(str) do
     case str do
       s when s in ~w(claude codex gemini_cli antigravity) -> {:ok, String.to_existing_atom(s)}
       _ -> :error
@@ -152,6 +159,10 @@ defmodule Arbiter.Accounts do
   <workspace> <provider> <slug> [--share N]`. Writes or updates the
   `(workspace_id, provider)` `WorkspaceProviderAccount` row (`ProviderAccount`
   ref resolved via `get_account/1`).
+
+  `:share` is only touched when the caller explicitly passes it — a bare
+  re-attach (no `--share`) leaves an existing share in place instead of
+  clobbering it back to `nil`.
   """
   @spec attach_workspace(String.t(), atom() | String.t(), String.t(), keyword()) ::
           {:ok, WorkspaceProviderAccount.t()} | {:error, term()}
@@ -159,22 +170,32 @@ defmodule Arbiter.Accounts do
     with {:ok, provider} <- normalize_provider(provider),
          {:ok, account} <- get_account(account_ref),
          :ok <- ensure_provider_match(account, provider) do
-      share = Keyword.get(opts, :share)
-
       case existing_link(workspace_id, provider) do
         nil ->
           Ash.create(WorkspaceProviderAccount, %{
             workspace_id: workspace_id,
             provider: provider,
             provider_account_id: account.id,
-            share: share
+            share: Keyword.get(opts, :share)
           })
 
         link ->
+          attrs =
+            %{provider_account_id: account.id}
+            |> maybe_put_share(opts)
+
           link
-          |> Ash.Changeset.for_update(:update, %{provider_account_id: account.id, share: share})
+          |> Ash.Changeset.for_update(:update, attrs)
           |> Ash.update()
       end
+    end
+  end
+
+  defp maybe_put_share(attrs, opts) do
+    if Keyword.has_key?(opts, :share) do
+      Map.put(attrs, :share, Keyword.get(opts, :share))
+    else
+      attrs
     end
   end
 

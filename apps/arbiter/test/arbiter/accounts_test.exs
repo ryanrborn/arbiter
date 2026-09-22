@@ -3,6 +3,7 @@ defmodule Arbiter.AccountsTest do
 
   alias Arbiter.Accounts
   alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+  alias Arbiter.Quota.{AnthropicQuota, CodexQuota, GoogleQuota, Rekey}
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event
 
@@ -16,6 +17,41 @@ defmodule Arbiter.AccountsTest do
   defp create_account!(attrs) do
     {:ok, account} = Ash.create(ProviderAccount, attrs)
     account
+  end
+
+  defp create_anthropic_quota!(account_id, attrs \\ []) do
+    base = %{
+      provider_account_id: account_id,
+      provider: "claude",
+      captured_at: DateTime.utc_now()
+    }
+
+    {:ok, quota} =
+      Ash.create(AnthropicQuota, Map.merge(base, Map.new(attrs)), action: :record_oauth_snapshot)
+
+    quota
+  end
+
+  defp create_codex_quota!(account_id, attrs) do
+    base = %{
+      provider_account_id: account_id,
+      provider: "codex",
+      captured_at: DateTime.utc_now()
+    }
+
+    {:ok, quota} = Ash.create(CodexQuota, Map.merge(base, Map.new(attrs)), action: :upsert)
+    quota
+  end
+
+  defp create_cloud_code_quota!(account_id, provider, attrs) do
+    base = %{
+      provider_account_id: account_id,
+      provider: provider,
+      captured_at: DateTime.utc_now()
+    }
+
+    {:ok, quota} = Ash.create(GoogleQuota, Map.merge(base, Map.new(attrs)), action: :upsert)
+    quota
   end
 
   defp create_event!(attrs) do
@@ -305,22 +341,182 @@ defmodule Arbiter.AccountsTest do
       assert {:error, :same_account} = Accounts.merge_accounts(from_account.id, from_account.id)
     end
 
-    test "is transactional: an error midway rolls back every table",
+    test "rejects a merge before touching anything when the into ref does not resolve",
          %{from_account: from_account} do
-      # Sabotage the transaction by deleting the `into` account's workspace so
-      # a later step (workspace re-point through a still-valid FK) would still
-      # succeed; instead we directly force a failure by merging into a
-      # non-existent ref after the accounts are captured, proving the
-      # transaction guard rejects it before touching anything.
       assert {:error, :not_found} = Accounts.merge_accounts(from_account.id, "does-not-exist")
 
-      # Nothing moved: the from account's event/credential/link are untouched.
       before = sum_cost(from_account.id)
       assert_in_delta before, 3.00, 0.001
 
       {:ok, reloaded_from} = Ash.get(ProviderAccount, from_account.id)
       assert reloaded_from.merged_into_id == nil
       assert reloaded_from.enabled == true
+    end
+
+    test "is transactional: an error midway through the transaction rolls back every table",
+         %{
+           from_account: from_account,
+           into_account: into_account,
+           ws_from: ws_from,
+           from_cred: from_cred,
+           event_from: event_from
+         } do
+      # Both accounts hold a quota row, so the merge's quota-collapse step
+      # (which runs after usage_events and provider_credentials have already
+      # been re-pointed inside the same transaction) actually executes.
+      create_anthropic_quota!(from_account.id)
+      create_anthropic_quota!(into_account.id)
+
+      # Inject a real failure *inside* the transaction, past the two steps
+      # that already ran — proving all-or-nothing, not just the up-front
+      # ref-resolution guard.
+      :meck.new(Rekey, [:passthrough])
+      :meck.expect(Rekey, :collapse_anthropic, fn _rows -> raise "injected mid-merge failure" end)
+
+      try do
+        assert {:error, _reason} = Accounts.merge_accounts(from_account.id, into_account.id)
+      after
+        :meck.unload(Rekey)
+      end
+
+      # usage_events: still pointed at from
+      {:ok, reloaded_event} = Ash.get(Event, event_from.id)
+      assert reloaded_event.provider_account_id == from_account.id
+
+      # provider_credentials: still owned by from
+      {:ok, reloaded_cred} = Ash.get(ProviderCredential, from_cred.id)
+      assert reloaded_cred.provider_account_id == from_account.id
+
+      # anthropic_quotas: both rows survive, uncollapsed
+      quota_rows =
+        AnthropicQuota
+        |> Ash.Query.filter(provider_account_id in [^from_account.id, ^into_account.id])
+        |> Ash.read!()
+
+      assert length(quota_rows) == 2
+
+      # workspace_provider_accounts: still pointed at from
+      {:ok, link_from} =
+        WorkspaceProviderAccount
+        |> Ash.Query.filter(workspace_id == ^ws_from.id and provider == :claude)
+        |> Ash.read_one()
+
+      assert link_from.provider_account_id == from_account.id
+
+      # the from row: not soft-deleted
+      {:ok, reloaded_from} = Ash.get(ProviderAccount, from_account.id)
+      assert reloaded_from.merged_into_id == nil
+      assert reloaded_from.enabled == true
+    end
+  end
+
+  describe "merge_accounts/2 — quota collapse (§6)" do
+    test "anthropic_quotas: collapses per column group, header cols from the newest captured_at, oauth cols from the newest oauth_captured_at" do
+      from = create_account!(%{provider: :claude, slug: "quota-merge-from"})
+      into = create_account!(%{provider: :claude, slug: "quota-merge-into"})
+
+      # `from` has the fresher oauth block but the staler header.
+      create_anthropic_quota!(from.id,
+        captured_at: ~U[2026-01-01 00:00:00Z],
+        utilization_5h: 0.1,
+        oauth_captured_at: ~U[2026-01-05 00:00:00Z],
+        oauth_utilization_5h: 0.9
+      )
+
+      create_anthropic_quota!(into.id,
+        captured_at: ~U[2026-01-03 00:00:00Z],
+        utilization_5h: 0.5,
+        oauth_captured_at: ~U[2026-01-02 00:00:00Z],
+        oauth_utilization_5h: 0.2
+      )
+
+      assert {:ok, _} = Accounts.merge_accounts(from.id, into.id)
+
+      assert {:ok, merged} =
+               AnthropicQuota
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "claude")
+               |> Ash.read_one()
+
+      # header columns come from the newest `captured_at` row (into's)
+      assert_in_delta merged.utilization_5h, 0.5, 0.001
+      assert DateTime.compare(merged.captured_at, ~U[2026-01-03 00:00:00Z]) == :eq
+
+      # oauth columns come from the newest `oauth_captured_at` row (from's)
+      assert_in_delta merged.oauth_utilization_5h, 0.9, 0.001
+      assert DateTime.compare(merged.oauth_captured_at, ~U[2026-01-05 00:00:00Z]) == :eq
+
+      # exactly one row survives on (into.id, "claude")
+      assert [_one] =
+               AnthropicQuota
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "claude")
+               |> Ash.read!()
+    end
+
+    test "codex_quotas: collapses to the single newest row" do
+      from = create_account!(%{provider: :codex, slug: "codex-merge-from"})
+      into = create_account!(%{provider: :codex, slug: "codex-merge-into"})
+
+      create_codex_quota!(from.id, captured_at: ~U[2026-01-05 00:00:00Z], plan: "from-plan")
+      create_codex_quota!(into.id, captured_at: ~U[2026-01-01 00:00:00Z], plan: "into-plan")
+
+      assert {:ok, _} = Accounts.merge_accounts(from.id, into.id)
+
+      assert {:ok, merged} =
+               CodexQuota
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "codex")
+               |> Ash.read_one()
+
+      assert merged.plan == "from-plan"
+
+      assert [_one] =
+               CodexQuota
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "codex")
+               |> Ash.read!()
+    end
+
+    test "cloud_code_quotas (gemini_cli): collapses to the single newest row" do
+      from = create_account!(%{provider: :gemini_cli, slug: "gemini-merge-from"})
+      into = create_account!(%{provider: :gemini_cli, slug: "gemini-merge-into"})
+
+      create_cloud_code_quota!(from.id, "gemini_cli",
+        captured_at: ~U[2026-01-01 00:00:00Z],
+        plan: "from-plan"
+      )
+
+      create_cloud_code_quota!(into.id, "gemini_cli",
+        captured_at: ~U[2026-01-05 00:00:00Z],
+        plan: "into-plan"
+      )
+
+      assert {:ok, _} = Accounts.merge_accounts(from.id, into.id)
+
+      assert {:ok, merged} =
+               GoogleQuota
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "gemini_cli")
+               |> Ash.read_one()
+
+      assert merged.plan == "into-plan"
+
+      assert [_one] =
+               GoogleQuota
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "gemini_cli")
+               |> Ash.read!()
+    end
+
+    test "re-points a single quota row when only the from account has one" do
+      from = create_account!(%{provider: :claude, slug: "quota-solo-from"})
+      into = create_account!(%{provider: :claude, slug: "quota-solo-into"})
+
+      create_anthropic_quota!(from.id, utilization_5h: 0.42)
+
+      assert {:ok, _} = Accounts.merge_accounts(from.id, into.id)
+
+      assert {:ok, merged} =
+               AnthropicQuota
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "claude")
+               |> Ash.read_one()
+
+      assert_in_delta merged.utilization_5h, 0.42, 0.001
     end
   end
 

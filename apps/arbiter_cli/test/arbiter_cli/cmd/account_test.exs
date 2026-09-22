@@ -121,6 +121,47 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert err =~ "requires a secret"
   end
 
+  test "account rotate reads the secret from stdin when \"-\" is passed as an explicit rotate argument" do
+    parent = self()
+
+    stub_routes([
+      {{"post", "/api/accounts/personal-max/rotate"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted_body, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{
+           "id" => "cred-3",
+           "kind" => "oauth_token",
+           "fingerprint" => "aaaabbbbcccc",
+           "active" => true
+         })
+       end}
+    ])
+
+    out =
+      capture_io("sk-from-stdin\n", fn ->
+        capture_io(:stderr, fn ->
+          Account.run([
+            "rotate",
+            "personal-max",
+            "--kind",
+            "oauth_token",
+            "--env-var",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "-"
+          ])
+        end)
+      end)
+
+    assert out =~ "rotated oauth_token credential (fingerprint=aaaabbbbcccc)"
+    refute out =~ "sk-from-stdin"
+
+    assert_received {:posted_body, %{"secret" => "sk-from-stdin"}}
+  end
+
   test "account merge posts into and reports the survivor" do
     stub_post("/api/accounts/merge-from/merge", %{
       "id" => "acct-into",
