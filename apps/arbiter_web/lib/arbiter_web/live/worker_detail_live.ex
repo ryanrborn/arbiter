@@ -982,9 +982,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <span class="inline-flex items-center gap-1.5">
                     <.provider_icon provider={Worker.provider(@snapshot.meta)} class="size-4" />
                     <code class="font-mono text-xs">
-                      {ArbiterWeb.CoreComponents.ProviderIcon.display_name(
-                        Worker.provider(@snapshot.meta)
-                      )}
+                      {provider_display_name(Worker.provider(@snapshot.meta))}
                     </code>
                   </span>
                 </:item>
@@ -1445,6 +1443,20 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   defp mr_ref(_), do: nil
+
+  # A registered-but-unmapped provider string (e.g. a future adapter added
+  # before its logo lands) shows as itself rather than collapsing to the
+  # "Unknown provider" fallback, which is reserved for nil/unrecognized
+  # meta so the raw value stays visible for diagnosis.
+  defp provider_display_name(nil), do: display_name(nil)
+
+  defp provider_display_name(provider) do
+    if provider in ArbiterWeb.CoreComponents.ProviderIcon.__known_providers__() do
+      display_name(provider)
+    else
+      provider
+    end
+  end
 
   # ---- execution context helpers ----------------------------------------
 

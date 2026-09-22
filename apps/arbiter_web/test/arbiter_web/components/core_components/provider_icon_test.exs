@@ -10,7 +10,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       html = render_component(&provider_icon/1, provider: "claude")
 
       assert html =~ "<svg"
-      assert html =~ ~s(title="Claude")
+      assert html =~ ~s(<title>Claude</title>)
       assert html =~ ~s(aria-label="Claude")
     end
 
@@ -18,7 +18,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       html = render_component(&provider_icon/1, provider: "codex")
 
       assert html =~ "<svg"
-      assert html =~ ~s(title="Codex")
+      assert html =~ ~s(<title>Codex</title>)
       assert html =~ ~s(aria-label="Codex")
     end
 
@@ -26,7 +26,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       html = render_component(&provider_icon/1, provider: "gemini")
 
       assert html =~ "<svg"
-      assert html =~ ~s(title="Gemini")
+      assert html =~ ~s(<title>Gemini</title>)
       assert html =~ ~s(aria-label="Gemini")
     end
 
@@ -34,14 +34,14 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       html = render_component(&provider_icon/1, provider: nil)
 
       assert html =~ "<svg"
-      assert html =~ ~s(title="Unknown provider")
+      assert html =~ ~s(<title>Unknown provider</title>)
       assert html =~ ~s(aria-label="Unknown provider")
     end
 
     test "falls back to a generic icon for an unrecognized value" do
       html = render_component(&provider_icon/1, provider: "some-future-provider")
 
-      assert html =~ ~s(title="Unknown provider")
+      assert html =~ ~s(<title>Unknown provider</title>)
     end
   end
 

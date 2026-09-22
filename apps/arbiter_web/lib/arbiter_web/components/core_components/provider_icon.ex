@@ -72,11 +72,11 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
       stroke-linecap="round"
       stroke-linejoin="round"
       role="img"
-      title={@name}
       aria-label={@name}
       class={@class}
       {@rest}
     >
+      <title>{@name}</title>
       {Phoenix.HTML.raw(@body)}
     </svg>
     """
