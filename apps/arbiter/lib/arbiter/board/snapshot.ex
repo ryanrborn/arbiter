@@ -96,10 +96,12 @@ defmodule Arbiter.Board.Snapshot do
   board's behaviour is testable without a database.
   """
 
+  alias Arbiter.Accounts.Concurrency
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Usage.Budget
+  alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
 
   require Ash.Query
@@ -271,8 +273,8 @@ defmodule Arbiter.Board.Snapshot do
   **Workspace-level scoping:** `slots_total` and `quota` are computed for the
   specified workspace (defaulting to the default workspace if not given).
   However, `:issues` and `:workers` span all workspaces. Per-workspace
-  concurrency limits are correctly enforced by the Conductor; this board is
-  a global view with workspace-specific slot constraints. Multi-workspace
+  concurrency limits are enforced at dispatch by `effective_max_concurrent/1`;
+  this board is a global view with workspace-specific slot constraints. Multi-workspace
   boards with workspace-specific caps are a known limitation (see #1359).
   """
   @spec load(keyword()) :: t()
@@ -351,9 +353,8 @@ defmodule Arbiter.Board.Snapshot do
 
   @doc """
   The install-wide worker ceiling — the runtime `Arbiter.Settings` override,
-  else app env, else #{@default_system_max}. Mirrors
-  `Arbiter.Workflows.Conductor`'s resolution so the board counts slots the
-  same way the graph engine spends them.
+  else app env, else #{@default_system_max}. (The `conductor_` prefix on the
+  setting name is historical — the board scheduler is the only dispatcher.)
   """
   @spec system_max_concurrent() :: pos_integer()
   def system_max_concurrent do
@@ -365,12 +366,22 @@ defmodule Arbiter.Board.Snapshot do
 
   @doc """
   The effective maximum concurrent workers for a workspace: the minimum of the
-  workspace-level cap (if set) and the system-wide cap. Mirrors
-  `Arbiter.Workflows.Conductor.effective_cap/1` (quota_headroom aside).
+  workspace-level cap (if set), the system-wide cap, and — since P8
+  (`docs/provider-account-design.md` §4.2) — the headroom left on the provider
+  account this workspace is metered under.
 
-  When workspace_id is nil, returns the system max.
+  The account term matters because `slots_total` is what every Ready card's queue position is computed from: a
+  board that ignores a full account promises slots the next scheduler tick will
+  refuse. It can therefore return **0**, which the pre-P8 signature could not.
+
+  The workspace's own live workers are added back before the min (via
+  `Concurrency.clamp/3`) because `load/1` subtracts the running cards from
+  `slots_total` itself — counting them in both places would halve the number.
+
+  When workspace_id is nil, returns the system max: a fleet-wide board is not
+  scoped to any one account.
   """
-  @spec effective_max_concurrent(String.t() | nil) :: pos_integer()
+  @spec effective_max_concurrent(String.t() | nil) :: non_neg_integer()
   def effective_max_concurrent(nil) do
     system_max_concurrent()
   end
@@ -378,15 +389,25 @@ defmodule Arbiter.Board.Snapshot do
   def effective_max_concurrent(workspace_id) when is_binary(workspace_id) do
     system_max = system_max_concurrent()
 
-    case workspace_config_max(workspace_id) do
-      n when is_integer(n) and n > 0 -> min(n, system_max)
-      _ -> system_max
-    end
+    base =
+      case workspace_config_max(workspace_id) do
+        n when is_integer(n) and n > 0 -> min(n, system_max)
+        _ -> system_max
+      end
+
+    provider = Arbiter.Quota.default_provider(workspace_id)
+
+    Concurrency.clamp(
+      base,
+      Concurrency.headroom(workspace_id, provider),
+      Concurrency.workspace_live_count(workspace_id, provider)
+    )
   rescue
     _ -> system_max_concurrent()
   end
 
-  # Read the workspace's conductor.max_concurrent config, if set.
+  # Read the workspace's `conductor.max_concurrent` config key, if set. The key
+  # name is historical (bd-a14qd1); it is the board scheduler's per-workspace cap.
   defp workspace_config_max(workspace_id) do
     case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
       {:ok, ws} -> Arbiter.Tasks.Workspace.max_concurrent(ws)
@@ -407,14 +428,13 @@ defmodule Arbiter.Board.Snapshot do
   Reads the snapshot for the **provider account** the workspace is metered
   under, on that workspace's default agent provider
   (`Arbiter.Quota.default_provider/1`), and defers the over-cap decision to
-  `Arbiter.Quota.Gate.hold_phrase/2` (`gating_window/2`) — the same shared implementation the
-  Conductor's `Arbiter.Workflows.QuotaGate.Default` and the `dispatch/2`
-  quota seam both use (bd-5j6nmn), so Autopilot's one-per-tick promotion gate
-  and the Conductor's per-drain cap-clamp agree on the same underlying data.
+  `Arbiter.Quota.Gate.hold_phrase/2` (`gating_window/2`) — the same shared
+  implementation the `dispatch/2` quota seam uses (bd-5j6nmn), so Autopilot's
+  one-per-tick promotion gate and the dispatcher agree on the same underlying
+  data.
 
   A `:continue`-mode workspace (`Arbiter.Quota.continue_mode?/1`) never holds
-  here, mirroring `Arbiter.Workflows.QuotaGate.Default`'s short-circuit: the
-  `dispatch/2` seam is the single choke point for the allow/overage decision,
+  here: the `dispatch/2` seam is the single choke point for the allow/overage decision,
   so the board must not show a `blocked — quota exhausted` hold that the
   dispatcher itself would not honor (reviewer round 1, finding 1).
   """
@@ -564,11 +584,14 @@ defmodule Arbiter.Board.Snapshot do
     workers
     |> Enum.filter(&(&1.status in @running_statuses))
     |> Enum.map(fn w ->
+      gate_worker = Map.get(gate_workers_by_author, w.task_id)
+
       w
       |> base_card(issues_by_id)
       |> Map.merge(%{
         step: Map.get(w, :current_step),
-        activity: activity(w, Map.get(gate_workers_by_author, w.task_id)),
+        activity: activity(w, gate_worker),
+        provider: card_provider(w, gate_worker),
         since: since(w)
       })
     end)
@@ -1051,6 +1074,15 @@ defmodule Arbiter.Board.Snapshot do
 
   defp activity(worker, _gate_worker), do: live_label(worker) || "working"
 
+  # While an author sits in :awaiting_review_gate, the gate worker (reviewer
+  # or implementer) is the one actually running for the issue, so its
+  # provider is what the card shows — not the parked author's.
+  defp card_provider(%{status: :awaiting_review_gate}, %{} = gate_worker) do
+    Worker.provider(Map.get(gate_worker, :meta))
+  end
+
+  defp card_provider(worker, _gate_worker), do: Worker.provider(Map.get(worker, :meta))
+
   # A reviewer/implementer's synthetic id is `<base>#<suffix>` where suffix
   # may itself be a chain (e.g. `#review#impl2`, `#review#r2#v2`) —
   # `Arbiter.Worker.ReviewGate.base_task_id/1` recovers the base id
@@ -1166,8 +1198,7 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   # Open gating blockers per issue. The rule itself lives in
-  # `Arbiter.Tasks.EdgeGate` (bd-6bax7s), shared with the Conductor so the two
-  # schedulers cannot drift; this is only the read that feeds it.
+  # `Arbiter.Tasks.EdgeGate` (bd-6bax7s); this is only the read that feeds it.
   defp blockers_from(deps, issues) do
     EdgeGate.blockers(deps, issues)
   rescue

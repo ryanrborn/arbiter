@@ -619,6 +619,19 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert html =~ task.id
     end
+
+    test "shows the worker's provider icon", %{conn: conn, ws: ws} do
+      task = issue(ws, "work on codex")
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+      :ok = Worker.report(pid, :provider, "codex")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               ~s(#board-column-running [id="card-#{task.id}"] [aria-label="Codex"])
+             )
+    end
   end
 
   describe "the Waiting column holds everything out of the worker's hands" do

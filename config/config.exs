@@ -198,6 +198,12 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
+# Never let router-dispatch debug logging (Phoenix.Logger) write plaintext
+# request params to the log — provider-account rotate/mint endpoints accept
+# raw secrets/tokens as JSON body params (P11 AC 4: never display or log a
+# credential's secret value).
+config :phoenix, :filter_parameters, ["password", "secret", "token"]
+
 # Force exqlite to compile from source on RHEL8/glibc<2.33 systems; the
 # precompiled NIF requires glibc 2.33 which is not available on Amazon Linux 2
 # or RHEL 8. This has no cost on systems that already have a compatible binary.

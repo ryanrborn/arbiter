@@ -4,7 +4,7 @@ defmodule Arbiter.ProcessTeardown do
 
   `DynamicSupervisor.terminate_child/2` sends a bare `Process.exit(child,
   :shutdown)`. None of Arbiter's per-workspace workers, patrols, machines or
-  conductors trap exits, so that signal kills them the instant it arrives —
+  queues trap exits, so that signal kills them the instant it arrives —
   including while they are parked inside an `Ecto` query or transaction.
 
   That is not merely untidy. The dying process is a DBConnection *client*

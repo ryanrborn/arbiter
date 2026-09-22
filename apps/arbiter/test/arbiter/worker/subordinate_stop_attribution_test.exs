@@ -11,8 +11,8 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
   # ran the whole primary-worker failure path keyed on the base `task_id`:
   #
   #   * `Arbiter.Events.broadcast(ws, "worker_failed", %{task_id: task_id})`
-  #     — which the Conductor consumes to pause the task's downstream branch, and
-  #     which the API event stream reports as "the worker for <task> stopped";
+  #     — which the API event stream reports as "the worker for <task>
+  #     stopped";
   #   * a Coordinator escalation subject `"<task_id> stopped — exited without
   #     completing (exit 0)"` whose remediation reads "Resume: run `arb worker
   #     resume <task_id>`".
@@ -122,9 +122,8 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
     end
 
     test "does not raise a task-keyed worker_failed event", %{task: task} do
-      # The Conductor pauses a member's downstream branch on this event, and the
-      # API event stream reports it as the task's worker stopping. Neither is
-      # true here: the task's own worker is untouched.
+      # The API event stream reports this event as the task's worker stopping.
+      # That is not true here: the task's own worker is untouched.
       task_id = task.id
       refute_receive {:event, %{topic: "worker_failed", task_id: ^task_id}}, 800
     end

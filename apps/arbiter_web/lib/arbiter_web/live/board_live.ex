@@ -862,6 +862,10 @@ defmodule ArbiterWeb.BoardLive do
                   <:status>
                     <span class="flex items-center gap-1.5">
                       <.over_budget_flag :if={card.over_budget} />
+                      <.provider_icon
+                        provider={card.provider}
+                        class="size-3.5 text-[var(--text-label)]"
+                      />
                       <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]">
                         {elapsed(card.since, @now)}
                       </span>

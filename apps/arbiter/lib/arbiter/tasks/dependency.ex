@@ -24,9 +24,9 @@ defmodule Arbiter.Tasks.Dependency do
     conflicts_with A (both directions carry the same meaning). **Non-gating**:
     it does NOT affect `Issue.ready/0` — a conflicting peer being open does not
     prevent an issue from becoming *ready*. It is consumed one step later, at
-    **dispatch** time, by `Arbiter.Tasks.EdgeGate` — the predicate both
-    schedulers ask (the graph Conductor, and the board's
-    `Arbiter.Board.Scheduler` / Autopilot since bd-6bax7s). A ready task whose
+    **dispatch** time, by `Arbiter.Tasks.EdgeGate` — the predicate the board
+    scheduler (`Arbiter.Board.Scheduler` / Autopilot) asks since bd-6bax7s.
+    A ready task whose
     counterpart is in flight is held with `blocked — conflicts with <id>
     (<state>)` until that counterpart merges, closes or is parked.
 
@@ -41,7 +41,7 @@ defmodule Arbiter.Tasks.Dependency do
   `:conflicts_with` is non-gating and still stops a dispatch, because
   readiness is a property of the task and the mutex is a property of the
   moment. `Arbiter.Tasks.EdgeGate` holds both halves of that distinction, and
-  is what the Conductor and the board scheduler both consult.
+  is what the board scheduler consults.
 
   ## Constraints
 
@@ -135,9 +135,9 @@ defmodule Arbiter.Tasks.Dependency do
       description """
       Edge type. Only `:blocks` and `:depends_on` gate readiness; the rest are
       non-gating. `:conflicts_with` is symmetric mutual-exclusion, consumed at
-      dispatch time rather than at readiness evaluation — by the Conductor and
-      the board's scheduler alike, through `Arbiter.Tasks.EdgeGate`. See module
-      doc for full semantics.
+      dispatch time rather than at readiness evaluation — by the board
+      scheduler, through `Arbiter.Tasks.EdgeGate`. See module doc for full
+      semantics.
       """
     end
 

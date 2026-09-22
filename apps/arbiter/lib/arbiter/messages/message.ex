@@ -295,8 +295,8 @@ defmodule Arbiter.Messages.Message do
 
     # bd-58vtjk: legacy alias for `task_ref`, kept for the retirement compat
     # window. "directive" here is old fleet vernacular for "task/issue" — it
-    # predates, and is unrelated to, the Graph/Conductor `directive` concept
-    # (`graph_add_directive` etc., which uses `issue_id`). Dual-written by the
+    # predates, and is unrelated to, the removed Graph `directive` concept
+    # (bd-a14qd1). Dual-written by the
     # `:create` action's change so a row written under either name is found
     # under either; readers should prefer `task_ref/1`. Drop this attribute
     # (and the compat branches in :create and `task_ref/1`) once no old

@@ -40,6 +40,69 @@ defmodule Arbiter.Worker.Registry do
   end
 
   @doc """
+  Record the dispatch context of the calling worker on its own registry entry:
+  the workspace it is running for and the provider it was dispatched with.
+
+  Called by `Arbiter.Worker.init/1`. The registry value — not a counter
+  anywhere — is what makes `Arbiter.Accounts.Concurrency.live_count/1`
+  authoritative (`docs/provider-account-design.md` §4.2): it exists exactly as
+  long as the process does, so a crashed or killed worker releases its slot
+  with no decrement call on any path.
+
+  Must be called *from* the registered process; `Registry.update_value/3` only
+  lets an owner rewrite its own value. A non-owner (or an unregistered key) is
+  a no-op rather than an error — the dispatch context is an optimisation for
+  the ceiling, never something a worker's boot should die on.
+  """
+  @spec put_dispatch(String.t(), String.t() | nil, atom() | String.t() | nil) :: :ok
+  def put_dispatch(registry_key, workspace_id, provider) when is_binary(registry_key) do
+    value = %{workspace_id: workspace_id, provider: normalize_provider(provider)}
+    Registry.update_value(__MODULE__, registry_key, fn _ -> value end)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider),
+    do: Atom.to_string(provider)
+
+  defp normalize_provider(provider) when is_binary(provider) and provider != "", do: provider
+  defp normalize_provider(_), do: nil
+
+  @doc """
+  Every **live** registry entry that recorded a dispatch context via
+  `put_dispatch/3`, as `%{registry_key:, pid:, workspace_id:, provider:}`.
+
+  Entries whose process has already died are dropped here rather than by the
+  caller: Registry's monitor-based cleanup is asynchronous, so a killed worker
+  can leave a corpse row behind for a short window and a corpse holds no slot
+  (same rule as `live_for/1`).
+  """
+  @spec live_dispatches() :: [
+          %{
+            registry_key: String.t(),
+            pid: pid(),
+            workspace_id: String.t() | nil,
+            provider: String.t() | nil
+          }
+        ]
+  def live_dispatches do
+    __MODULE__
+    |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
+    |> Enum.flat_map(fn
+      {key, pid, %{workspace_id: ws_id, provider: provider}} ->
+        if Process.alive?(pid) do
+          [%{registry_key: key, pid: pid, workspace_id: ws_id, provider: provider}]
+        else
+          []
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  @doc """
   Return every `{registry_key, pid}` pair owned by `task_id`: the exact key
   itself plus synthetic sub-worker keys (`<task_id>:fixpass`,
   `<task_id>:conflict`, `<task_id>#review`, `<task_id>#r<N>`, ...).

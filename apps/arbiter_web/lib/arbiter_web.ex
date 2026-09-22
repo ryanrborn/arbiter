@@ -137,6 +137,9 @@ defmodule ArbiterWeb do
       # `ArbiterWeb.CoreComponents.Domain.index_header/1` until a follow-up
       # ticket migrates those call sites and retires the old one.
       import ArbiterWeb.CoreComponents.Domain, except: [index_header: 1]
+      # Provider logo (`<.provider_icon provider={...} />`) — Claude/Codex/Gemini,
+      # with a fallback for nil/unknown. See bd-1gj7l5.
+      import ArbiterWeb.CoreComponents.ProviderIcon
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # One `parent_of` edge at two sizes: the board card's `↳ bd-epic` chip

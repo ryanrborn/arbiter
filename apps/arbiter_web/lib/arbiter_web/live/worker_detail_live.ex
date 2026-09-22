@@ -979,7 +979,12 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <% end %>
                 </:item>
                 <:item label="Provider">
-                  <code class="font-mono text-xs">{execution_provider(@snapshot)}</code>
+                  <span class="inline-flex items-center gap-1.5">
+                    <.provider_icon provider={Worker.provider(@snapshot.meta)} class="size-4" />
+                    <code class="font-mono text-xs">
+                      {provider_display_name(Worker.provider(@snapshot.meta))}
+                    </code>
+                  </span>
                 </:item>
                 <:item :if={thinking = execution_thinking(@snapshot)} label="Reasoning effort">
                   <code class="font-mono text-xs">{thinking}</code>
@@ -1439,18 +1444,21 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   defp mr_ref(_), do: nil
 
-  # ---- execution context helpers ----------------------------------------
+  # A registered-but-unmapped provider string (e.g. a future adapter added
+  # before its logo lands) shows as itself rather than collapsing to the
+  # "Unknown provider" fallback, which is reserved for nil/unrecognized
+  # meta so the raw value stays visible for diagnosis.
+  defp provider_display_name(nil), do: display_name(nil)
 
-  # Provider: prefer the ACTUAL model provider synced from session (set once
-  # the Claude init event arrives), then fall back to the routing config
-  # stamped at spawn time (set before spawn via Worker.report).
-  defp execution_provider(%{meta: meta}) when is_map(meta) do
-    Map.get(meta, :provider) ||
-      get_in(meta, [:routing_config, :provider]) ||
-      "claude"
+  defp provider_display_name(provider) do
+    if provider in ArbiterWeb.CoreComponents.ProviderIcon.__known_providers__() do
+      display_name(provider)
+    else
+      provider
+    end
   end
 
-  defp execution_provider(_), do: "claude"
+  # ---- execution context helpers ----------------------------------------
 
   # Model: prefer the ACTUAL model from the running session (synced from the
   # Claude streaming init event — exact concrete model name), then fall back to

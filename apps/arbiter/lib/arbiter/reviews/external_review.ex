@@ -1831,12 +1831,18 @@ defmodule Arbiter.Reviews.ExternalReview do
         "ext:#{String.slice(prepared.mr_ref, 0, 250)}"
       end
 
+    provider = provider_for(model)
+    workspace_id = prepared.workspace && to_string(prepared.workspace.id)
+    provider_account_id = Arbiter.Accounts.Resolver.account_id(workspace_id, provider)
+
     attrs = %{
       task_id: task_id,
-      workspace_id: prepared.workspace && to_string(prepared.workspace.id),
+      workspace_id: workspace_id,
       step: :review,
       model: model,
-      provider: provider_for(model),
+      provider: provider,
+      provider_account_id: provider_account_id,
+      provider_credential_id: Arbiter.Accounts.Resolver.credential_id(provider_account_id),
       tokens_in: Map.get(usage, :tokens_in),
       tokens_out: Map.get(usage, :tokens_out),
       cost_usd: Map.get(usage, :cost_usd),

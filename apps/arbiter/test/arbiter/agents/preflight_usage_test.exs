@@ -101,4 +101,40 @@ defmodule Arbiter.Agents.PreflightUsageTest do
     assert :skipped = Preflight.check(NoProbeAdapter, [])
     assert Event |> Ash.Query.filter(source == :preflight) |> Ash.read!() == []
   end
+
+  # bd-96mn8i round 5 finding 1: every test above replays a hand-built or
+  # verbatim-captured fixture through `probe_command:` — proof that the
+  # PARSER matches codex's `turn.completed` shape, but not proof that a real
+  # `codex exec` invocation reaches that parser end to end. This is that
+  # proof: no `probe_command:` override, so `Preflight.check/2` falls
+  # through to `Codex.auth_probe_argv/1` and spawns the actual installed
+  # `codex` CLI (bd-96mn8i round 3 review finding 1). Opt-in (`:live_codex_cli`,
+  # excluded by default in `test/test_helper.exs`) because it spends real
+  # quota against whatever account this host is logged into:
+  #
+  #     mix test --include live_codex_cli test/arbiter/agents/preflight_usage_test.exs
+  #
+  # Skips (not fails) when this host has no codex CLI on PATH — an
+  # environment gap, not a red suite.
+  @tag :live_codex_cli
+  test "a live codex exec round-trip writes a preflight row with real, non-zero tokens" do
+    if System.find_executable("codex") do
+      assert :ok =
+               Preflight.check(Arbiter.Agents.Codex,
+                 usage_workspace_id: "ws-pf-live-codex",
+                 timeout_ms: 60_000
+               )
+
+      [ev] =
+        Event
+        |> Ash.Query.filter(source == :preflight and workspace_id == "ws-pf-live-codex")
+        |> Ash.read!()
+
+      assert ev.provider == "codex"
+      assert is_integer(ev.tokens_in) and ev.tokens_in > 0
+      assert is_integer(ev.tokens_out) and ev.tokens_out > 0
+    else
+      IO.puts("SKIP: no codex CLI on PATH on this host — live round-trip not exercised")
+    end
+  end
 end

@@ -43,7 +43,6 @@ defmodule Arbiter.ApplicationTest do
       ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
 
       assert :reconcile_boot_task in ids
-      assert :conductor_reconcile_boot_task in ids
       assert :merge_queue_boot_task in ids
       assert :pr_patrol_boot_task in ids
     end
@@ -72,15 +71,13 @@ defmodule Arbiter.ApplicationTest do
       guard_ix = Enum.find_index(ids, &(&1 == Arbiter.SingleInstance))
       migrator_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.Migrator))
       reconcile_ix = Enum.find_index(ids, &(&1 == :reconcile_boot_task))
-      conductor_reconcile_ix = Enum.find_index(ids, &(&1 == :conductor_reconcile_boot_task))
       merge_queue_ix = Enum.find_index(ids, &(&1 == :merge_queue_boot_task))
       pr_patrol_ix = Enum.find_index(ids, &(&1 == :pr_patrol_boot_task))
 
       assert guard_ix < migrator_ix
       assert migrator_ix < reconcile_ix
-      # conductor_reconcile runs after worker-run reconcile (so orphaned runs are
-      # marked :failed before the Conductor re-reads member statuses).
-      assert reconcile_ix < conductor_reconcile_ix
+      # bd-a14qd1: the graph Conductor and its boot reconcile task are gone.
+      refute :conductor_reconcile_boot_task in ids
       assert migrator_ix < merge_queue_ix
       assert migrator_ix < pr_patrol_ix
     end
@@ -111,7 +108,6 @@ defmodule Arbiter.ApplicationTest do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 
       refute :reconcile_boot_task in ids
-      refute :conductor_reconcile_boot_task in ids
       refute :merge_queue_boot_task in ids
       refute :pr_patrol_boot_task in ids
       refute Arbiter.SingleInstance in ids

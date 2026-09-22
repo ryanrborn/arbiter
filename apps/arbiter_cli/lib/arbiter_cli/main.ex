@@ -42,6 +42,13 @@ defmodule ArbiterCli.Main do
                                   [--metadata JSON]
       arb skill delete    <id|name> [--force]
 
+      arb account list                              [--provider p]
+      arb account show    <ref>                      (uuid, provider:slug, or bare slug)
+      arb account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
+      arb account attach  <workspace-id> <provider> <ref> [--share N]
+      arb account rotate  <ref> --kind k --env-var V (--secret S | --secret-file PATH | -)
+      arb account merge   <from-ref> --into <into-ref>
+
       arb dep add         <from> <type> <to>
       arb dep remove      <from> <to>
 
@@ -78,8 +85,6 @@ defmodule ArbiterCli.Main do
       arb loop diff       <id>
       arb loop apply      <id> | all [--state proposed]
       arb loop reject     <id> [--reason "..."]
-
-      arb queue resume    <task-id>
 
       arb scheduler pause|resume|status
 
@@ -253,6 +258,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
   defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)
+  defp dispatch_known("account", args), do: ArbiterCli.Cmd.Account.run(args)
   defp dispatch_known("session", args), do: ArbiterCli.Cmd.Session.run(args)
   # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`.
   defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
