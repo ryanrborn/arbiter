@@ -63,6 +63,49 @@ defmodule ArbiterCli.Cmd.CreateTest do
                     }}
   end
 
+  # #1973: the server needs the parent at create time to default a child of a
+  # tracker-linked parent to context-only rather than minting its own ticket.
+  test "--parent is sent with the create so the server can default the tracker from it" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-008", "title" => "X"})
+       end},
+      {{"post", "/api/dependencies"}, {%{"id" => "dep-1"}, 201}}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Create.run(["X", "--parent", "bd-epic"]) end)
+
+    assert exit_code == 0
+    assert_received {:posted, %{"parent_id" => "bd-epic"}}
+  end
+
+  test "without --parent no parent_id is sent" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-009", "title" => "X"})
+       end}
+    ])
+
+    {_out, _err, 0} = capture(fn -> Create.run(["X"]) end)
+
+    assert_received {:posted, body}
+    refute Map.has_key?(body, "parent_id")
+  end
+
   test "--parent attach failure surfaces and exits non-zero" do
     stub_routes([
       {{"get", "/api/workspaces"},
