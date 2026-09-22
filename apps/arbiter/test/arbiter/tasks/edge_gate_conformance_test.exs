@@ -1,48 +1,27 @@
 defmodule Arbiter.Tasks.EdgeGateConformanceTest do
   @moduledoc """
-  bd-6bax7s acceptance 4: Arbiter has two schedulers, and they must answer the
-  edge question the same way.
+  bd-6bax7s acceptance 4: every `Dependency` edge type, and what the dispatch
+  path does with it.
 
-  Each scenario builds the *same* issues and the *same* `Dependency` rows once,
-  then asks both paths what they would dispatch:
+  Each scenario builds issues and `Dependency` rows, then asks the **board
+  path** — `Arbiter.Board.Snapshot` → `Arbiter.Board.Scheduler`, the one
+  `Arbiter.Board.Autopilot` actually dispatches from — which cards it refuses
+  to dispatch **because of an edge**, the question `Arbiter.Tasks.EdgeGate`
+  owns.
 
-    * the **graph path** — `Arbiter.Workflows.Conductor`, over a graph whose
-      members are those issues.
-    * the **board path** — `Arbiter.Board.Snapshot` → `Arbiter.Board.Scheduler`,
-      the one `Arbiter.Board.Autopilot` actually dispatches from.
-
-  The two have different *shapes* — the Conductor fills every free slot in one
-  pass, the board deliberately promotes one card per plan (see
-  `Arbiter.Board.Scheduler`'s moduledoc) — so what is compared is the set each
-  refuses to dispatch **because of an edge**, which is the question
-  `Arbiter.Tasks.EdgeGate` owns.
+  This used to compare that answer against a second scheduler (the graph
+  Conductor), which is the drift bd-6bax7s was filed for. bd-a14qd1 removed
+  that scheduler, so there is one path left and the table below pins its
+  answer directly — the same scenarios, the same expectations.
   """
-  # async: false — the Conductor runs in its own process and reads the DB.
-  use Arbiter.DataCase, async: false
+  use Arbiter.DataCase, async: true
 
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.Dependency
-  alias Arbiter.Tasks.Graph
-  alias Arbiter.Tasks.GraphMember
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Workflows.Conductor
-  alias Arbiter.Workflows.ConductorSupervisor
-
-  defmodule RecordingDispatcher do
-    @moduledoc false
-    def dispatch(task_id, opts) do
-      if pid = Application.get_env(:arbiter, :test_conformance_pid),
-        do: send(pid, {:dispatched, task_id, opts})
-
-      {:ok, %{task_id: task_id}}
-    end
-  end
 
   setup do
-    Application.put_env(:arbiter, :test_conformance_pid, self())
-    on_exit(fn -> Application.delete_env(:arbiter, :test_conformance_pid) end)
-
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "conformance-#{System.unique_integer([:positive])}",
@@ -55,7 +34,7 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
   # ---- the scenarios -------------------------------------------------------
   #
   # `:a` always carries the lower priority number, so it is the head of the
-  # queue on both paths and the tie-break never enters into it.
+  # queue, and the tie-break never enters into it.
 
   @scenarios [
     %{
@@ -110,37 +89,20 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
   for scenario <- @scenarios do
     @scenario scenario
 
-    test "both schedulers agree: #{scenario.name}", %{ws: ws} do
+    test "the board gates exactly the edge-blocked cards: #{scenario.name}", %{ws: ws} do
       world = build(ws, @scenario)
       expected = MapSet.new(@scenario.gated, &world.ids[&1])
 
-      graph_gated = graph_path_gated(ws, world)
       board_gated = board_path_gated(world)
 
-      assert graph_gated == expected, """
-      the Conductor gated #{inspect(MapSet.to_list(graph_gated))}, expected \
+      assert board_gated == expected, """
+      the board gated #{inspect(MapSet.to_list(board_gated))}, expected \
       #{inspect(MapSet.to_list(expected))}
-      """
-
-      assert board_gated == graph_gated, """
-      the board gated #{inspect(MapSet.to_list(board_gated))} but the Conductor \
-      gated #{inspect(MapSet.to_list(graph_gated))} — the two schedulers have drifted
       """
     end
   end
 
-  # ---- the two paths -------------------------------------------------------
-
-  # What the Conductor refuses to dispatch, given more slots than members.
-  defp graph_path_gated(ws, world) do
-    g = graph(ws)
-    Enum.each(world.dispatchable, &add_member(g, &1))
-
-    {:ok, _pid} = Conductor.kickoff(g.id, dispatcher: RecordingDispatcher, max_concurrent: 10)
-    on_exit(fn -> ConductorSupervisor.stop_conductor(g.id) end)
-
-    MapSet.difference(MapSet.new(world.dispatchable), collect_dispatched())
-  end
+  # ---- the dispatch path ---------------------------------------------------
 
   # What the board refuses to dispatch. The board promotes one card per plan by
   # design, so `:queued` — "waiting its turn, nothing wrong with it" — counts as
@@ -159,17 +121,9 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
     ready = MapSet.new(board.ready, & &1.id)
     blocked = for e <- board.ready, e.state == :blocked, into: MapSet.new(), do: e.id
 
-    # Anything the Conductor could see but the Ready column never showed (a
-    # non-open issue) is not the board's to gate — restrict to the overlap.
+    # A settled issue the Ready column never showed is not the board's to gate
+    # — restrict to the overlap.
     MapSet.intersection(blocked, ready)
-  end
-
-  defp collect_dispatched(acc \\ MapSet.new()) do
-    receive do
-      {:dispatched, id, _opts} -> collect_dispatched(MapSet.put(acc, id))
-    after
-      150 -> acc
-    end
   end
 
   # ---- the world -----------------------------------------------------------
@@ -195,19 +149,15 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
       )
 
     final = Map.merge(by_key, parked)
-    settled = Map.keys(parked)
 
     %{
       ids: Map.new(final, fn {k, i} -> {k, i.id} end),
-      issues: Map.values(final),
-      # A settled issue is nobody's to dispatch: the Conductor would refuse it
-      # for a reason that is not an edge, so it is not part of the comparison.
-      dispatchable: for({k, i} <- final, k not in settled, do: i.id)
+      issues: Map.values(final)
     }
   end
 
   # Refined, because the board's Ready column requires it and the whole point
-  # is to compare two *dispatch* queues.
+  # is to exercise the *dispatch* queue.
   defp issue(ws, opts) do
     {:ok, i} =
       Ash.create(Issue, %{
@@ -231,20 +181,5 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
   defp await(issue) do
     {:ok, parked} = Ash.update(issue, %{}, action: :await_verification)
     parked
-  end
-
-  defp graph(ws) do
-    {:ok, g} =
-      Ash.create(Graph, %{
-        name: "cfm-#{System.unique_integer([:positive])}",
-        workspace_id: ws.id
-      })
-
-    g
-  end
-
-  defp add_member(graph, issue_id) do
-    {:ok, _} = Ash.create(GraphMember, %{graph_id: graph.id, issue_id: issue_id})
-    :ok
   end
 end

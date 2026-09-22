@@ -3,14 +3,15 @@ defmodule Arbiter.Tasks.EdgeGate do
   One answer to "may this task be dispatched now, given its edges and what is
   already in flight?".
 
-  Arbiter has two schedulers. `Arbiter.Workflows.Conductor` drives a graph's
-  members; `Arbiter.Board.Snapshot` → `Arbiter.Board.Scheduler` →
-  `Arbiter.Board.Autopilot` drives the board's Ready queue, which is where
-  almost all dispatch actually happens. Before bd-6bax7s they answered the
-  edge question separately, and they had drifted: the Conductor honoured
-  `:conflicts_with`, the board had never heard of it, and a coordinator that
-  set the mutex on two Ready tasks got both dispatched 19 seconds apart. This
-  module is the single predicate both now call, so they cannot drift again.
+  `Arbiter.Board.Snapshot` → `Arbiter.Board.Scheduler` →
+  `Arbiter.Board.Autopilot` drives the board's Ready queue, and since
+  bd-a14qd1 it is the only dispatcher. Arbiter used to have a second one (a
+  per-graph engine), which answered the edge question separately and had
+  drifted: it honoured `:conflicts_with`, the board had never heard of it, and
+  a coordinator that set the mutex on two Ready tasks got both dispatched 19
+  seconds apart (bd-6bax7s). This module is the single predicate every
+  dispatch-time edge question goes through, so no future caller can drift from
+  the board again.
 
   ## The edge types, and what each one does here
 
@@ -44,8 +45,8 @@ defmodule Arbiter.Tasks.EdgeGate do
   A `:conflicts_with` counterpart is the opposite question — "is it in flight
   *right now*" — and `:awaiting_verification` answers no: the work merged, the
   worktree is gone, nothing can collide with it. In-flight-ness is the
-  caller's to determine (the board reads live workers; the Conductor reads
-  `:in_progress` members) and arrives here as `:claimed`.
+  caller's to determine (the board reads live workers) and arrives here as
+  `:claimed`.
 
   ## Shape
 
@@ -56,7 +57,7 @@ defmodule Arbiter.Tasks.EdgeGate do
 
   It reports the block, not the prose: `describe/1` phrases it, and each caller
   decorates (the board prefixes `blocked — ` and names the counterpart's
-  state; the Conductor just skips the directive). An open blocker outranks a
+  state). An open blocker outranks a
   conflict because it survives the conflict clearing — telling an operator
   "conflicts with bd-2" when the card is also waiting on an unmerged
   dependency would send them to finish bd-2 for nothing.
@@ -179,8 +180,8 @@ defmodule Arbiter.Tasks.EdgeGate do
   Symmetric conflict adjacency from dependency rows.
 
   Pass `:all` for the global set, or a list of issue ids to keep only edges
-  with **both** endpoints in that set (the Conductor's member-scoped view — a
-  mutex running through a non-member is not this graph's to serialize).
+  with **both** endpoints in that set — a mutex running through an id outside
+  the scope is not that scope's to serialize.
   """
   @spec conflict_adjacency([dep()], :all | [String.t()]) :: adjacency()
   def conflict_adjacency(deps, scope \\ :all) do

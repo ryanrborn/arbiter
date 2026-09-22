@@ -20,7 +20,7 @@ defmodule Arbiter.MCP.RefinePolicy do
 
   **Reads are broad.** Refining an issue means reading its neighbours — the epic
   above it, the sibling that already solved half the problem, the repo it belongs
-  to, the skills a worker would bring. The task-, workspace- and graph-shaped
+  to, the skills a worker would bring. The task- and workspace-shaped
   reads resolve their target through `Arbiter.MCP.Tools.authorized_workspace/2` /
   `Arbiter.MCP.Tools.resolve_workspace_id/2`, which pin a workspace-bound scope to
   its own workspace, so breadth there costs nothing across workspaces.
@@ -39,7 +39,7 @@ defmodule Arbiter.MCP.RefinePolicy do
 
   **Nothing that starts, stops, or closes work.** No dispatch (`can_dispatch` is
   hard-wired false on the tier), no `task_close`/`task_reopen`/`task_verify`, no
-  scheduler or circuit-breaker controls, no graph mutations, no installation or
+  scheduler or circuit-breaker controls, no installation or
   workspace config writes, no skill writes, no outbound mail. A refine session
   shapes a backlog item and promotes it; the board decides what happens next.
   """
@@ -58,7 +58,6 @@ defmodule Arbiter.MCP.RefinePolicy do
     workspace_show
     workspace_config_get
     workspace_config_overview
-    graph_status
     repo_list
     repo_show
     skill_list
@@ -84,7 +83,6 @@ defmodule Arbiter.MCP.RefinePolicy do
   @deny_reason_lifecycle "a refine session may promote from Backlog but never close, reopen or verify a task"
   @deny_reason_worker_ops "worker operations are outside a refine session's authority"
   @deny_reason_config "configuration is installation state, not issue state"
-  @deny_reason_graph "graph mutation schedules work; a refine session only reads graph state"
   @deny_reason_scheduler "board and breaker controls are coordinator authority"
   @deny_reason_mail "a refine session cannot send mail or flag other sessions"
   @deny_reason_review "review gating is coordinator authority"
@@ -137,22 +135,12 @@ defmodule Arbiter.MCP.RefinePolicy do
     "skill_update" => @deny_reason_config,
     "skill_delete" => @deny_reason_config,
 
-    # graph mutation
-    "graph_create" => @deny_reason_graph,
-    "graph_add_directive" => @deny_reason_graph,
-    "graph_remove_directive" => @deny_reason_graph,
-    "graph_add_edge" => @deny_reason_graph,
-    "graph_start" => @deny_reason_graph,
-    "graph_pause" => @deny_reason_graph,
-    "graph_resume" => @deny_reason_graph,
-
     # board / breakers / queue
     "scheduler_pause" => @deny_reason_scheduler,
     "scheduler_resume" => @deny_reason_scheduler,
     "scheduler_status" => @deny_reason_scheduler,
     "breaker_list" => @deny_reason_scheduler,
     "breaker_reset" => @deny_reason_scheduler,
-    "queue_resume" => @deny_reason_ops,
     "queue_retry_auto_resolve" => @deny_reason_ops,
     "queue_restart_watchdog" => @deny_reason_ops,
     "ci_rerun" => @deny_reason_ops,

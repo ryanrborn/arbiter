@@ -87,10 +87,9 @@
   #     `@git_dirty` is `false` there and the warning never fires — a filter
   #     for it would sit unused and fail `list_unused_filters`. It only
   #     appears on a dev machine with a dirty tree.
-  #   * worker/review_gate.ex, workflows/conductor.ex — a bare `:no_verdict`
-  #     atom clause beside the `{:no_verdict, reason}` tuple one, and a
-  #     `load_member_issues([])` clause. Both are cheap total-function
-  #     hygiene on a private helper.
+  #   * worker/review_gate.ex — a bare `:no_verdict` atom clause beside the
+  #     `{:no_verdict, reason}` tuple one. Cheap total-function hygiene on a
+  #     private helper.
   #   * arbiter_cli/version.ex / cmd/doctor/checks.ex — the same
   #     compile-time-constant shape as the `@git_dirty` case above, for
   #     `@git_available` (`dev_build?/0`). A prior pass here assumed this
@@ -105,7 +104,6 @@
   {"lib/arbiter/mcp/tools/loop_pending.ex", :pattern_match},
   {"lib/arbiter/worker/driver.ex", :pattern_match},
   {"lib/arbiter/worker/review_gate.ex", :pattern_match},
-  {"lib/arbiter/workflows/conductor.ex", :pattern_match},
   {"lib/arbiter_web/controllers/api/loop_controller.ex", :pattern_match},
   {"lib/arbiter_web/controllers/api/scheduler_controller.ex", :pattern_match},
   {"lib/mix/tasks/arbiter.loop.analyze.ex", :pattern_match},

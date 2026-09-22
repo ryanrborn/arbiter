@@ -140,9 +140,8 @@ defmodule Arbiter.Quota do
   `dispatch/2` seam will let work through past the cap (paid overage) rather
   than holding it.
 
-  Shared by `Arbiter.Workflows.QuotaGate.Default` and
-  `Arbiter.Board.Snapshot.quota_hold/1` (bd-5j6nmn) so both the Conductor's
-  cap-clamp and Autopilot's one-per-tick promotion gate defer to the same
+  Shared by `Arbiter.Board.Snapshot.quota_hold/1` (bd-5j6nmn) so the board and
+  Autopilot's one-per-tick promotion gate defer to the same
   seam-resolved mode — including the `:arbiter, :quota, :gate` test/kill-switch
   override — instead of each independently re-deriving `on_exhaustion`.
   """
@@ -265,10 +264,9 @@ defmodule Arbiter.Quota do
   on absent a per-dispatch override — the workspace's default agent provider
   (`Arbiter.Agents.for_workspace/1`), as an atom.
 
-  Shared by the Conductor's cap-clamp (`Arbiter.Workflows.QuotaGate.Default`)
-  and the board's dispatch gate (`Arbiter.Board.Snapshot.quota_hold/1`,
-  bd-5j6nmn) so both read the same provider's snapshot for a given
-  workspace. Any load failure or unresolvable id falls back to `:claude`
+  Used by the board's dispatch gate (`Arbiter.Board.Snapshot.quota_hold/1`,
+  bd-5j6nmn) and the `dispatch/2` seam, so both read the same provider's
+  snapshot for a given workspace. Any load failure or unresolvable id falls back to `:claude`
   (the historical default).
   """
   @spec default_provider(Workspace.t() | String.t() | nil) :: atom()

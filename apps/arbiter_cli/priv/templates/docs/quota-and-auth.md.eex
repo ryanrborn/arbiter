@@ -59,12 +59,12 @@ requests-per-minute limit. That distinction matters both ways:
   workers modest (roughly 3, not a dozen at once) to avoid recompile/API
   storms.
 
-## The Conductor self-throttles on quota
+## The board scheduler self-throttles on quota
 
-If you're running an autonomous multi-issue graph and see a directive
-`ready` with `running: 0` while its `run_state` is `running`, that's usually
-**quota-held, not a drain bug** — the Conductor throttles itself around
-~85% 5h utilization and resumes automatically at the window reset. Verify
+If the board's Ready column has cards but nothing is being dispatched and the
+scheduler is not paused, that's usually **quota-held, not a scheduler bug** —
+the board throttles itself around ~85% 5h utilization (the card reads
+`blocked — quota ...`) and resumes automatically at the window reset. Verify
 with `mcp__arbiter__quota_get` (CLI: `arb quota`) before concluding
 something's stuck. Don't force-dispatch when the gauge shows `rejected` —
 you'll only collect 429s.

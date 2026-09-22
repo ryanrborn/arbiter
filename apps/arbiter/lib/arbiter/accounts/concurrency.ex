@@ -3,7 +3,7 @@ defmodule Arbiter.Accounts.Concurrency do
   P8 (`docs/provider-account-design.md` §4.2–§4.4). **The account owns the
   ceiling; the workspace owns a cap on its use of that ceiling.**
 
-      effective_cap(graph) = min(
+      effective_cap(workspace) = min(
           workspace_max,
           system_max,
           account_headroom(account, workspace),
@@ -15,13 +15,12 @@ defmodule Arbiter.Accounts.Concurrency do
 
   ## Why this module exists at all
 
-  Before P8 the account-facing ceiling was `graphs × workspaces ×
-  max_concurrent` (§4.1). A `Arbiter.Workflows.Conductor` is per-*Graph*, so
-  two running graphs in one workspace at `max_concurrent: 4` already permitted
-  8 workers on one account, and `system_max` — the only thing above them —
-  knows nothing about accounts. Any per-Conductor tally reproduces that bug,
-  so `live_count/1` is derived from `Arbiter.Worker.Registry` and nothing
-  else.
+  Before P8 the account-facing ceiling was `dispatchers × workspaces ×
+  max_concurrent` (§4.1): several dispatchers in one workspace at
+  `max_concurrent: 4` already permitted 8 workers on one account, and
+  `system_max` — the only thing above them — knows nothing about accounts.
+  Any per-dispatcher tally reproduces that bug, so `live_count/1` is derived
+  from `Arbiter.Worker.Registry` and nothing else.
 
   ## `live_count/1` is registry-derived, and that is the design
 
@@ -30,13 +29,13 @@ defmodule Arbiter.Accounts.Concurrency do
   provider they were dispatched with. There is no counter to increment, so
   there is nothing to decrement — a worker that crashes, is killed, or exits
   without running `terminate/2` releases its slot the moment it dies. That is
-  the same crash-safety the Conductor's other state has (rebuilt from live
+  the same crash-safety the scheduler's other state has (rebuilt from live
   processes, never remembered).
 
   Note that `live_count/1` is account-wide even in the `share` term — a
   sibling workspace's live workers do eat into this workspace's headroom.
   That is §4.2's formula as written, and it follows from §4.3: the share is a
-  cap on a *shared* ceiling, first-come-first-served between Conductors, not a
+  cap on a *shared* ceiling, first-come-first-served between workspaces, not a
   reservation of slots held open for a quiet workspace.
 
   ## Both terms are opt-in, and `nil` means "no constraint"
@@ -64,7 +63,7 @@ defmodule Arbiter.Accounts.Concurrency do
 
   A worker that recorded no provider at dispatch counts against its
   workspace's default provider (`Arbiter.Quota.default_provider/1`), which is
-  the same assumption the Conductor's quota clamp already makes for a
+  the same assumption the board scheduler's quota clamp already makes for a
   workspace's dispatches.
   """
   @spec live_count(ProviderAccount.t() | String.t() | nil) :: non_neg_integer()
@@ -157,12 +156,11 @@ defmodule Arbiter.Accounts.Concurrency do
 
   `account_headroom/2` answers "how many *more*"; `base` is an absolute
   ceiling that the caller will itself subtract its in-flight work from
-  (`Conductor`: `cap - active_ids`; `Board.Snapshot`: `slots_total -
-  running`). Adding those `already_counted` workers back converts the
-  headroom into the caller's frame, so the account term bites exactly once.
-  Folding a headroom straight into `min/2` instead would subtract the
-  caller's own live workers twice and silently strangle a single graph to
-  roughly half the ceiling the operator configured.
+  (`Board.Snapshot`: `slots_total - running`). Adding those `already_counted`
+  workers back converts the headroom into the caller's frame, so the account
+  term bites exactly once. Folding a headroom straight into `min/2` instead
+  would subtract the caller's own live workers twice and silently strangle a
+  workspace to roughly half the ceiling the operator configured.
   """
   @spec clamp(non_neg_integer(), headroom(), non_neg_integer()) :: non_neg_integer()
   def clamp(base, :unlimited, _already_counted), do: base

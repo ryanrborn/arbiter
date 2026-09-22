@@ -25,7 +25,7 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
-  alias Arbiter.Workflows.QuotaGate
+  alias Arbiter.Board.Snapshot
 
   defp workspace!(attrs \\ %{}) do
     n = System.unique_integer([:positive])
@@ -94,7 +94,12 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
     })
   end
 
-  describe "QuotaGate callback — keyed by the provider account (§5 row 22)" do
+  # bd-a14qd1 moved these off the removed `Workflows.QuotaGate.Default`
+  # callback and onto `Board.Snapshot.quota_hold/1`, the board scheduler's own
+  # gate. It resolves the provider account from the asking workspace, so the
+  # account-keying these tests pin is the same property, now asserted on the
+  # only surviving dispatch path.
+  describe "the quota gate is keyed by the provider account (§5 row 22)" do
     test "both workspaces on one exhausted account are held" do
       account = account!()
       a = workspace!()
@@ -103,8 +108,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(b, account)
       exhausted_snapshot!(account)
 
-      assert QuotaGate.Default.quota_headroom(account.id, workspace_id: a.id) == 0
-      assert QuotaGate.Default.quota_headroom(account.id, workspace_id: b.id) == 0
+      assert {:hold, _} = Snapshot.quota_hold(a.id)
+      assert {:hold, _} = Snapshot.quota_hold(b.id)
     end
 
     test "a healthy account holds neither workspace" do
@@ -122,13 +127,13 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
         captured_at: DateTime.utc_now()
       })
 
-      assert QuotaGate.Default.quota_headroom(account.id, workspace_id: a.id) == :unlimited
-      assert QuotaGate.Default.quota_headroom(account.id, workspace_id: b.id) == :unlimited
+      assert Snapshot.quota_hold(a.id) == :ok
+      assert Snapshot.quota_hold(b.id) == :ok
     end
 
-    test "an unknown account fails open" do
-      assert QuotaGate.Default.quota_headroom(nil, []) == :unlimited
-      assert QuotaGate.Default.quota_headroom("", []) == :unlimited
+    test "a workspace with no linked account fails open" do
+      assert Snapshot.quota_hold(workspace!().id) == :ok
+      assert Snapshot.quota_hold("no-such-workspace") == :ok
     end
 
     test "a :continue workspace still defers to the dispatch seam" do
@@ -137,7 +142,7 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(ws, account)
       exhausted_snapshot!(account)
 
-      assert QuotaGate.Default.quota_headroom(account.id, workspace_id: ws.id) == :unlimited
+      assert Snapshot.quota_hold(ws.id) == :ok
     end
 
     test "a workspace's stricter threshold holds it while the account's own default would not" do
@@ -155,8 +160,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
         captured_at: DateTime.utc_now()
       })
 
-      assert QuotaGate.Default.quota_headroom(account.id, workspace_id: strict.id) == 0
-      assert QuotaGate.Default.quota_headroom(account.id, workspace_id: relaxed.id) == :unlimited
+      assert {:hold, _} = Snapshot.quota_hold(strict.id)
+      assert Snapshot.quota_hold(relaxed.id) == :ok
     end
   end
 

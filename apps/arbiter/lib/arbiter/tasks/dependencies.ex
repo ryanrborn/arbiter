@@ -4,7 +4,7 @@ defmodule Arbiter.Tasks.Dependencies do
 
   Before this module, three call sites hand-rolled `Ash.create(Dependency, …)`
   with three different validation stories — MCP `dep_add` enforced
-  same-workspace, `graph_add_edge` enforced same-workspace plus a narrower type
+  same-workspace, the graph tools enforced same-workspace plus a narrower type
   set, and the REST controller (which `arb dep add` and `arb create --deps`
   route through) enforced nothing at all. Every surface now goes through
   `add/4` and `remove/3`, so every surface gets the same four guards:
@@ -17,8 +17,7 @@ defmodule Arbiter.Tasks.Dependencies do
        to create them; `remove/3` deliberately does **not** apply the check, so
        pre-existing ones stay removable.
     3. **No gating cycle.** `:depends_on` / `:blocks` are checked against the
-       **global** gating edge set via `Arbiter.Tasks.DependencyGraph`, the same
-       digraph check `Conductor.validate_acyclic/1` runs over a graph's members.
+       **global** gating edge set via `Arbiter.Tasks.DependencyGraph`.
        Without it `A depends_on B` + `B depends_on A` persists happily and both
        issues are permanently non-ready — a silent deadlock. Non-gating types
        (`:relates_to`, `:discovered_from`, `:parent_of`, `:conflicts_with`) are

@@ -22,8 +22,8 @@ defmodule ArbiterCli.Cmd.Dep do
       depends_on       <from> waits until <to> is closed. Gates dispatch.
       blocks           the mirror image: <to> waits until <from> is closed.
       conflicts_with   symmetric mutex — never run the two at the same time.
-                       Honoured by BOTH schedulers: the board's Autopilot and
-                       the graph Conductor. A card held by it says
+                       Enforced by the board scheduler (Autopilot), in either
+                       edge direction. A card held by it says
                        `blocked — conflicts with bd-1c4pg3 (running)`, and
                        dispatches once the counterpart merges, closes or is
                        parked.
