@@ -266,7 +266,7 @@
      much of the page's width the left nav rail is currently taking. Zero
      unless a rail is actually mounted and holding that edge — the page gives
      up room on the left only while something is actually occupying it. It
-     ships at zero and nothing sets it yet; the rail's own swap does. */
+     stays zero below `lg`; the nav rail rules further down (bd-d63b1c) set it. */
   --nav-rail-page-inset: 0px;
 
   --measure-prose: 74ch;
