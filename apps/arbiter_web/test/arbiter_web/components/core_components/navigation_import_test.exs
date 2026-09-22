@@ -6,7 +6,7 @@ defmodule ArbiterWeb.CoreComponents.NavigationImportTest do
   `see_all_link/1`, and `back_link/1` with a different attr contract, so
   importing `ArbiterWeb.CoreComponents.Navigation` wholesale would make those
   calls ambiguous (or silently wrong) app-wide. The import excludes them.
-  This test pins both halves of that contract, plus that `top_nav/1` and
+  This test pins both halves of that contract, plus that `sidebar_nav/1` and
   `segmented_control/1` — which have no collision — resolve unqualified.
   """
   use ExUnit.Case, async: true
@@ -19,7 +19,10 @@ defmodule ArbiterWeb.CoreComponents.NavigationImportTest do
     # Unqualified: these must resolve to CoreComponents.Navigation.
     def navigation(assigns) do
       ~H"""
-      <.top_nav items={[%{label: "Dashboard", href: "/"}]} current_path="/" />
+      <.sidebar_nav
+        groups={[%{label: nil, items: [%{label: "Dashboard", href: "/", icon: nil, badge: nil}]}]}
+        current_path="/"
+      />
       <.segmented_control options={["mine", "all"]} value="mine" event="scope-change" />
       """
     end
@@ -55,10 +58,10 @@ defmodule ArbiterWeb.CoreComponents.NavigationImportTest do
     end
   end
 
-  test "top_nav and segmented_control are importable unqualified from html_helpers/0" do
+  test "sidebar_nav and segmented_control are importable unqualified from html_helpers/0" do
     html = render_component(&Template.navigation/1, %{})
 
-    assert html =~ ~s(id="top-nav")
+    assert html =~ ~s(id="sidebar-nav")
     assert html =~ "scope-change"
   end
 

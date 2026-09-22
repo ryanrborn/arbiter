@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.CoreComponents.Navigation do
   @moduledoc """
-  Navigation primitives from the operator-console design handoff: TopNav,
-  SidebarNav, FilterTabs, SegmentedControl, Pager, SeeAllLink, BackLink.
+  Navigation primitives from the operator-console design handoff: SidebarNav,
+  FilterTabs, SegmentedControl, Pager, SeeAllLink, BackLink.
 
   Colors and spacing are drawn from the `--arb-*`/semantic design tokens in
   `assets/css/app.css` via Tailwind arbitrary values (`bg-[var(--...)]`)
@@ -13,118 +13,14 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
   different attr contract, so `html_helpers/0` imports those four with
   `except:` — call them fully qualified (e.g.
   `ArbiterWeb.CoreComponents.Navigation.pager/1`) until a follow-up ticket
-  migrates call sites. `top_nav/1` and `segmented_control/1` have no such
-  collision and resolve normally as `<.top_nav>` / `<.segmented_control>`;
-  so does `sidebar_nav/1`.
+  migrates call sites. `segmented_control/1` has no such collision and
+  resolves normally as `<.segmented_control>`; so does `sidebar_nav/1`.
   """
   use Phoenix.Component
 
   alias ArbiterWeb.Nav
-  alias Phoenix.LiveView.JS
 
-  import ArbiterWeb.CoreComponents.Brandmark, only: [brandmark: 1]
   import ArbiterWeb.CoreComponents.Core, only: [icon: 1, button: 1]
-
-  @doc """
-  The product's chrome: a fixed 46px bar with the brandmark, the primary
-  nav, and a right-hand slot for the quota widget / live badge.
-
-  Active state is a raised pill, not an underline, decided by prefix-matching
-  `current_path` against each item's `href` — `"/"` only matches exactly, so
-  the dashboard entry doesn't claim every page; every other entry also
-  matches its own sub-paths (`/tasks/42` lights up `/tasks`). The nav itself
-  never wraps to a second line; it scrolls horizontally under width pressure
-  instead. Below the `lg` breakpoint the nav collapses into a hamburger menu.
-
-  ## Examples
-
-      <.top_nav items={[%{label: "Dashboard", href: "/"}, %{label: "Issues", href: "/tasks"}]} current_path={@current_path}>
-        <:right><.quota_bar window="5h" pct={68} /><.live_badge live /></:right>
-      </.top_nav>
-  """
-  attr :items, :list,
-    required: true,
-    doc:
-      "list of %{label: string, href: string, badge: integer | nil} — `badge` is optional and only renders when it is a positive integer"
-
-  attr :current_path, :string,
-    default: nil,
-    doc: "request path, for prefix-matching the active item"
-
-  attr :active_href, :string,
-    default: nil,
-    doc: "optional active item href; when nil, falls back to nav_active?/2 prefix-matching"
-
-  attr :id, :string,
-    default: "top-nav",
-    doc:
-      "base id — the mobile menu's id is derived as \"\#{id}-mobile-menu\"; override when rendering more than one top_nav on a page"
-
-  attr :class, :any, default: nil
-  attr :rest, :global
-
-  slot :right, doc: "right-hand slot — normally a quota widget plus a live badge"
-
-  def top_nav(assigns) do
-    ~H"""
-    <header
-      id={@id}
-      class={[
-        "flex items-center gap-[18px] h-[var(--nav-height)] px-4",
-        "bg-[var(--surface-chrome)] border-b border-solid border-[var(--border-default)]",
-        @class
-      ]}
-      {@rest}
-    >
-      <.link navigate="/" class="flex-none" aria-label="Arbiter">
-        <.brandmark form="wordmark" size={120} tone="accent" />
-      </.link>
-
-      <nav class="flex max-lg:hidden gap-0.5 min-w-0 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
-        <.link
-          :for={item <- @items}
-          navigate={item.href}
-          aria-current={item_active?(@active_href, @current_path, item.href) && "page"}
-          class={[
-            "px-[10px] py-[5px] rounded-[var(--radius-field)] whitespace-nowrap font-[family-name:var(--font-sans)] text-xs",
-            item_active?(@active_href, @current_path, item.href) &&
-              "bg-[var(--surface-card)] font-medium text-[var(--text-title)]",
-            !item_active?(@active_href, @current_path, item.href) &&
-              "font-normal text-[var(--text-secondary)]"
-          ]}
-        >
-          {item.label}<.nav_badge count={item[:badge]} />
-        </.link>
-      </nav>
-
-      <details class="dropdown lg:hidden" id={"#{@id}-mobile-menu"} phx-hook="DetailsPreserve">
-        <summary class="list-none cursor-pointer flex items-center justify-center" aria-label="Menu">
-          <.icon name="hero-bars-3" size={20} />
-        </summary>
-        <ul class="menu dropdown-content z-50 mt-2 w-56 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)] p-2">
-          <li :for={item <- @items}>
-            <.link
-              navigate={item.href}
-              phx-click={JS.remove_attribute("open", to: "##{@id}-mobile-menu")}
-              aria-current={item_active?(@active_href, @current_path, item.href) && "page"}
-              class={[
-                "font-[family-name:var(--font-sans)] text-xs",
-                item_active?(@active_href, @current_path, item.href) &&
-                  "font-medium text-[var(--text-title)]",
-                !item_active?(@active_href, @current_path, item.href) &&
-                  "font-normal text-[var(--text-secondary)]"
-              ]}
-            >
-              {item.label}<.nav_badge count={item[:badge]} />
-            </.link>
-          </li>
-        </ul>
-      </details>
-
-      <span class="ml-auto flex flex-none items-center gap-4">{render_slot(@right)}</span>
-    </header>
-    """
-  end
 
   # A count riding a nav entry (the open-epic count on "Epics", bd-2wmxt5).
   # Zero and nil both render nothing: a badge only exists to say "there is
@@ -144,20 +40,6 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
   end
 
   defp nav_badge?(count), do: is_integer(count) and count > 0
-
-  defp item_active?(active_href, _current, href) when not is_nil(active_href),
-    do: href == active_href
-
-  defp item_active?(nil, current, href), do: nav_active?(current, href)
-
-  # Ports the pre-existing `nav_class/2` prefix-matching logic verbatim: "/"
-  # only matches exactly so the dashboard entry doesn't claim every page;
-  # every other entry also matches its own sub-paths.
-  defp nav_active?(current, "/"), do: current == "/"
-  defp nav_active?(nil, _target), do: false
-
-  defp nav_active?(current, target),
-    do: current == target or String.starts_with?(current, target <> "/")
 
   @doc """
   The persistent left icon rail (bd-2pezqm): a `var(--nav-rail-width)` icon

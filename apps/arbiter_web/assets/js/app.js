@@ -30,12 +30,7 @@ import {insideTerminal} from "./session_keys.mjs"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
-// Preserve <details> open state across LiveView patches (e.g. PubSub-triggered re-renders).
 const Hooks = {
-  DetailsPreserve: {
-    beforeUpdate() { this.wasOpen = this.el.open },
-    updated() { if (this.wasOpen) this.el.open = true },
-  },
   // bd-dlc136: the session dock's localStorage bridge. It lives in a module of
   // its own so its storage guards can be unit-tested without a browser.
   SessionDock,
