@@ -197,7 +197,8 @@ defmodule Arbiter.Board.SnapshotLoadTest do
     test "unset counts live agents, so a record with no agent holds no slot", %{ws: ws} do
       Application.delete_env(:arbiter, :conductor_slot_basis)
 
-      board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [stale_author(ws)], deps: [])
+      board =
+        Snapshot.load(workspace_id: ws.id, issues: [], workers: [stale_author(ws)], deps: [])
 
       assert board.agents_live == 0
     end
@@ -208,7 +209,8 @@ defmodule Arbiter.Board.SnapshotLoadTest do
       # a `:slot_basis` of its own.
       Application.put_env(:arbiter, :conductor_slot_basis, :issues)
 
-      board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [stale_author(ws)], deps: [])
+      board =
+        Snapshot.load(workspace_id: ws.id, issues: [], workers: [stale_author(ws)], deps: [])
 
       assert board.agents_live == 1
     end
