@@ -34,7 +34,10 @@ defmodule ArbiterWeb.Api.RunJSON do
       routing_policy: r.routing_policy,
       model_tier: r.model_tier,
       thinking: r.thinking,
-      difficulty_at_dispatch: r.difficulty_at_dispatch
+      difficulty_at_dispatch: r.difficulty_at_dispatch,
+      provider: r.provider,
+      session_id: r.session_id,
+      resumed_from_run_id: r.resumed_from_run_id
     }
   end
 

@@ -494,6 +494,8 @@ defmodule Arbiter.MCP.Tools.Worker do
       model: run.model,
       provider: run.provider,
       provider_fallback: run.provider_fallback,
+      session_id: run.session_id,
+      resumed_from_run_id: run.resumed_from_run_id,
       started_at: Tools.iso(run.started_at),
       completed_at: Tools.iso(run.completed_at),
       exit_code: run.exit_code,
