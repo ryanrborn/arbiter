@@ -2675,6 +2675,7 @@ defmodule Arbiter.Worker do
     meta = if is_nil(result), do: state.meta, else: Map.put(state.meta, :result, result)
     new_state = %State{state | status: :completed, meta: meta}
     record_run_finished(new_state)
+    notify_auth_hold_success(new_state)
     broadcast_done(new_state)
     new_state
   end
@@ -2794,9 +2795,11 @@ defmodule Arbiter.Worker do
   # fail_now/2's generic "exit code N" notification: the StopReason carries the
   # actionable classification (auth expiry, credit exhaustion, kill, …).
   #
-  # bd-5wchp1: when the stop category is :auth_expired, also notify the
-  # CredentialWatchdog so it records the expiry and blocks future dispatches
-  # immediately, without waiting for the next periodic probe.
+  # bd-21bmdh: when the stop category is :auth_expired, count the death toward
+  # the provider's `Arbiter.Agents.AuthHold` streak. N consecutive deaths open
+  # the hold (which is what marks the CredentialWatchdog and refuses further
+  # dispatches); a single death is a retry — `Arbiter.Worker.AuthDeath` returns
+  # the task to Ready once the Driver sees this worker failed.
   defp fail_stopped(%State{} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
@@ -2813,7 +2816,7 @@ defmodule Arbiter.Worker do
     )
 
     if reason.category == :auth_expired do
-      notify_credential_watchdog(state, reason)
+      notify_auth_hold(state, reason)
     end
 
     meta =
@@ -2830,9 +2833,25 @@ defmodule Arbiter.Worker do
   end
 
   # Resolve the agent adapter from the worker's routing config (set by Dispatch
-  # via Worker.report/3) and notify the CredentialWatchdog. Best-effort —
+  # via Worker.report/3) and record the death on the AuthHold. Best-effort —
   # missing routing info or an unknown provider just skips the notification.
-  defp notify_credential_watchdog(%State{meta: meta}, reason) do
+  defp notify_auth_hold(%State{} = state, reason) do
+    case routed_adapter(state) do
+      nil -> :ok
+      adapter -> Arbiter.Agents.AuthHold.record_death(adapter, reason)
+    end
+  end
+
+  # bd-21bmdh: a completed run proved the provider's credential works, which is
+  # what makes the AuthHold's streak *consecutive* deaths.
+  defp notify_auth_hold_success(%State{} = state) do
+    case routed_adapter(state) do
+      nil -> :ok
+      adapter -> Arbiter.Agents.AuthHold.record_success(adapter)
+    end
+  end
+
+  defp routed_adapter(%State{meta: meta}) do
     provider = meta && (Map.get(meta, :routing_config) || %{}) |> Map.get(:provider)
 
     adapter =
@@ -2844,9 +2863,7 @@ defmodule Arbiter.Worker do
         end
       end
 
-    if is_atom(adapter) and not is_nil(adapter) do
-      Arbiter.Agents.CredentialWatchdog.mark_expired(adapter, reason)
-    end
+    if is_atom(adapter), do: adapter
   end
 
   defp exit_grace_ms do

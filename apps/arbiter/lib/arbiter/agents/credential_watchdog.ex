@@ -15,9 +15,13 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     * **Dispatch guard** — `Arbiter.Worker.Dispatch` calls `expired?/1` before
       dispatching a real worker. A known-expired adapter is refused immediately
       without re-running the probe, preventing a wave of identical 401 failures.
-    * **Early mark** — `Arbiter.Worker` calls `mark_expired/2` when a worker
-      dies with `:auth_expired`, so the Watchdog records the failure immediately
-      rather than waiting for the next periodic probe.
+    * **Auth hold** — a worker dying with `:auth_expired` no longer marks this
+      module directly. It feeds `Arbiter.Agents.AuthHold`'s per-provider streak
+      (bd-21bmdh), and the hold calls `mark_expired/3` once N consecutive deaths
+      open it — a single death is now a retry, not a fleet-wide refusal. In
+      return, every recovery here (a passing periodic probe, or
+      `mark_recovered/2`) is forwarded to `AuthHold.recovered/2`, which is what
+      clears an open hold automatically.
     * **Usage-poll mark** — `Arbiter.Quota.CloudProbe` also calls `mark_expired/3`
       for Claude after N consecutive `{:http_error, 401}` responses from the
       `/api/oauth/usage` poll (bd-1pmf9h, default N=2). This is a second,
@@ -45,7 +49,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   That makes this module's own periodic probe (below) the *only* live probe
   left anywhere in the fleet, and an entirely optional one: the dispatch
-  guard, `mark_expired/2` (from a dying worker) and `mark_recovered/2` (from
+  guard, `mark_expired/2` (from `AuthHold`, after N dying workers) and `mark_recovered/2` (from
   the usage-poll signal) all keep working off held state with **no probing at
   all**. Setting `:adapters` to `[]` — as already done for `gemini` here,
   cutting it from ~180 probes/day to 26 — is a supported, intentional
@@ -98,6 +102,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   require Logger
 
+  alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.Preflight
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Worker.StopReason
@@ -133,9 +138,10 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   @doc """
   Immediately mark `adapter` as credential-expired and raise coordinator escalations.
 
-  Called by `Arbiter.Worker.fail_stopped/2` when a worker dies with category
-  `:auth_expired`, so the Watchdog records the failure and blocks future dispatches
-  without waiting for the next periodic probe. Fire-and-forget; best-effort.
+  Called by `Arbiter.Agents.AuthHold` when N consecutive `:auth_expired` worker
+  deaths open its hold (bd-21bmdh), and by `Arbiter.Quota.CloudProbe`'s free
+  401-streak signals, so the Watchdog records the failure and blocks future
+  dispatches without waiting for the next periodic probe. Fire-and-forget; best-effort.
   Pass a `server` pid/name to target a specific instance (useful in tests).
   """
   @spec mark_expired(module(), StopReason.t(), GenServer.server()) :: :ok
@@ -167,6 +173,14 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  @doc false
+  # Point this instance's recovery forwarding at a specific `AuthHold` (tests
+  # pairing a private hold with a private watchdog).
+  @spec set_auth_hold(GenServer.server(), GenServer.server()) :: :ok
+  def set_auth_hold(auth_hold, server \\ __MODULE__) do
+    GenServer.call(server, {:set_auth_hold, auth_hold})
   end
 
   @doc """
@@ -218,7 +232,8 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     state = %{
       adapters: Map.new(probe_adapters(opts), &{&1, :ok}),
       opts: opts,
-      enabled: enabled
+      enabled: enabled,
+      auth_hold: Keyword.get(opts, :auth_hold, AuthHold)
     }
 
     if enabled do
@@ -232,6 +247,9 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   def handle_call({:expired?, adapter}, _from, state) do
     {:reply, Map.get(state.adapters, adapter, :ok) != :ok, state}
   end
+
+  def handle_call({:set_auth_hold, auth_hold}, _from, state),
+    do: {:reply, :ok, %{state | auth_hold: auth_hold}}
 
   @impl true
   def handle_call(:reset, _from, state) do
@@ -318,8 +336,12 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     end
   end
 
+  # bd-21bmdh: every recovery is also the `AuthHold` reset signal — a hold that
+  # N worker deaths opened marked this adapter expired, and this transition is
+  # how it clears without an operator.
   defp on_probe_ok(state, adapter, {:expired, _}) do
     Logger.info("CredentialWatchdog: #{adapter_name(adapter)} credentials recovered")
+    AuthHold.recovered(adapter, state.auth_hold)
     %{state | adapters: Map.put(state.adapters, adapter, :ok)}
   end
 

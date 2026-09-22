@@ -11,8 +11,13 @@ defmodule Arbiter.MCP.Tools.Breaker do
   `breaker_list` always returns the static `call_sites` registry alongside the
   live counters, so the answer to "is anything gated at all?" is available on a
   freshly-restarted server where no breaker has fired yet.
+
+  Both also carry the auth-shaped dispatch hold (`Arbiter.Agents.AuthHold`,
+  bd-21bmdh): `breaker_list` reports every open hold and live streak under
+  `auth_holds`, and `breaker_reset` with `provider` clears one.
   """
 
+  alias Arbiter.Agents.AuthHold
   alias Arbiter.CircuitBreaker
   alias Arbiter.MCP.Scope
 
@@ -36,7 +41,10 @@ defmodule Arbiter.MCP.Tools.Breaker do
        %{
          breakers: Enum.map(breakers, &serialize/1),
          open_count: Enum.count(breakers, & &1.open?),
-         call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1)
+         call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1),
+         # bd-21bmdh: host-wide (credentials are per provider, not per
+         # workspace), so unfiltered by `workspace` / `kind`.
+         auth_holds: Enum.map(AuthHold.list(), &AuthHold.serialize/1)
        }}
     end
   end
@@ -50,6 +58,9 @@ defmodule Arbiter.MCP.Tools.Breaker do
     with {:ok, ws_id} <- Arbiter.MCP.Tools.authorized_workspace(scope, args),
          {:ok, kind} <- kind_arg(args) do
       case Map.get(args, "signature") do
+        _ when is_map_key(args, "provider") ->
+          reset_auth_hold(Map.get(args, "provider"))
+
         sig when is_binary(sig) and sig != "" ->
           case CircuitBreaker.reset(sig) do
             :ok -> {:ok, %{reset: 1, signature: sig}}
@@ -66,6 +77,22 @@ defmodule Arbiter.MCP.Tools.Breaker do
              {:invalid, "pass `signature` to reset one breaker, or `all: true` to reset a scope"}}
           end
       end
+    end
+  end
+
+  # bd-21bmdh: clear one provider's auth-shaped dispatch hold (and the
+  # CredentialWatchdog mark it set). `reset: 0` when it was not open.
+  defp reset_auth_hold(name) do
+    case AuthHold.resolve_provider(name) do
+      {:ok, adapter} ->
+        {:ok, cleared} = AuthHold.reset(adapter)
+        {:ok, %{reset: length(cleared), auth_hold: name}}
+
+      :error ->
+        {:error,
+         {:invalid,
+          "unknown provider #{inspect(name)} (known: " <>
+            Enum.map_join(Map.keys(Arbiter.Agents.adapters()), ", ", &Atom.to_string/1) <> ")"}}
     end
   end
 
