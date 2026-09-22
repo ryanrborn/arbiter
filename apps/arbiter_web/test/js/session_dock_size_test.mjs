@@ -124,6 +124,43 @@ test("a viewport that has not been measured yet never claims a fallback", () => 
   }
 })
 
+// bd-2qqqbp: the page's 480px is 480px of what is *left*, and a left rail takes
+// from the same width the panel and the page share. Without the rail in this
+// subtraction the floor quietly stops meaning what it says: the dock would keep
+// a side panel over a page it has already squeezed under `MIN_PAGE_WIDTH`.
+test("a left rail comes out of the page's share before a side panel is judged to fit", () => {
+  // 1180 − 56 of rail − 640 of panel = 484: still a usable page.
+  assert.deepEqual(resolveDockSize("side", { viewportWidth: 1180, railWidth: 56 }), {
+    size: "side",
+    fallback: false
+  })
+
+  // Ten pixels narrower and the page is under the floor — which the one-sided
+  // arithmetic would have called a fit (1170 − 640 = 530).
+  assert.deepEqual(resolveDockSize("side", { viewportWidth: 1170, railWidth: 56 }), {
+    size: "max",
+    fallback: true
+  })
+})
+
+test("no rail is exactly the answer from before the rail existed", () => {
+  // The contract lands at `--nav-rail-page-inset: 0px` and nothing sets it yet,
+  // so every reading of "no rail" — absent, unreadable, zero — has to leave
+  // today's answers untouched.
+  assert.deepEqual(resolveDockSize("side", { viewportWidth: 1170 }), {
+    size: "side",
+    fallback: false
+  })
+
+  for (const railWidth of [undefined, null, NaN, 0, "56px", -100]) {
+    assert.deepEqual(
+      resolveDockSize("side", { viewportWidth: 1170, railWidth }),
+      { size: "side", fallback: false },
+      `for ${railWidth}`
+    )
+  }
+})
+
 // -- the controller the hook is made of ---------------------------------------
 //
 // The dock's hook owns two pieces of global state on behalf of the expanded
@@ -138,10 +175,10 @@ import {
   createDockSizeController
 } from "../../assets/js/session_dock_size.mjs"
 
-function fakeDoc() {
+function fakeDoc({ railInset = null } = {}) {
   const props = new Map()
 
-  return {
+  const doc = {
     props,
     documentElement: {
       dataset: {},
@@ -151,6 +188,20 @@ function fakeDoc() {
       }
     }
   }
+
+  // A document that can report computed custom properties — which is how the
+  // controller learns how much of the left edge the rail is holding. Omitted,
+  // it stands in for the documents that cannot (a hook that ran before layout,
+  // or a non-browser).
+  if (railInset !== null) {
+    doc.defaultView = {
+      getComputedStyle: () => ({
+        getPropertyValue: (name) => (name === "--nav-rail-page-inset" ? railInset : "")
+      })
+    }
+  }
+
+  return doc
 }
 
 function controller(doc, { viewportWidth = 1920, columnWidth = 7.8 } = {}) {
@@ -280,6 +331,28 @@ test("leaving Side panel clears a fallback the operator can no longer see", () =
 
   assert.equal(doc.documentElement.dataset.dockSize, "compact")
   assert.deepEqual(reported, [true, false])
+})
+
+// The rail's half of the same contract: the controller is what actually asks,
+// and it has to ask the document rather than assume the left edge is free.
+test("the controller takes the rail's inset off the width it decides with", () => {
+  const doc = fakeDoc({ railInset: "56px" })
+  const { subject, reported } = controller(doc, { viewportWidth: 1170, columnWidth: 0 })
+
+  subject.set("side")
+
+  assert.equal(doc.documentElement.dataset.dockSize, "max")
+  assert.deepEqual(reported, [true])
+})
+
+test("a document that cannot report the rail decides as though there were none", () => {
+  const doc = fakeDoc()
+  const { subject, reported } = controller(doc, { viewportWidth: 1170, columnWidth: 0 })
+
+  subject.set("side")
+
+  assert.equal(doc.documentElement.dataset.dockSize, "side")
+  assert.deepEqual(reported, [false])
 })
 
 test("a controller with no document decides without throwing", () => {
