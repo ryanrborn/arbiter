@@ -164,6 +164,62 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert event.cost_note =~ "no cost"
   end
 
+  # P9 (bd-al9qqe, docs/provider-account-design.md §8): every code path that
+  # writes `usage_events.workspace_id` must also write `provider_account_id`.
+  test "a task session's ledger row carries the workspace's linked provider_account_id" do
+    {:ok, ws} =
+      Ash.create(Arbiter.Tasks.Workspace, %{
+        name: "pab-worker-#{System.unique_integer([:positive])}"
+      })
+
+    {:ok, account} =
+      Ash.create(Arbiter.Accounts.ProviderAccount, %{
+        provider: :claude,
+        slug: "pab-worker-#{System.unique_integer([:positive])}"
+      })
+
+    {:ok, _link} =
+      Ash.create(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+    task_id = "bd-ledgeraccount-#{System.unique_integer([:positive])}"
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: ws.id)
+
+    cwd = System.tmp_dir!()
+
+    result_event =
+      Jason.encode!(%{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "result" => "done",
+        "total_cost_usd" => 0.1,
+        "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+      })
+
+    events_path = Path.join(cwd, "account-events-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(events_path, result_event <> "\n")
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", events_path],
+        provider: "claude"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    :ok = GenServer.stop(pid, :normal)
+
+    assert [event] = events_for(task_id)
+    assert event.workspace_id == ws.id
+    assert event.provider == "claude"
+    assert event.provider_account_id == account.id
+  end
+
   defp wait_until(fun, timeout_ms \\ 2000, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)

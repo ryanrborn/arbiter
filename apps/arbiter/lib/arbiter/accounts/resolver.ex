@@ -42,6 +42,7 @@ defmodule Arbiter.Accounts.Resolver do
   require Logger
 
   alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Accounts.ProviderCredential
   alias Arbiter.Accounts.WorkspaceProviderAccount
   alias Arbiter.Tasks.Workspace
 
@@ -63,7 +64,10 @@ defmodule Arbiter.Accounts.Resolver do
   def provider_atom(provider) when is_atom(provider) and not is_nil(provider),
     do: provider_atom(Atom.to_string(provider))
 
-  def provider_atom(provider) when is_binary(provider), do: Map.get(@providers, provider)
+  def provider_atom(provider) when is_binary(provider) do
+    provider |> Arbiter.Quota.provider_code() |> then(&Map.get(@providers, &1))
+  end
+
   def provider_atom(_), do: nil
 
   @doc """
@@ -171,6 +175,59 @@ defmodule Arbiter.Accounts.Resolver do
   @doc "The ids of `workspaces/1`."
   @spec workspace_ids(String.t() | nil) :: [String.t()]
   def workspace_ids(account_id), do: account_id |> workspaces() |> Enum.map(& &1.id)
+
+  @doc """
+  The account a workspace-less spawn (a probe/preflight round-trip, `usage.ex`
+  §8) is metered under for `provider` — "a probe is issued *as* a credential",
+  so unlike `account_id/2` this never answers `nil` just because there is no
+  workspace to look a join row up on. Same rule `ensure_account_id/2` uses to
+  provision (`adopt_or_mint/1`): the provider's sole enabled account when
+  unambiguous, else the shared `default` account, minted on first call.
+
+  Never writes a `workspace_provider_accounts` link — there is no workspace to
+  link.
+  """
+  @spec account_id_for_probe(atom() | String.t() | nil) :: String.t() | nil
+  def account_id_for_probe(provider) do
+    with {:ok, code} <- fetch_provider(provider),
+         {:ok, %ProviderAccount{id: id}} <- adopt_or_mint(code) do
+      id
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc """
+  The account's sole active credential id, or `nil` when it has none, or more
+  than one — an account may legitimately hold several active credentials of
+  different kinds (§3.2), and picking one to stamp on a ledger row would be a
+  guess. Mirrors the "carry nothing rather than guess" rule
+  `Arbiter.Accounts.Credentials.install_credential/1` already applies to a
+  workspace-less spawn's env var.
+  """
+  @spec credential_id(String.t() | nil) :: String.t() | nil
+  def credential_id(account_id) when is_binary(account_id) do
+    case active_credentials(account_id) do
+      [%ProviderCredential{id: id}] -> id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  def credential_id(_), do: nil
+
+  defp active_credentials(account_id) do
+    ProviderCredential
+    |> Ash.Query.filter(provider_account_id == ^account_id and active == true)
+    |> Ash.read()
+    |> case do
+      {:ok, credentials} -> credentials
+      _ -> []
+    end
+  end
 
   # ---- provisioning ------------------------------------------------------
 

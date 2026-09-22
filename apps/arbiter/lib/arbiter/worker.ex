@@ -113,6 +113,7 @@ defmodule Arbiter.Worker do
 
   require Logger
 
+  alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
@@ -1503,13 +1504,18 @@ defmodule Arbiter.Worker do
       Map.get(usage, :duration_ms) ||
         wall_clock_duration_ms(Map.get(session, :started_at), Map.get(session, :exited_at))
 
+    workspace_id = effective_workspace_id(state)
+    provider_account_id = AccountResolver.account_id(workspace_id, provider)
+
     attrs = %{
       task_id: state.task_id,
-      workspace_id: effective_workspace_id(state),
+      workspace_id: workspace_id,
       repo: state.repo,
       step: step,
       model: model,
       provider: provider,
+      provider_account_id: provider_account_id,
+      provider_credential_id: AccountResolver.credential_id(provider_account_id),
       tokens_in: Map.get(usage, :tokens_in),
       tokens_out: Map.get(usage, :tokens_out),
       thinking_tokens: Map.get(usage, :thinking_tokens),
