@@ -56,13 +56,21 @@ defmodule Arbiter.Repo.Migrations.AccountMaxConcurrentOptIn do
     system_max =
       Application.get_env(:arbiter, :conductor_system_max_concurrent, @default_system_max)
 
-    for [slug, id] <- repo().query!("SELECT slug, id FROM provider_accounts ORDER BY slug").rows do
+    rows = repo().query!("SELECT provider, slug, id FROM provider_accounts ORDER BY slug").rows
+
+    # `provider:slug`, not the bare slug §4.4's example uses. Every install
+    # that has been through `Arbiter.Accounts.Resolver.ensure_account_id/2`
+    # holds one `default` account *per provider*, and `arb account set default`
+    # is rejected as ambiguous against more than one — an advisory that prints
+    # a command the operator cannot run is worse than no advisory.
+    for [provider, slug, id] <- rows do
       caps = workspace_caps(id, system_max)
+      ref = "#{provider}:#{slug}"
 
       IO.puts(
-        "[account_max_concurrent_opt_in] account `#{slug}` is referenced by " <>
+        "[account_max_concurrent_opt_in] account `#{ref}` is referenced by " <>
           "#{length(caps)} workspaces whose caps total #{Enum.sum(caps)} concurrent workers; " <>
-          "consider `arb account set #{slug} --max-concurrent N`."
+          "consider `arb account set #{ref} --max-concurrent N`."
       )
     end
   end
@@ -85,12 +93,28 @@ defmodule Arbiter.Repo.Migrations.AccountMaxConcurrentOptIn do
     Enum.map(rows, fn [config] -> workspace_cap(config) || system_max end)
   end
 
+  # Mirrors `Arbiter.Tasks.Workspace.max_concurrent/1`, including its string
+  # clause: `conductor.max_concurrent` is written through a JSON config blob
+  # and arrives as `"4"` rather than `4` on a live install, so an
+  # integer-only match silently reports `system_max` for a workspace that is
+  # in fact capped.
   defp workspace_cap(config) when is_binary(config) do
     case Jason.decode(config) do
-      {:ok, %{"conductor" => %{"max_concurrent" => n}}} when is_integer(n) and n > 0 -> n
+      {:ok, decoded} -> cap_value(get_in(decoded, ["conductor", "max_concurrent"]))
       _ -> nil
     end
   end
 
   defp workspace_cap(_config), do: nil
+
+  defp cap_value(n) when is_integer(n) and n > 0, do: n
+
+  defp cap_value(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} when n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp cap_value(_), do: nil
 end

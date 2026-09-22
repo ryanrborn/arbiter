@@ -81,8 +81,43 @@ defmodule Arbiter.Accounts.MaxConcurrentMigrationTest do
       out = capture_io(fn -> migrate!(migration) end)
 
       assert out =~
-               "account `personal-max` is referenced by 3 workspaces whose caps total 12 " <>
-                 "concurrent workers; consider `arb account set personal-max --max-concurrent N`"
+               "account `claude:personal-max` is referenced by 3 workspaces whose caps total 12 " <>
+                 "concurrent workers; consider `arb account set claude:personal-max --max-concurrent N`"
+    end
+
+    test "names the account `provider:slug`, because a bare slug is ambiguous", %{
+      migration: migration
+    } do
+      # The shape every install that has been through `Resolver.ensure_account_id/2`
+      # actually has: one `default` account per provider. `arb account set default`
+      # would be rejected as ambiguous, so the advisory must not suggest it.
+      for provider <- ~w(claude codex gemini_cli antigravity) do
+        insert_account(uuid(), "default", nil, provider)
+      end
+
+      out = capture_io(fn -> migrate!(migration) end)
+
+      for provider <- ~w(claude codex gemini_cli antigravity) do
+        assert out =~ "consider `arb account set #{provider}:default --max-concurrent N`"
+      end
+
+      refute out =~ "consider `arb account set default --max-concurrent N`"
+    end
+
+    test "reads a cap stored as a string, as the live config has it", %{migration: migration} do
+      # `conductor.max_concurrent` is written through a JSON config blob and
+      # arrives as `"4"`, not `4`, on this install — `Workspace.max_concurrent/1`
+      # parses both and so must the advisory, or it silently reports the
+      # install-wide default instead of the configured cap.
+      id = uuid()
+      insert_account(id, "stringly", nil)
+      ws = uuid()
+      insert_workspace(ws, "default", "4")
+      link(ws, "claude", id)
+
+      out = capture_io(fn -> migrate!(migration) end)
+
+      assert out =~ "referenced by 1 workspaces whose caps total 4 concurrent workers"
     end
 
     test "a workspace with no explicit cap counts as the install-wide default", %{
@@ -99,7 +134,7 @@ defmodule Arbiter.Accounts.MaxConcurrentMigrationTest do
       system_max = Application.get_env(:arbiter, :conductor_system_max_concurrent, 16)
 
       assert out =~
-               "account `unconfigured` is referenced by 1 workspaces whose caps total " <>
+               "account `claude:unconfigured` is referenced by 1 workspaces whose caps total " <>
                  "#{system_max} concurrent workers"
     end
 
@@ -111,8 +146,8 @@ defmodule Arbiter.Accounts.MaxConcurrentMigrationTest do
 
       out = capture_io(fn -> migrate!(migration) end)
 
-      assert out =~ "account `orphan-a` is referenced by 0 workspaces whose caps total 0"
-      assert out =~ "account `orphan-b` is referenced by 0 workspaces whose caps total 0"
+      assert out =~ "account `claude:orphan-a` is referenced by 0 workspaces whose caps total 0"
+      assert out =~ "account `claude:orphan-b` is referenced by 0 workspaces whose caps total 0"
     end
 
     test "an install with no accounts prints nothing and still succeeds", %{migration: migration} do
@@ -140,14 +175,14 @@ defmodule Arbiter.Accounts.MaxConcurrentMigrationTest do
 
   defp uuid, do: Ecto.UUID.generate()
 
-  defp insert_account(id, slug, max_concurrent) do
+  defp insert_account(id, slug, max_concurrent, provider \\ "claude") do
     Repo.query!(
       """
       INSERT INTO provider_accounts (id, provider, slug, identity_source, quota_config, enabled,
                                      max_concurrent, inserted_at, updated_at)
-      VALUES (?1, 'claude', ?2, 'operator', '{}', 1, ?3, '2026-09-01 00:00:00', '2026-09-01 00:00:00')
+      VALUES (?1, ?4, ?2, 'operator', '{}', 1, ?3, '2026-09-01 00:00:00', '2026-09-01 00:00:00')
       """,
-      [id, slug, max_concurrent]
+      [id, slug, max_concurrent, provider]
     )
   end
 
