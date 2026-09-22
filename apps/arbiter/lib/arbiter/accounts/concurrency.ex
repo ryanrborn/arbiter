@@ -93,6 +93,31 @@ defmodule Arbiter.Accounts.Concurrency do
   def live_count(_), do: 0
 
   @doc """
+  `live_count/1` narrowed to one workspace: the live workers *this* workspace
+  is contributing to its account's count, for `provider`.
+
+  Not part of §4.2's formula — the ceiling is account-wide and deliberately
+  blind to which workspace is using it. This is what a caller that subtracts
+  its own in-flight work from an absolute cap needs to hand `clamp/3`.
+  """
+  @spec workspace_live_count(String.t() | nil, atom() | String.t() | nil) :: non_neg_integer()
+  def workspace_live_count(workspace_id, provider) when is_binary(workspace_id) do
+    case Arbiter.Quota.provider_code(provider) do
+      nil ->
+        0
+
+      code ->
+        WorkerRegistry.live_dispatches()
+        |> Enum.filter(&(&1.workspace_id == workspace_id))
+        |> count_matching(code)
+    end
+  rescue
+    _ -> 0
+  end
+
+  def workspace_live_count(_workspace_id, _provider), do: 0
+
+  @doc """
   `max(0, min(a.max_concurrent, share(ws, a)) - live_count(a))` — §4.2,
   verbatim — or `:unlimited` when neither term is set (§4.4's default) and
   when there is no account to bound at all.

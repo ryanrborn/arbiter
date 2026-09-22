@@ -96,6 +96,7 @@ defmodule Arbiter.Board.Snapshot do
   board's behaviour is testable without a database.
   """
 
+  alias Arbiter.Accounts.Concurrency
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
@@ -366,12 +367,24 @@ defmodule Arbiter.Board.Snapshot do
 
   @doc """
   The effective maximum concurrent workers for a workspace: the minimum of the
-  workspace-level cap (if set) and the system-wide cap. Mirrors
-  `Arbiter.Workflows.Conductor.effective_cap/1` (quota_headroom aside).
+  workspace-level cap (if set), the system-wide cap, and — since P8
+  (`docs/provider-account-design.md` §4.2) — the headroom left on the provider
+  account this workspace is metered under. Mirrors
+  `Arbiter.Workflows.Conductor.effective_cap/2` (quota_headroom aside).
 
-  When workspace_id is nil, returns the system max.
+  The account term matters here and not only in the Conductor because
+  `slots_total` is what every Ready card's queue position is computed from: a
+  board that ignores a full account promises slots the next drain cycle will
+  refuse. It can therefore return **0**, which the pre-P8 signature could not.
+
+  The workspace's own live workers are added back before the min (via
+  `Concurrency.clamp/3`) because `load/1` subtracts the running cards from
+  `slots_total` itself — counting them in both places would halve the number.
+
+  When workspace_id is nil, returns the system max: a fleet-wide board is not
+  scoped to any one account.
   """
-  @spec effective_max_concurrent(String.t() | nil) :: pos_integer()
+  @spec effective_max_concurrent(String.t() | nil) :: non_neg_integer()
   def effective_max_concurrent(nil) do
     system_max_concurrent()
   end
@@ -379,10 +392,19 @@ defmodule Arbiter.Board.Snapshot do
   def effective_max_concurrent(workspace_id) when is_binary(workspace_id) do
     system_max = system_max_concurrent()
 
-    case workspace_config_max(workspace_id) do
-      n when is_integer(n) and n > 0 -> min(n, system_max)
-      _ -> system_max
-    end
+    base =
+      case workspace_config_max(workspace_id) do
+        n when is_integer(n) and n > 0 -> min(n, system_max)
+        _ -> system_max
+      end
+
+    provider = Arbiter.Quota.default_provider(workspace_id)
+
+    Concurrency.clamp(
+      base,
+      Concurrency.headroom(workspace_id, provider),
+      Concurrency.workspace_live_count(workspace_id, provider)
+    )
   rescue
     _ -> system_max_concurrent()
   end

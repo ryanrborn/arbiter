@@ -40,6 +40,38 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
     end
   end
 
+  describe "PATCH /api/accounts/:ref (P8 — the concurrency ceiling)" do
+    test "sets max_concurrent", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "ceiling"})
+
+      body = json_response(patch(conn, ~p"/api/accounts/ceiling", %{max_concurrent: 4}), 200)
+      assert body["max_concurrent"] == 4
+    end
+
+    test "an explicit null clears it — the ceiling is opt-in (§4.4)", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "clearable", max_concurrent: 4})
+
+      body =
+        json_response(patch(conn, ~p"/api/accounts/clearable", %{max_concurrent: nil}), 200)
+
+      assert body["max_concurrent"] == nil
+    end
+
+    test "400s when max_concurrent is absent", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "no-field"})
+      assert json_response(patch(conn, ~p"/api/accounts/no-field", %{}), 400)
+    end
+
+    test "400s on a negative ceiling", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "negative"})
+      assert json_response(patch(conn, ~p"/api/accounts/negative", %{max_concurrent: -1}), 400)
+    end
+
+    test "404s on an unknown ref", %{conn: conn} do
+      assert json_response(patch(conn, ~p"/api/accounts/nope", %{max_concurrent: 1}), 404)
+    end
+  end
+
   describe "GET /api/accounts" do
     test "lists accounts", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "list-a"})

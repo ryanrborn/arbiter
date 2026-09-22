@@ -145,7 +145,11 @@ defmodule Arbiter.Accounts do
     end
   end
 
-  defp uuid?(str), do: match?({:ok, _}, Ecto.UUID.cast(str))
+  # Canonical 36-character form only. `Ecto.UUID.cast/1` also accepts a raw
+  # 16-*byte* binary, which silently claimed every ref that happened to be 16
+  # characters long ("claude:ceil-refs") for the id branch, so it 404'd
+  # instead of resolving as `provider:slug` / a bare slug.
+  defp uuid?(str), do: byte_size(str) == 36 and match?({:ok, _}, Ecto.UUID.cast(str))
 
   @doc """
   Create a new `ProviderAccount` — `arb account create`. Operator-asserted
@@ -153,6 +157,24 @@ defmodule Arbiter.Accounts do
   """
   @spec create_account(map()) :: {:ok, ProviderAccount.t()} | {:error, term()}
   def create_account(attrs) when is_map(attrs), do: Ash.create(ProviderAccount, attrs)
+
+  @doc """
+  Set (or clear, with `nil`) the account concurrency ceiling (P8,
+  `docs/provider-account-design.md` §4.2): at most `max_concurrent` workers
+  may be live on this account across *every* workspace metered under it.
+
+  `nil` is the migrated default (§4.4) and means no account ceiling —
+  today's behaviour, bit-for-bit. Nothing is enforced until an operator picks
+  a number.
+  """
+  @spec set_max_concurrent(String.t(), non_neg_integer() | nil) ::
+          {:ok, ProviderAccount.t()} | {:error, term()}
+  def set_max_concurrent(account_ref, max_concurrent)
+      when is_nil(max_concurrent) or (is_integer(max_concurrent) and max_concurrent >= 0) do
+    with {:ok, account} <- get_account(account_ref) do
+      Ash.update(account, %{max_concurrent: max_concurrent})
+    end
+  end
 
   @doc """
   Attach a workspace to an account for a provider — `arb account attach

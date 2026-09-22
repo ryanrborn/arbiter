@@ -58,6 +58,98 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert out =~ "[merged -> acct-2]"
   end
 
+  # ---- set (P8, `docs/provider-account-design.md` §4.2-§4.4) ---------------
+
+  test "account set --max-concurrent PATCHes the ceiling" do
+    stub_routes([
+      {{"patch", "/api/accounts/personal-max"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body) == %{"max_concurrent" => 4}
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "personal-max",
+           "max_concurrent" => 4,
+           "enabled" => true,
+           "merged_into_id" => nil
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Account.run(["set", "personal-max", "--max-concurrent", "4"]) end)
+
+    assert exit_code == 0
+    assert out =~ "claude:personal-max max_concurrent=4"
+  end
+
+  test "account set --max-concurrent none clears the ceiling (§4.4: opt-in)" do
+    stub_routes([
+      {{"patch", "/api/accounts/personal-max"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body) == %{"max_concurrent" => nil}
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "personal-max",
+           "max_concurrent" => nil,
+           "enabled" => true,
+           "merged_into_id" => nil
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--max-concurrent", "none"]) end)
+
+    assert exit_code == 0
+    assert out =~ "max_concurrent=(none)"
+  end
+
+  test "account set --json emits the account" do
+    stub_patch("/api/accounts/acct-1", %{
+      "id" => "acct-1",
+      "provider" => "claude",
+      "slug" => "personal-max",
+      "max_concurrent" => 2,
+      "enabled" => true,
+      "merged_into_id" => nil
+    })
+
+    {out, _err, exit_code} =
+      capture(fn -> Account.run(["set", "acct-1", "--max-concurrent", "2", "--json"]) end)
+
+    assert exit_code == 0
+    assert Jason.decode!(out)["max_concurrent"] == 2
+  end
+
+  test "account set without --max-concurrent is an error" do
+    {_out, err, exit_code} = capture(fn -> Account.run(["set", "personal-max"]) end)
+    assert exit_code != 0
+    assert err =~ "--max-concurrent"
+  end
+
+  test "account set rejects a negative ceiling" do
+    {_out, err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--max-concurrent", "-1"]) end)
+
+    assert exit_code != 0
+    assert err =~ "--max-concurrent"
+  end
+
+  test "account set requires a ref" do
+    {_out, err, exit_code} = capture(fn -> Account.run(["set", "--max-concurrent", "2"]) end)
+    assert exit_code != 0
+    assert err =~ "account set requires"
+  end
+
   test "account show prints credentials and workspaces, never a secret" do
     stub_get("/api/accounts/personal-max", %{
       "id" => "acct-1",
