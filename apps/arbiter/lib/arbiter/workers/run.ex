@@ -273,15 +273,27 @@ defmodule Arbiter.Workers.Run do
     # and `Loop.Analysis` all pattern-match its exact value. `failure_summary` is
     # the bounded human-readable twin (VERDICT line + top finding, ~280 chars) so
     # "why did this fail" is answerable from `worker_runs` alone, without a
-    # separate `review_gate_rounds_list` call. Nil on any run that didn't fail
-    # via ReviewGate.
+    # separate `review_gate_rounds_list` call.
+    #
+    # bd-1eb6fc: also carries a non-failure note on a `:completed` run — `arb
+    # done` fired while a background task the worker had last checked was
+    # still RUNNING (`Worker.note_tasks_running_at_done/1`). Nothing in this
+    # codebase branches on "non-nil ⇒ failed" (checked at bd-1eb6fc time —
+    # every reader just surfaces the field alongside `status`), so this stays
+    # a single column rather than a `status`-keyed pair; a reader that
+    # distinguishes "why did this fail" from "what should I know about this
+    # run" must check `status` too, same as it already must for
+    # `failure_reason` on an `:interrupted` run (see
+    # `ArbiterCli.Cmd.Worker.reason_label/1`).
     attribute :failure_summary, :string do
       public? true
       constraints max_length: 300
 
-      description "Bounded human-readable failure summary (ReviewGate VERDICT line + " <>
-                    "top finding, truncated). Twin of failure_reason's short atom for " <>
-                    "runs that failed via ReviewGate rejection; nil otherwise."
+      description "Bounded human-readable summary (truncated). On a run that failed via " <>
+                    "ReviewGate rejection: the VERDICT line + top finding. On a completed " <>
+                    "run: a non-failure completion note (e.g. arb done fired with a " <>
+                    "background task still RUNNING). Nil otherwise — check `status` to " <>
+                    "tell which case applies."
     end
 
     attribute :resumed_from_run_id, :uuid do

@@ -888,6 +888,35 @@ defmodule Arbiter.Worker.ClaudeSession do
   # finish" (conversation f4f6f359, task-96: last known status RUNNING,
   # process killed ~1s later on the `arb done` sentinel, no further status
   # check ever recorded).
+  #
+  # A task the model never once polled was invisible to the clause below
+  # until this one was added: agy arms the background wait itself, on the
+  # SAME `run_command` step that spawned it, in a `state: "RUNNING"` event
+  # whose `tool_info.output` reads
+  # "Tool is running as a background task with task id: <id>\n…" (confirmed
+  # against a live agy transcript, worker-agy
+  # bugfix-1946-doctor-s-version-hint-blames-server-P0gMpCFzM9, conversation
+  # 25df47b0…, step 26 — `manage_task status` calls immediately afterward
+  # poll that exact id). Seeding from this event means a task is recorded as
+  # running the moment it goes async, whether or not the model ever checks
+  # on it again — closing the gap `manage_task`-only tracking left for a
+  # backgrounded-and-never-polled command.
+  defp track_async_tasks(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{
+           "step_type" => "tool",
+           "tool_name" => "run_command",
+           "state" => "RUNNING"
+         } = step
+       }) do
+    output = get_in(step, ["tool_info", "output"])
+
+    case background_task_id(output) do
+      task_id when is_binary(task_id) -> update_async_tasks(session, &Map.put(&1, task_id, true))
+      nil -> session
+    end
+  end
+
   defp track_async_tasks(%{provider: "gemini"} = session, %{
          "event" => "step_update",
          "step_update" => %{"step_type" => "tool", "state" => "DONE"} = step
@@ -900,6 +929,11 @@ defmodule Arbiter.Worker.ClaudeSession do
 
       cond do
         not is_binary(task_id) -> session
+        # `Action: "kill"` doesn't echo `Status:` at all (`Task "<id>"
+        # cancelled.`) — a deliberately abandoned task must still drop out of
+        # tracking, or note_tasks_running_at_done/1 flags a wait the worker
+        # chose to walk away from as though it were an unnoticed one.
+        params["Action"] == "kill" -> update_async_tasks(session, &Map.delete(&1, task_id))
         status == "RUNNING" -> update_async_tasks(session, &Map.put(&1, task_id, true))
         is_binary(status) -> update_async_tasks(session, &Map.delete(&1, task_id))
         true -> session
@@ -910,6 +944,15 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   defp track_async_tasks(session, _event), do: session
+
+  defp background_task_id(output) when is_binary(output) do
+    case Regex.run(~r/background task with task id:\s*(\S+)/, output) do
+      [_, task_id] -> task_id
+      _ -> nil
+    end
+  end
+
+  defp background_task_id(_output), do: nil
 
   defp manage_task_status(output) when is_binary(output) do
     case Regex.run(~r/Status:\s*(\S+)/, output) do
