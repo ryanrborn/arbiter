@@ -1156,9 +1156,12 @@ defmodule Arbiter.MCP.Tools do
   end
 
   @doc """
-  Return the current pause state of the board autopilot, and when/by-what it
-  was last changed (`nil` when unknown, e.g. still on the boot-time config
-  default). Coordinator only.
+  Return the scheduler's drain state (`Arbiter.Board.Drain`): `state` is
+  `running`, `draining` or `quiescent`, `safe_to_restart` is true only when
+  quiescent, and `in_flight` lists every piece of live work — including the
+  fix passes, conflict resolvers and review rounds a pause does not stop.
+  Also the pause flag and when/by-what it was last changed (`nil` when
+  unknown, e.g. still on the boot-time config default). Coordinator only.
   """
   @spec scheduler_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def scheduler_status(%Scope{} = _scope, _args) do
@@ -1171,14 +1174,9 @@ defmodule Arbiter.MCP.Tools do
       {:error, {:invalid, "status check failed: process error #{inspect(reason)}"}}
   end
 
+  # bd-9fgg04: the one drain-state definition, shared with the REST endpoint.
   defp scheduler_status_data do
-    status = Arbiter.Board.Autopilot.status()
-
-    %{
-      paused: status.paused?,
-      changed_at: status.changed_at,
-      changed_by: status.changed_by
-    }
+    Arbiter.Board.Drain.status() |> Arbiter.Board.Drain.to_json()
   end
 
   # ---- shared resolution / fetch -----------------------------------------

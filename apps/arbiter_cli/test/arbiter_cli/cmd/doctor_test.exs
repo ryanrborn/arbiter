@@ -146,7 +146,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 7
+    assert length(checks) == 8
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -586,6 +586,82 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] bind address is loopback"
+    end
+  end
+
+  # bd-9fgg04: "is it safe to restart?" is what doctor is reached for.
+  describe "restart safety check" do
+    defp stub_with_scheduler(scheduler_resp) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/scheduler/status"}, scheduler_resp}
+      ])
+    end
+
+    test "paused and draining is [fail], lists the work, but is non-fatal and never blocks readiness" do
+      stub_with_scheduler(
+        {%{
+           "state" => "draining",
+           "paused" => true,
+           "safe_to_restart" => false,
+           "in_flight" => [
+             %{"kind" => "conflict_resolver", "task_id" => "vs-3fpek0", "status" => "running"}
+           ]
+         }, 200}
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+
+      assert exit_code == 0
+      assert out =~ "[fail] safe to restart"
+      assert out =~ "conflict_resolver"
+      assert out =~ "vs-3fpek0"
+      assert out =~ "arb scheduler wait"
+      assert Doctor.green?() == true
+    end
+
+    test "paused and quiescent is green and says so" do
+      stub_with_scheduler(
+        {%{
+           "state" => "quiescent",
+           "paused" => true,
+           "safe_to_restart" => true,
+           "in_flight" => []
+         }, 200}
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+
+      assert out =~ "[ ok ] safe to restart"
+      assert out =~ "paused, quiescent"
+    end
+
+    test "a running scheduler is green, with how to reach a safe point" do
+      stub_with_scheduler(
+        {%{
+           "state" => "running",
+           "paused" => false,
+           "safe_to_restart" => false,
+           "in_flight" => []
+         }, 200}
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+
+      assert out =~ "[ ok ] safe to restart"
+      assert out =~ "arb scheduler pause && arb scheduler wait"
+    end
+
+    test "an unreadable scheduler status never fails doctor" do
+      stub_with_scheduler({%{}, 404})
+
+      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+
+      assert out =~ "[ ok ] safe to restart"
+      assert out =~ "could not determine"
     end
   end
 end

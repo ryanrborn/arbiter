@@ -117,6 +117,49 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       assert data.paused == false
     end
 
+    # bd-9fgg04: the body is `Arbiter.Board.Drain.to_json/1` — a pause alone is
+    # not "idle", so the drain state rides along with the flag.
+    test "reports the drain state: running while the autopilot promotes", ctx do
+      :ok = Autopilot.resume()
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.state == "running"
+      assert data.safe_to_restart == false
+      assert is_list(data.in_flight)
+    end
+
+    test "a paused scheduler with live work reports draining, naming the work", ctx do
+      :ok = Autopilot.pause()
+      test_pid = self()
+
+      runner =
+        spawn_link(fn ->
+          Arbiter.Board.Drain.track(:external_review, %{detail: "github:o/r#9"}, fn ->
+            send(test_pid, :running)
+
+            receive do
+              :release -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :running
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.paused == true
+      assert data.state == "draining"
+      assert data.safe_to_restart == false
+
+      assert Enum.any?(
+               data.in_flight,
+               &(&1.kind == "external_review" and &1.detail == "github:o/r#9")
+             )
+
+      send(runner, :release)
+    end
+
     test "reports when and by what the state last changed", ctx do
       :ok = Autopilot.resume(Autopilot)
       :ok = Autopilot.pause(Autopilot, "mcp")

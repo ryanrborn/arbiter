@@ -58,6 +58,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Board.Drain
   alias Arbiter.CircuitBreaker
   alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiMCP
@@ -123,6 +124,14 @@ defmodule Arbiter.Worker.Dispatch do
 
   @spec dispatch(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def dispatch(task_id, opts \\ []) when is_binary(task_id) do
+    # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
+    # invisible to the worker supervisor — track it so a drain report sees it.
+    # This covers every caller: `arb dispatch`, the Conductor's DispatchQueue,
+    # Watchdog auto-resume and the autopilot's promotion task.
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_dispatch(task_id, opts) end)
+  end
+
+  defp do_dispatch(task_id, opts) do
     opts = normalize_opts(opts)
 
     with {:ok, task} <- load_task(task_id),
@@ -291,6 +300,12 @@ defmodule Arbiter.Worker.Dispatch do
   """
   @spec resume(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def resume(task_id, opts \\ []) when is_binary(task_id) do
+    # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
+    # invisible to the worker supervisor — track it so a drain report sees it.
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume(task_id, opts) end)
+  end
+
+  defp do_resume(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_active(task_id),
@@ -326,7 +341,8 @@ defmodule Arbiter.Worker.Dispatch do
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
-      dispatch(task_id, resume_opts)
+      # Already inside this resume's Drain.track — skip dispatch/2's own.
+      do_dispatch(task_id, resume_opts)
     end
   end
 
@@ -381,6 +397,12 @@ defmodule Arbiter.Worker.Dispatch do
   @spec resume_session(String.t(), dispatch_opts()) ::
           {:ok, dispatch_result()} | {:error, term()}
   def resume_session(task_id, opts \\ []) when is_binary(task_id) do
+    # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
+    # invisible to the worker supervisor — track it so a drain report sees it.
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume_session(task_id, opts) end)
+  end
+
+  defp do_resume_session(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_active(task_id),
@@ -447,7 +469,8 @@ defmodule Arbiter.Worker.Dispatch do
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
-      dispatch(task_id, resume_opts)
+      # Already inside this resume's Drain.track — skip dispatch/2's own.
+      do_dispatch(task_id, resume_opts)
     end
   end
 

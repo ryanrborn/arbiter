@@ -95,12 +95,16 @@ defmodule Arbiter.Board.DrainTest do
     test "an autopilot promotion still in flight when the pause lands keeps it draining" do
       test_pid = self()
 
+      # Tracks itself exactly as `Dispatch.dispatch/2` does, so the promotion
+      # must still be listed once, not twice.
       dispatch = fn id ->
-        send(test_pid, {:dispatching, id, self()})
+        Drain.track(:dispatch_pending, %{task_id: id}, fn ->
+          send(test_pid, {:dispatching, id, self()})
 
-        receive do
-          :release -> {:ok, id}
-        end
+          receive do
+            :release -> {:ok, id}
+          end
+        end)
       end
 
       ap =
@@ -123,6 +127,104 @@ defmodule Arbiter.Board.DrainTest do
       Task.await(tick, 10_000)
 
       assert Drain.status(autopilot: ap, supervisor: empty_supervisor!()).state == :quiescent
+    end
+  end
+
+  describe "track/3 — live work outside the worker supervisor" do
+    test "an entry is in flight exactly while its function runs" do
+      ap = start_autopilot!(paused: true)
+      sup = empty_supervisor!()
+      test_pid = self()
+
+      runner =
+        spawn_link(fn ->
+          result =
+            Drain.track(:external_review, %{detail: "github:o/r#7"}, fn ->
+              send(test_pid, :running)
+
+              receive do
+                :release -> :reviewed
+              end
+            end)
+
+          send(test_pid, {:returned, result})
+        end)
+
+      assert_receive :running
+
+      status = Drain.status(autopilot: ap, supervisor: sup)
+      assert status.state == :draining
+      refute status.safe_to_restart
+
+      assert [%{kind: :external_review, detail: "github:o/r#7", pid: ^runner} = entry] =
+               status.in_flight
+
+      assert %DateTime{} = entry.started_at
+
+      send(runner, :release)
+      assert_receive {:returned, :reviewed}
+
+      assert Drain.status(autopilot: ap, supervisor: sup).state == :quiescent
+    end
+
+    test "an entry is dropped when its function raises" do
+      ap = start_autopilot!(paused: true)
+
+      assert_raise RuntimeError, fn ->
+        Drain.track(:review_reply, %{task_id: "bd-raise"}, fn -> raise "boom" end)
+      end
+
+      assert Drain.status(autopilot: ap, supervisor: empty_supervisor!()).state == :quiescent
+    end
+
+    test "an entry is dropped when its process is killed mid-run" do
+      ap = start_autopilot!(paused: true)
+      test_pid = self()
+
+      {pid, ref} =
+        spawn_monitor(fn ->
+          Drain.track(:patrol_rereview, %{task_id: "bd-killed"}, fn ->
+            send(test_pid, :running)
+
+            receive do
+              :never -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :running
+      sup = empty_supervisor!()
+      assert [%{kind: :patrol_rereview}] = Drain.status(autopilot: ap, supervisor: sup).in_flight
+
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+      # Registry cleans up on its own :DOWN — sync on it before re-reading.
+      _ = :sys.get_state(Drain.Registry)
+
+      assert Drain.status(autopilot: ap, supervisor: sup).state == :quiescent
+    end
+
+    test "nested calls are separate entries" do
+      ap = start_autopilot!(paused: true)
+      sup = empty_supervisor!()
+
+      kinds =
+        Drain.track(:dispatch_pending, %{task_id: "bd-outer"}, fn ->
+          Drain.track(:external_review, %{}, fn ->
+            Drain.status(autopilot: ap, supervisor: sup).in_flight |> Enum.map(& &1.kind)
+          end)
+        end)
+
+      assert Enum.sort(kinds) == [:dispatch_pending, :external_review]
+    end
+
+    test "a registry that is not running is read as empty, and the work still runs" do
+      ap = start_autopilot!(paused: true)
+
+      status =
+        Drain.status(autopilot: ap, supervisor: empty_supervisor!(), registry: :no_such_registry)
+
+      assert status.state == :quiescent
     end
   end
 
@@ -250,7 +352,7 @@ defmodule Arbiter.Board.DrainTest do
                state: "draining",
                paused: true,
                safe_to_restart: false,
-               in_flight: [%{kind: "unclassified", task_id: nil}]
+               in_flight: [%{kind: "unclassified", task_id: nil, detail: nil}]
              } = json
 
       assert Jason.encode!(json)
