@@ -44,6 +44,7 @@ defmodule Arbiter.Quota.Gate.Snapshot do
   """
 
   alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.CodexQuota
   alias Arbiter.Quota.GoogleQuota
 
@@ -221,16 +222,15 @@ defmodule Arbiter.Quota.Gate.Snapshot do
 
   defp bucket_group(_model), do: nil
 
+  # Delegates the exact {group, window} match to the shared reader
+  # (`CloudCode.antigravity_bucket/3`, also used by `CloudCode.view/1`), then
+  # falls back to the worst reading across both groups for that window — via
+  # the same shared per-bucket formula (`CloudCode.antigravity_bucket_reading/1`)
+  # — when no group is known or no exact bucket exists.
   defp bucket_reading(models, group, window) do
-    exact = Enum.filter(models, &(Map.get(&1, "model_id") == "#{group}_#{window}"))
-    candidates = if exact != [], do: exact, else: window_candidates(models, window)
-
-    case Enum.max_by(candidates, &used_percent/1, fn -> nil end) do
-      nil ->
-        nil
-
-      worst ->
-        %{utilization: fraction(used_percent(worst)), reset_at: parse_reset(worst["reset_at"])}
+    case CloudCode.antigravity_bucket(models, group, window) do
+      %{} = found -> found
+      nil -> models |> window_candidates(window) |> CloudCode.antigravity_bucket_reading()
     end
   end
 
@@ -243,20 +243,8 @@ defmodule Arbiter.Quota.Gate.Snapshot do
     end)
   end
 
-  defp used_percent(%{"remaining_percentage" => rp}) when is_number(rp), do: 100.0 - rp
-  defp used_percent(_), do: 100.0
-
   defp models_from(%{"models" => models}) when is_list(models), do: models
   defp models_from(_), do: []
-
-  defp parse_reset(iso) when is_binary(iso) do
-    case DateTime.from_iso8601(iso) do
-      {:ok, dt, _} -> dt
-      _ -> nil
-    end
-  end
-
-  defp parse_reset(_), do: nil
 
   # Codex and Google report 0-100 used-percents; the gate threshold is a 0-1
   # fraction (Anthropic's native unit).
