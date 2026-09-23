@@ -240,15 +240,116 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   `snapshot` must contain `:workspace_id`; `adapter` is the module whose probe
   failed. Same addressed `:escalation` shape as the other escalations.
   Best-effort, returns `:ok`.
+
+  ## One escalation per episode (bd-6jjgk0)
+
+  `Arbiter.Agents.CredentialWatchdog`'s own in-memory dedupe (skip while its
+  `adapters` map already says `{:expired, _}`) is not durable: its own
+  periodic CLI probe can flip an adapter back to `:ok` on a signal this proactive
+  probe never saw (the worker CLI self-refreshing its session while
+  `Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll reads a separately
+  cached, still-stale token — #1875), re-arming the in-memory latch on every
+  such flip. One install saw 35 near-identical "N consecutive 401s" pages in
+  ~15h this way — the mailbox equivalent of the `:needs_nonauthor_approval`
+  flood `duplicate_block_escalation?/3` (bd-brwx7w) fixed the same way: the
+  latch has to live in the durable message table, which survives both a
+  flapping in-memory state and a restart.
+
+  While an identical (same workspace + adapter) escalation is still
+  uncleared, a repeat call rewrites its body in place (`Message.restate/2`)
+  instead of inserting a new row — the counter and "last detected" timestamp
+  move, the mailbox does not grow. `credential_restored/2` clears the row and
+  ends the episode once the probe succeeds again; a later failure then opens
+  a fresh one.
   """
   @spec credential_expired(%{workspace_id: String.t()}, module(), StopReason.t()) :: :ok
   def credential_expired(%{workspace_id: ws_id} = snapshot, adapter, %StopReason{} = reason)
       when is_binary(ws_id) and is_atom(adapter) do
     snapshot_with_adapter = Map.put(snapshot, :adapter, adapter)
-    escalate(:credential_expired, snapshot_with_adapter, reason)
+    {subject, body} = escalation_payload(:credential_expired, snapshot_with_adapter, reason)
+
+    case outstanding_credential_escalation(ws_id, subject) do
+      nil -> escalate(:credential_expired, snapshot_with_adapter, reason)
+      outstanding -> restate_credential_escalation(outstanding, body)
+    end
   end
 
   def credential_expired(_snapshot, _adapter, _reason), do: :ok
+
+  @doc """
+  Clear an outstanding proactive-credential-expiry escalation once the probe
+  succeeds again, and tell the coordinator the episode ended (bd-6jjgk0).
+
+  Fired by `Arbiter.Agents.CredentialWatchdog` when an adapter it had marked
+  expired recovers (either its own periodic probe passing again, or
+  `mark_recovered/2` from `Arbiter.Quota.CloudProbe`). Closes whatever
+  `credential_expired/3` escalation is still outstanding for this
+  `(workspace, adapter)` pair, so a later failure opens a fresh episode
+  instead of looking like a continuation of the old one. A no-op — posts
+  nothing — when nothing is outstanding, so a routine healthy probe cycle
+  never pages "restored" for a condition that was never escalated.
+  Best-effort, returns `:ok`.
+  """
+  @spec credential_restored(%{workspace_id: String.t()}, module()) :: :ok
+  def credential_restored(%{workspace_id: ws_id}, adapter)
+      when is_binary(ws_id) and is_atom(adapter) do
+    subject = credential_expired_subject(adapter)
+
+    case outstanding_credential_escalation(ws_id, subject) do
+      nil ->
+        :ok
+
+      outstanding ->
+        Message.clear_ids([outstanding.id])
+
+        short_name = adapter_short_name(adapter)
+        restored_subject = "#{short_name} credentials restored"
+
+        body =
+          "The proactive credential probe for #{inspect(adapter)} succeeded again. " <>
+            "The prior \"#{subject}\" escalation is cleared; this episode is over. " <>
+            "A future failure will raise a fresh escalation."
+
+        send_unless_broken(ws_id, "system", restored_subject, fn ->
+          Message.send_mail(%{
+            kind: :escalation,
+            to_ref: Message.coordinator_ref(),
+            from_ref: "system",
+            workspace_id: ws_id,
+            task_ref: "system",
+            subject: restored_subject,
+            body: body
+          })
+        end)
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.debug("CoordinatorNotifier.credential_restored/2 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def credential_restored(_snapshot, _adapter), do: :ok
+
+  defp outstanding_credential_escalation(ws_id, subject) do
+    Message.last_with_subject(Message.coordinator_ref(), [subject], workspace_id: ws_id, uncleared: true)
+  rescue
+    _ -> nil
+  end
+
+  defp restate_credential_escalation(%{id: id}, body) do
+    Message.restate(id, body)
+    :ok
+  rescue
+    e ->
+      Logger.debug("CoordinatorNotifier.credential_expired/3 restate swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   @doc """
   Escalate an unexpected provider fallback to the coordinator (bd-2exkl0).
@@ -1401,16 +1502,14 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp escalation_payload(:credential_expired, snapshot, %StopReason{} = reason) do
     adapter = Map.get(snapshot, :adapter)
     adapter_label = if adapter, do: inspect(adapter), else: "agent"
-    short_name = if adapter, do: adapter |> Module.split() |> List.last(), else: "Agent"
-
-    subject = "#{short_name} credentials expired — proactive detection"
+    subject = credential_expired_subject(adapter)
 
     body =
       [
         "Proactive credential probe: #{adapter_label} failed authentication.",
         reason.summary,
         reason.remediation && "Remediation: #{reason.remediation}",
-        "Note: new worker dispatches for this adapter are suspended until credentials are restored."
+        dispatch_gate_note(reason)
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
@@ -1459,6 +1558,38 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp escalation_payload(event, snapshot, %StopReason{} = reason),
     do: primary_escalation_payload(event, snapshot, reason)
+
+  defp adapter_short_name(nil), do: "Agent"
+  defp adapter_short_name(adapter), do: adapter |> Module.split() |> List.last()
+
+  defp credential_expired_subject(adapter),
+    do: "#{adapter_short_name(adapter)} credentials expired — proactive detection"
+
+  # bd-6jjgk0: the Claude oauth-usage poll (`Arbiter.Quota.CloudProbe`,
+  # `mark_credential_expired/3`) reads `/api/oauth/usage` with a token cached
+  # separately from what the worker CLI presents on dispatch — the CLI
+  # self-refreshes its own session on each run, while nothing refreshes this
+  # poll's cached copy (#1875). So this specific signal can keep failing for
+  # hours after the credential workers actually use is fine again, and the
+  # blanket "dispatches are suspended" claim goes stale the moment
+  # `Arbiter.Agents.CredentialWatchdog`'s own probe (which *does* gate
+  # dispatch 1:1) next succeeds. Detected off the summary text this one
+  # signal always writes, rather than threading a new field through
+  # `StopReason` for every other escalation path to ignore.
+  defp dispatch_gate_note(%StopReason{summary: summary}) when is_binary(summary) do
+    if String.contains?(summary, "/api/oauth/usage poll") do
+      "Note: this is the probe's own cached OAuth token failing, not necessarily the " <>
+        "token active worker dispatches use — the worker CLI self-refreshes its session " <>
+        "on each run (#1875), so dispatches may still be succeeding even while this " <>
+        "signal keeps failing. Re-authenticate if `arb quota` or an actual dispatch also " <>
+        "shows the credential is bad."
+    else
+      "Note: new worker dispatches for this adapter are suspended until credentials are restored."
+    end
+  end
+
+  defp dispatch_gate_note(_reason),
+    do: "Note: new worker dispatches for this adapter are suspended until credentials are restored."
 
   # Categories whose remediation is nothing but "re-dispatch (the task)" —
   # `:exited_without_done` ("Review the transcript, then re-dispatch"),

@@ -1,6 +1,8 @@
 defmodule Arbiter.Messages.CoordinatorNotifierTest do
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
 
@@ -994,6 +996,151 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                )
 
       assert Message.inbox("admiral") == []
+    end
+  end
+
+  describe "credential_expired/3 dedupe + restate (bd-6jjgk0)" do
+    alias Arbiter.Worker.StopReason
+
+    defp oauth_401_reason(count) do
+      %StopReason{
+        category: :auth_expired,
+        summary: "#{count} consecutive 401s from the /api/oauth/usage poll for [\"ws\"]",
+        remediation: "re-authenticate the operator's Claude OAuth credentials (`claude login`)",
+        exit_status: nil,
+        signal: nil
+      }
+    end
+
+    test "N consecutive failing cycles raise exactly one escalation" do
+      ws = uniq("ws")
+
+      for n <- 2..10 do
+        assert :ok =
+                 CoordinatorNotifier.credential_expired(
+                   %{workspace_id: ws},
+                   Arbiter.Agents.Claude,
+                   oauth_401_reason(n)
+                 )
+      end
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.body =~ "10 consecutive 401s"
+    end
+
+    test "an outstanding (read-but-uncleared) escalation still dedupes and its body updates in place" do
+      ws = uniq("ws")
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 oauth_401_reason(2)
+               )
+
+      assert [msg] = Message.inbox("admiral", workspace_id: ws)
+      Message.mark_read(msg.id)
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 oauth_401_reason(3)
+               )
+
+      assert [updated] = Message.outstanding("admiral", workspace_id: ws)
+      assert updated.id == msg.id
+      assert updated.body =~ "3 consecutive 401s"
+      assert Message.inbox("admiral", workspace_id: ws) == []
+    end
+
+    test "a different adapter is not deduped against another adapter's escalation" do
+      ws = uniq("ws")
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 oauth_401_reason(2)
+               )
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Codex,
+                 oauth_401_reason(2)
+               )
+
+      assert [_a, _b] = Message.inbox("admiral", workspace_id: ws)
+    end
+
+    test "the oauth-usage-poll signal names the probe's own credential instead of claiming dispatch is suspended" do
+      ws = uniq("ws")
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 oauth_401_reason(2)
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      refute escalation.body =~ "new worker dispatches for this adapter are suspended"
+      assert escalation.body =~ "probe's own cached OAuth token"
+    end
+  end
+
+  describe "credential_restored/2 (bd-6jjgk0)" do
+    alias Arbiter.Worker.StopReason
+
+    test "clears the outstanding escalation and posts a recovery notice" do
+      ws = uniq("ws")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, reason)
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+
+      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+
+      cleared = Ash.get!(Message, escalation.id)
+      assert cleared.cleared_at
+
+      assert [restored] = Message.inbox("admiral", workspace_id: ws)
+      assert restored.subject =~ "restored"
+    end
+
+    test "a later failure after recovery starts a new episode with one new escalation" do
+      ws = uniq("ws")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, reason)
+
+      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, reason)
+
+      # `inbox/2` only lists unread-and-uncleared rows, and the first episode's
+      # escalation is now cleared — read every row (cleared or not) for this
+      # workspace/subject to see both episodes.
+      expired_escalations =
+        Message
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(workspace_id == ^ws)
+        |> Ash.Query.filter(subject == ^"Claude credentials expired — proactive detection")
+        |> Ash.read!()
+
+      assert [_a, _b] = expired_escalations
+    end
+
+    test "recovering with nothing outstanding posts nothing" do
+      ws = uniq("ws")
+
+      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+      assert Message.inbox("admiral", workspace_id: ws) == []
     end
   end
 

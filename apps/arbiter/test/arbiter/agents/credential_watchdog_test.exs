@@ -106,7 +106,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       pid = start_watchdog()
 
       :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
-      Process.sleep(20)
+      :sys.get_state(pid)
 
       count_before =
         Message.inbox("admiral", workspace_id: ws.id)
@@ -114,7 +114,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
 
       # A second mark_expired must not send a duplicate escalation.
       :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
-      Process.sleep(20)
+      :sys.get_state(pid)
 
       count_after =
         Message.inbox("admiral", workspace_id: ws.id)
@@ -145,6 +145,52 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       assert esc1.subject =~ "credentials expired"
       assert esc1.body =~ "Proactive credential probe"
       assert esc1.body =~ "Re-authenticate"
+    end
+  end
+
+  describe "mark_recovered/2 clears the outstanding escalation (bd-6jjgk0)" do
+    test "recovering after mark_expired/3 clears the escalation and posts a restored notice" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-recover-ws", prefix: "cwr"})
+      pid = start_watchdog()
+
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :sys.get_state(pid)
+
+      assert [escalation] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "credentials expired"))
+
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid)
+      :sys.get_state(pid)
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      cleared = Ash.get!(Message, escalation.id)
+      assert cleared.cleared_at
+
+      assert [restored] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "restored"))
+
+      assert restored.body =~ "Claude"
+    end
+
+    test "a later mark_expired/3 after recovery opens a fresh episode" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-reopen-ws", prefix: "cwo"})
+      pid = start_watchdog()
+
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :sys.get_state(pid)
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid)
+      :sys.get_state(pid)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :sys.get_state(pid)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      assert [_second] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "credentials expired"))
     end
   end
 

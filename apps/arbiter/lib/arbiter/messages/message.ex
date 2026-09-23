@@ -232,6 +232,22 @@ defmodule Arbiter.Messages.Message do
                {:ok, message}
              end)
     end
+
+    update :restate do
+      # bd-6jjgk0: rewrites the body of an outstanding escalation in place —
+      # used by callers that fold a repeated failure cycle (an updated
+      # counter/last-seen timestamp) into the same row instead of inserting a
+      # fresh one every cycle, the way `Arbiter.Messages.CoordinatorNotifier`'s
+      # `credential_expired/3` dedupe does. Subject/kind/to_ref are left alone
+      # so the row keeps matching whatever dedupe query found it.
+      accept [:body]
+      require_atomic? false
+
+      change after_action(fn _changeset, message, _context ->
+               Arbiter.Messages.Message.broadcast_new(message)
+               {:ok, message}
+             end)
+    end
   end
 
   validations do
@@ -567,6 +583,19 @@ defmodule Arbiter.Messages.Message do
   end
 
   def mark_cleared(message), do: Ash.update(message, %{}, action: :mark_cleared)
+
+  @doc """
+  Rewrite `message`'s body in place (the `:restate` action) — for a caller
+  folding a repeated event into an already-outstanding row (bd-6jjgk0) rather
+  than inserting a fresh one every cycle. Accepts a `%Message{}` or an id.
+  """
+  def restate(id, body) when is_binary(id) do
+    with {:ok, message} <- Ash.get(__MODULE__, id) do
+      restate(message, body)
+    end
+  end
+
+  def restate(message, body), do: Ash.update(message, %{body: body}, action: :restate)
 
   @doc """
   Pending (unread) mailbox-family messages addressed to `to_ref`, oldest first:

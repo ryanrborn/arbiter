@@ -342,6 +342,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   defp on_probe_ok(state, adapter, {:expired, _}) do
     Logger.info("CredentialWatchdog: #{adapter_name(adapter)} credentials recovered")
     AuthHold.recovered(adapter, state.auth_hold)
+    recover_all(adapter)
     %{state | adapters: Map.put(state.adapters, adapter, :ok)}
   end
 
@@ -374,6 +375,21 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
       Enum.each(workspaces, fn ws ->
         CoordinatorNotifier.credential_expired(%{workspace_id: ws.id}, adapter, reason)
+      end)
+    end)
+  end
+
+  # Mirrors `escalate_all/2`: tells every active workspace's coordinator
+  # mailbox that `adapter` recovered, clearing whatever `credential_expired/3`
+  # escalation is still outstanding for it (bd-6jjgk0) so the next expiry
+  # starts a fresh episode rather than looking like a continuation of this
+  # one. Best-effort, same as `escalate_all/2`.
+  defp recover_all(adapter) do
+    safe(fn ->
+      workspaces = Ash.read!(Arbiter.Tasks.Workspace)
+
+      Enum.each(workspaces, fn ws ->
+        CoordinatorNotifier.credential_restored(%{workspace_id: ws.id}, adapter)
       end)
     end)
   end
