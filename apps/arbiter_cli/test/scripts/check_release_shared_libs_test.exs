@@ -70,8 +70,8 @@ defmodule ArbiterCli.Scripts.CheckReleaseSharedLibsTest do
     total = shoff + shnum * shentsize
 
     header =
-      <<0x7F, "ELF", 2, 1, 1, 0, 0::64, 3::little-16, 62::little-16, 1::little-32,
-        0::little-64, ehsize::little-64, shoff::little-64, 0::little-32, ehsize::little-16,
+      <<0x7F, "ELF", 2, 1, 1, 0, 0::64, 3::little-16, 62::little-16, 1::little-32, 0::little-64,
+        ehsize::little-64, shoff::little-64, 0::little-32, ehsize::little-16,
         phentsize::little-16, phnum::little-16, shentsize::little-16, shnum::little-16,
         3::little-16>>
 
@@ -315,7 +315,9 @@ defmodule ArbiterCli.Scripts.CheckReleaseSharedLibsTest do
       {_, 0} = System.cmd("tar", ["-czf", tarball, "-C", dir, "."])
 
       {out, 1} = run([tarball])
-      assert out =~ ~r/^ERROR: lib\/crypto-5\.8\.3\/priv\/lib\/crypto\.so needs libcrypto\.so\.1\.1/m
+
+      assert out =~
+               ~r/^ERROR: lib\/crypto-5\.8\.3\/priv\/lib\/crypto\.so needs libcrypto\.so\.1\.1/m
     end
 
     test "passes a clean tarball" do
