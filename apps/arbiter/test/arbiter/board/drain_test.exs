@@ -204,8 +204,10 @@ defmodule Arbiter.Board.DrainTest do
 
       Process.exit(pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
-      # Registry cleans up on its own :DOWN — sync on it before re-reading.
-      _ = :sys.get_state(Drain.Registry)
+      # The Registry's (single) pid partition is linked to the caller and
+      # cleans up on its :EXIT — sync on that process, not the Registry's
+      # supervisor (which is what the bare registry name resolves to).
+      _ = :sys.get_state(Module.concat(Drain.Registry, "PIDPartition0"))
 
       assert Drain.status(autopilot: ap, supervisor: sup).state == :quiescent
     end
