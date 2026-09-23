@@ -17,6 +17,11 @@ defmodule ArbiterWeb.QuotaHelpers do
   #   (both per bd-d8wo5m review round 1)
   @fixed_window_providers ~w(claude antigravity)
 
+  # Providers with a paid-overage mode (Arbiter.Quota.default_workspace_on_exhaustion/0).
+  # Antigravity has no such billing path, so it always "stalls" rather than
+  # "starts billing overage" under `:continue`.
+  @overage_billing_providers ~w(claude)
+
   # Clamp utilization float to a 0-100 integer percentage.
   # Accepts both floats and integers (SQLite can return integers for
   # whole-number floats under certain driver/migration paths).
@@ -227,9 +232,9 @@ defmodule ArbiterWeb.QuotaHelpers do
   defp pace_label(_provider, _u, _reset_at, _overage_status, _window_seconds, _on_exhaustion),
     do: nil
 
-  # Only "claude" has a paid-overage mode (Arbiter.Quota.default_workspace_on_exhaustion/0);
-  # every other fixed-window provider (e.g. "antigravity") always stalls.
-  defp pace_label_verb("claude", :continue), do: "starts billing overage in"
+  defp pace_label_verb(provider, :continue) when provider in @overage_billing_providers,
+    do: "starts billing overage in"
+
   defp pace_label_verb(_provider, _on_exhaustion), do: "stalls in"
 
   # Core deficit-minutes pace math (bd-l4epbc):

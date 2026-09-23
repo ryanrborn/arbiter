@@ -175,6 +175,8 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       reset_at = reset_at_after(30)
       assert quota_color_5h("codex", 0.35, reset_at, nil) == "#22c55e"
       assert quota_color_5h("codex", 0.95, reset_at, nil) == "#ef4444"
+      assert quota_color_5h("gemini_cli", 0.35, reset_at, nil) == "#22c55e"
+      assert quota_color_5h("gemini_cli", 0.95, reset_at, nil) == "#ef4444"
       assert quota_color_5h("someday_cli", 0.35, reset_at, nil) == "#22c55e"
       assert quota_color_5h("someday_cli", 0.95, reset_at, nil) == "#ef4444"
     end
@@ -209,6 +211,14 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       window_min = 7 * 24 * 60
       reset_at = reset_at_after(round(window_min * 0.1), window_min)
       assert quota_color_7d("antigravity", 0.35, reset_at, nil) == "#ef4444"
+    end
+
+    test "providers without a fixed window fall back to absolute-utilization thresholds" do
+      reset_at = reset_at_after(30)
+      assert quota_color_7d("codex", 0.35, reset_at, nil) == "#22c55e"
+      assert quota_color_7d("codex", 0.95, reset_at, nil) == "#ef4444"
+      assert quota_color_7d("gemini_cli", 0.35, reset_at, nil) == "#22c55e"
+      assert quota_color_7d("gemini_cli", 0.95, reset_at, nil) == "#ef4444"
     end
   end
 
@@ -271,6 +281,13 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       assert quota_pace_label_5h("antigravity", 0.35, reset_at, nil, :throttle) =~
                ~r/^stalls in \d+m$/
     end
+
+    test "nil for providers without a fixed window, even at a pace that would be red for claude" do
+      reset_at = reset_at_after(30)
+      assert quota_pace_label_5h("codex", 0.35, reset_at, nil, :continue) == nil
+      assert quota_pace_label_5h("gemini_cli", 0.35, reset_at, nil, :continue) == nil
+      assert quota_pace_label_5h("someday_cli", 0.35, reset_at, nil, :continue) == nil
+    end
   end
 
   describe "quota_pace_ratio_5h/3 — pace ratio exposed for tooltip text" do
@@ -293,6 +310,39 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     test "antigravity reports the same pace ratio as claude" do
       reset_at = reset_at_after(30)
       assert quota_pace_ratio_5h("antigravity", 0.35, reset_at) == "3.5x pace"
+    end
+  end
+
+  describe "quota_pace_ratio_7d/3 — pace ratio exposed for tooltip text" do
+    test "nil for providers without a fixed window" do
+      reset_at = reset_at_after(30)
+      assert quota_pace_ratio_7d("codex", 0.5, reset_at) == nil
+      assert quota_pace_ratio_7d("gemini_cli", 0.5, reset_at) == nil
+    end
+
+    test "antigravity reports a pace ratio, same as claude" do
+      window_min = 7 * 24 * 60
+      reset_at = reset_at_after(round(window_min * 0.1), window_min)
+
+      assert quota_pace_ratio_7d("antigravity", 0.35, reset_at) ==
+               quota_pace_ratio_7d("claude", 0.35, reset_at)
+    end
+  end
+
+  describe "quota_pace_label_7d/5 — on_exhaustion-aware label text" do
+    test "nil for providers without a fixed window, even at a pace that would be red for claude" do
+      window_min = 7 * 24 * 60
+      reset_at = reset_at_after(round(window_min * 0.1), window_min)
+      assert quota_pace_label_7d("codex", 0.35, reset_at, nil, :continue) == nil
+      assert quota_pace_label_7d("gemini_cli", 0.35, reset_at, nil, :continue) == nil
+    end
+
+    test "antigravity always says \"stalls in Nm\", never overage billing, even under :continue" do
+      window_min = 7 * 24 * 60
+      reset_at = reset_at_after(round(window_min * 0.1), window_min)
+
+      assert quota_pace_label_7d("antigravity", 0.35, reset_at, nil, :continue) =~
+               ~r/^stalls in /
     end
   end
 
