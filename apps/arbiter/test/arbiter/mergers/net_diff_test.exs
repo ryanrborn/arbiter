@@ -76,4 +76,67 @@ defmodule Arbiter.Mergers.NetDiffTest do
       refute NetDiff.equivalent?("", "")
     end
   end
+
+  describe "blank?/1" do
+    test "true for a diff that fetched cleanly but describes no change" do
+      assert NetDiff.blank?("")
+      assert NetDiff.blank?("   \n\n")
+    end
+
+    test "false for real content" do
+      refute NetDiff.blank?(@reviewed)
+    end
+
+    test "false for a failed fetch, never a positive claim from an absence of data" do
+      refute NetDiff.blank?(nil)
+    end
+  end
+
+  describe "local_diff_blank?/2" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "net-diff-local-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", tmp])
+      {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.email", "repo@example.com"])
+      {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.name", "Repo"])
+      {_, 0} = System.cmd("git", ["-C", tmp, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(tmp, "README.md"), "seed\n")
+      {_, 0} = System.cmd("git", ["-C", tmp, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", tmp, "commit", "-q", "-m", "seed"])
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      %{repo: tmp}
+    end
+
+    test "{:ok, true} when git ran successfully and reported no change", %{repo: repo} do
+      assert NetDiff.local_diff_blank?(repo, "HEAD..HEAD") == {:ok, true}
+    end
+
+    test "{:ok, false} when git ran successfully and reported real content", %{repo: repo} do
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "feature"])
+      File.write!(Path.join(repo, "feature.txt"), "new content\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "feature.txt"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add feature"])
+
+      assert NetDiff.local_diff_blank?(repo, "main..HEAD") == {:ok, false}
+    end
+
+    # bd-aq81qz: a git failure (here, a range naming a SHA the worktree has
+    # never heard of — the same shape a stale/missing base_sha produces) must
+    # answer :error, never {:ok, true}. Reading a failed compare as "blank"
+    # would misread a transient git failure as proof the branch contributes
+    # nothing and wrongly park a legitimate APPROVE.
+    test ":error on a git failure, never a positive claim of blankness", %{repo: repo} do
+      bogus_sha = String.duplicate("a", 40)
+      assert NetDiff.local_diff_blank?(repo, "#{bogus_sha}..HEAD") == :error
+    end
+
+    test ":error when the worktree path does not exist" do
+      assert NetDiff.local_diff_blank?(
+               "/nonexistent/path/#{System.unique_integer([:positive])}",
+               "HEAD..HEAD"
+             ) ==
+               :error
+    end
+  end
 end

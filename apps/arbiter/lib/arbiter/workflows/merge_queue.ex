@@ -1441,8 +1441,24 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  defp apply_legacy_decision(state, item, {:ok, expected_sha}),
-    do: state.adapter.merge(item.mr_ref, expected_sha)
+  defp apply_legacy_decision(state, item, {:ok, expected_sha}) do
+    # bd-aq81qz / M1: an approval and a clean expected_sha are not proof the
+    # merge contributes anything — a branch redispatched onto already-squashed
+    # commits, then merged with its base, moves `head` without changing a
+    # line. Refuse the same way a stale-SHA refusal does (returned, not
+    # raised): `try_merge/2` below routes `:empty_net_diff` to the same
+    # non-terminal retry the other content refusals already get.
+    if empty_net_diff_at_merge?(state, item, expected_sha) do
+      Logger.warning(
+        "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+          "head #{expected_sha} nets to an empty diff against the target branch"
+      )
+
+      {:error, :empty_net_diff}
+    else
+      state.adapter.merge(item.mr_ref, expected_sha)
+    end
+  end
 
   defp apply_legacy_decision(_state, item, {:error, {:stale_reviewed_sha, reviewed, head}} = err) do
     Logger.warning(
@@ -1451,6 +1467,20 @@ defmodule Arbiter.Workflows.MergeQueue do
     )
 
     err
+  end
+
+  # Fails OPEN (`false`) on a missing base or a fetch failure: this guard only
+  # refuses on a POSITIVE proof of emptiness, never on "could not tell", which
+  # would wrongly stall a perfectly good merge on a transient forge error.
+  defp empty_net_diff_at_merge?(%State{} = state, item, head) do
+    base = Map.get(item, :base) || state.base
+
+    with true <- is_binary(base) and base != "",
+         {:ok, diff} <- safe_get_diff(state, item, base, head) do
+      Mergers.NetDiff.blank?(diff)
+    else
+      _ -> false
+    end
   end
 
   # The flipped path. The legacy guard still runs — its answer is what the
@@ -1804,6 +1834,12 @@ defmodule Arbiter.Workflows.MergeQueue do
         {%{item | last_error: reason}, state}
 
       {:error, {:coverage_unknown, _reason} = reason} ->
+        {%{item | last_error: reason}, state}
+
+      # bd-aq81qz: same non-terminal shape as the stale/coverage refusals
+      # above — a re-review or a coordinator fix can clear this, and marking
+      # the item :failed here would give it no way back in.
+      {:error, :empty_net_diff = reason} ->
         {%{item | last_error: reason}, state}
 
       {:error, reason} ->

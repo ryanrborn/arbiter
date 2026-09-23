@@ -1405,10 +1405,7 @@ defmodule Arbiter.Worker.ReviewGate do
         run_verdict_guard(:missing_criteria, state, findings)
 
       true ->
-        record_round(state, :review, :approve, findings, converged: true)
-        stamp_reviewed_head(state)
-        record_review_coverage(state)
-        {:done, finish(state, verdict)}
+        finalize_approval(state, verdict, findings)
     end
   end
 
@@ -1429,6 +1426,67 @@ defmodule Arbiter.Worker.ReviewGate do
         handle_reject(state, findings)
     end
   end
+
+  # bd-aq81qz / G20: an APPROVE whose net diff against the target branch is
+  # empty must not proceed to merge. This is the shape `empty_diff_guard/1`
+  # (G2) does NOT catch: the branch has real commits ahead of the target
+  # (`head_sha != base_sha`), most often because those commits were already
+  # squashed onto the target independently and this branch then merged the
+  # target back in — `base_sha..HEAD` nets to nothing even though HEAD moved.
+  #
+  # `NetDiff.local_diff_blank?/2` runs the same `git diff` the coverage write
+  # would fingerprint, but answers `{:ok, blank?}` only when git actually ran
+  # — unlike `coverage_net_diff_id/1` (built on `fingerprint_local/2`), whose
+  # `nil`/`{:error, :no_net_diff}` also covers a git failure (a `base_sha` not
+  # present in the worktree, a lock or index error). Reusing that broader
+  # signal here would misread a transient git failure as proof of emptiness
+  # and park a legitimate APPROVE; only a confirmed `{:ok, true}` parks.
+  #
+  # Gated on `worktree_on_expected_branch?/1` for the same reason
+  # `reviewer_commit_check/1` and `commit_gate/1` already are: some test
+  # setups (notably ReviewGateTest) reuse the repo itself as the "worktree"
+  # with HEAD left on `target_branch`, not on the task branch. There the
+  # local diff is *always* empty regardless of the branch's real content — a
+  # fixture artifact, not evidence of nothing to merge — so treating it as
+  # G20 would misfire on every such test. Production worktrees provisioned
+  # via `Worktree.create/3` are always checked out on the per-task branch, so
+  # the guard is fully live there.
+  defp finalize_approval(state, verdict, findings) do
+    empty_net_diff? =
+      worktree_on_expected_branch?(state) and
+        match?(
+          {:ok, true},
+          NetDiff.local_diff_blank?(Map.get(state, :worktree_path), diff_range(state))
+        )
+
+    if empty_net_diff? do
+      Logger.warning(
+        "ReviewGate: task=#{state.task_id} APPROVE nets to an empty diff against " <>
+          "the target branch (commits exist but contribute nothing); parking " <>
+          "`:empty_net_diff` instead of merging"
+      )
+
+      record_round(state, :review, :request_changes, findings, converged: false)
+      {:done, finish(state, {:parked, :empty_net_diff, findings})}
+    else
+      record_round(state, :review, :approve, findings, converged: true)
+      stamp_reviewed_head(state)
+      record_review_coverage(state)
+      {:done, finish(state, verdict)}
+    end
+  end
+
+  # Mirrors `reviewer_commit_check/1`'s and `Worker.commit_gate/1`'s branch
+  # guard: only trust the local diff when the worktree is actually checked out
+  # on the task's own branch. Some test setups reuse the repo itself as the
+  # "worktree" with HEAD left on `target_branch`, where the local diff is
+  # empty regardless of the branch's real content.
+  defp worktree_on_expected_branch?(%{worktree_path: wt, branch: branch})
+       when is_binary(wt) and is_binary(branch) do
+    match?({:ok, ^branch}, Arbiter.Worker.Worktree.current_branch(wt))
+  end
+
+  defp worktree_on_expected_branch?(_state), do: false
 
   # bd-4te55l: whether the reviewer's own findings disclose that it abandoned
   # verification (e.g. gave up waiting on a test run) before finalizing. A

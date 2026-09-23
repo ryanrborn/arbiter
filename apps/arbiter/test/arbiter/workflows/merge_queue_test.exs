@@ -251,6 +251,43 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end)
   end
 
+  # `sha_stub/3`, plus a `/compare/` route serving `diff` for the three-dot
+  # compare GitHub's `Accept: application/vnd.github.v3.diff` request asks
+  # for (bd-aq81qz). `sha_stub/3` itself deliberately leaves `/compare/`
+  # unhandled — falling through to its 500 — so tests that never call
+  # `set_diff`-equivalent behaviour keep exercising the fail-open path.
+  defp sha_stub_with_diff(number, head_sha, diff, test_pid) do
+    stub(fn conn ->
+      accept = conn |> Plug.Conn.get_req_header("accept") |> List.first() || ""
+
+      cond do
+        conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => number})
+
+        conn.method == "GET" and String.contains?(conn.request_path, "/compare/") and
+            accept =~ "diff" ->
+          Plug.Conn.send_resp(conn, 200, diff)
+
+        conn.method == "GET" and String.contains?(conn.request_path, "/reviews") ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews_payload("APPROVED"))
+
+        conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{number}") ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(pr_payload(%{"number" => number, "head" => %{"sha" => head_sha}}))
+
+        conn.method == "PUT" and String.ends_with?(conn.request_path, "/merge") ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:merge_sha, Jason.decode!(body)["sha"]})
+
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+
+        true ->
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+      end
+    end)
+  end
+
   # Full-cycle stub whose PR reports `head_sha`, and whose merge PUT reports the
   # `sha` precondition it was called with back to `test_pid` (bd-dxgris).
   defp sha_stub(number, head_sha, test_pid) do
@@ -891,6 +928,32 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       refute_received {:merge_sha, _}
       assert Ash.get!(Issue, task.id).status == :open
+    end
+
+    # bd-aq81qz / M1: an approval and a matching reviewed SHA are not proof
+    # the merge contributes anything. Defense-in-depth for the case
+    # ReviewGate's own G20 guard should already have parked: even if an
+    # approval exists for a head whose net diff against the queue's base is
+    # empty, the queue must still refuse to merge it.
+    @tag workspace_config: @ws_github
+    test "refuses to merge an approved head whose net diff against the base is empty", %{
+      workspace: ws,
+      task: task
+    } do
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: "empty-net-diff-sha"}, action: :update)
+
+      test_pid = self()
+      sha_stub_with_diff(62, "empty-net-diff-sha", "", test_pid)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
+
+      refute_received {:merge_sha, _}
+      assert Ash.get!(Issue, task.id).status == :open
+      assert log =~ "nets to an empty diff"
+      assert [%{last_error: :empty_net_diff}] = MergeQueue.state(name).items
     end
 
     # bd-b0fqcl / #1649 — P3 shadow mode (design #1635 §3.4/§6.3). The queue

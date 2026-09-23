@@ -1479,7 +1479,20 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp apply_guarded_merge(state, expected_sha) do
-    case do_safe_merge(state, expected_sha) do
+    # bd-aq81qz / W7: an approval and a clean expected_sha precondition are not
+    # proof the merge contributes anything — a branch redispatched onto
+    # already-squashed commits, then merged with its base, moves HEAD without
+    # changing a line. Refuse the same way any other merge failure is refused
+    # (below): the retry/escalation path this already runs through is what
+    # keeps the refusal from being silent.
+    merge_result =
+      if empty_net_diff_at_merge?(state, expected_sha) do
+        {:error, :empty_net_diff}
+      else
+        do_safe_merge(state, expected_sha)
+      end
+
+    case merge_result do
       :ok ->
         Logger.info(
           "Worker.Watchdog: auto-merged approved MR #{state.mr_ref} for task=#{state.task_id}"
@@ -3700,6 +3713,22 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp base_merge_only?(_state, _reviewed, _head), do: false
+
+  # bd-aq81qz. Whether `head`'s net diff against the MR's own base is
+  # literally empty — commits exist (an approval and an expected_sha were
+  # reached), but they contribute nothing. Fails OPEN (`false`) on a fetch
+  # failure or a missing base ref: this guard only refuses on a POSITIVE
+  # proof of emptiness, never on "could not tell", which would wrongly stall
+  # a perfectly good merge on a transient forge error.
+  defp empty_net_diff_at_merge?(%{mr_base_ref: base} = state, head)
+       when is_binary(base) and base != "" and is_binary(head) and head != "" do
+    case safe_get_diff(state, base, head) do
+      {:ok, diff} -> Mergers.NetDiff.blank?(diff)
+      _ -> false
+    end
+  end
+
+  defp empty_net_diff_at_merge?(_state, _head), do: false
 
   defp safe_get_diff(%{adapter: adapter, mr_ref: mr_ref}, base, head) do
     case adapter.get_diff(mr_ref, %{base: base, head: head}) do
