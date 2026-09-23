@@ -862,6 +862,40 @@ defmodule Arbiter.Reviews.GuardRegistry do
       sites: [{Watchdog, :park_heartbeat_due?, 1}],
       anchors: ["@default_park_heartbeat_polls"],
       summary: "one heartbeat re-page for a long park, not silence and not a storm"
+    },
+    %{
+      id: :orphaned_merge_retry,
+      doc_ref: "W21",
+      class: :e,
+      class_source: :inferred,
+      class_note:
+        "bd-a370ak / #2002. Not in §5.3's table. It is remediation of a stranded approved " <>
+          "merge — W12's terminal made real for the case where the worker is already gone — " <>
+          "and it has class E's shape: fail open, bounded retries, one escalation. The merge " <>
+          "decision it runs is W1–W5 and the zero-net-diff guard unchanged; only the " <>
+          "retry-and-give-up wrapped around it is new.",
+      bound: {:retries, {:config, :retry_transient_failure_limit}},
+      episode: {:task, :mr_ref},
+      terminal: :escalated_once,
+      sites: [
+        {Watchdog, :detached_outcome, 3},
+        {Watchdog, :detached_attempt_merge, 2},
+        {Watchdog, :handle_retry_merge_failure, 2},
+        {Watchdog, :retry_still_owed, 1},
+        {Watchdog, :detached_wait, 2},
+        {Watchdog, :give_up_retry, 2}
+      ],
+      anchors: [
+        "@retry_transient_failure_limit",
+        "@default_retry_max_wait_ms",
+        "wait_exhausted",
+        "merge_fail_notify_threshold",
+        "orphaned_merge_abandoned",
+        "mark_escalated"
+      ],
+      summary:
+        "a worker-less retry of an approved merge whose worker exited: waits out transient " <>
+          "blockers, merges through W1–W5, else pages once and latches the stamp escalated"
     }
   ]
 

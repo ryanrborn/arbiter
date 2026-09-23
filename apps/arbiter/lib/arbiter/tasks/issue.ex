@@ -301,6 +301,9 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:verification_outcome, nil)
       change set_attribute(:verification_evidence, nil)
 
+      # bd-a370ak: the PR merged, so there is no merge left to retry.
+      change set_attribute(:pending_merge, nil)
+
       # Same teardown as `:close`: the worker finished and its PR merged, so
       # leaving the agent + worktree alive for the whole verification window
       # would pin a slot and leak a checkout. All best-effort.
@@ -372,6 +375,14 @@ defmodule Arbiter.Tasks.Issue do
              end)
     end
 
+    # bd-a370ak / #2002: the durable pending-merge stamp. Written only through
+    # `Arbiter.Mergers.PendingMerge`; deliberately no lifecycle broadcast — the
+    # Watchdog writes it from its poll loop and nothing renders it live.
+    update :set_pending_merge do
+      require_atomic? false
+      accept [:pending_merge]
+    end
+
     update :close do
       require_atomic? false
       argument :reason, :string
@@ -396,6 +407,9 @@ defmodule Arbiter.Tasks.Issue do
       # keeps `arb prime`'s parked list free of tasks nobody needs to look at.
       change set_attribute(:review_park_reason, nil)
       change set_attribute(:review_parked_at, nil)
+
+      # bd-a370ak: a closed task has no merge left to retry.
+      change set_attribute(:pending_merge, nil)
 
       # bd-bsco7f: persist what this close meant upstream, so the drift check
       # can read the intent instead of guessing it from `pr_ref`. Mirrors the
@@ -474,6 +488,9 @@ defmodule Arbiter.Tasks.Issue do
       # dispatch opens a new PR and the finalizer never targets the wrong task.
       change set_attribute(:pr_ref, nil)
       change set_attribute(:source_pr, nil)
+
+      # bd-a370ak: the reopened task's old PR is not a merge to retry.
+      change set_attribute(:pending_merge, nil)
 
       # bd-bqlwjo: a new PR opened after this reopen must still get its own
       # "opened a pull request" comment even though the ticket row itself
@@ -1222,6 +1239,24 @@ defmodule Arbiter.Tasks.Issue do
       default %{}
 
       description "Per-task skill selection override (opt_out/only/add/remove/activation); the task layer of layered skill selection."
+    end
+
+    # ---- pending merge (bd-a370ak / #2002) ----------------------------------
+
+    attribute :pending_merge, :map do
+      allow_nil? true
+      public? false
+
+      description """
+      An approved merge the Watchdog deferred or could not complete — CI still
+      running, a draft PR, a transient forge refusal — recorded durably so it
+      outlives the worker that owned it. `nil` when no merge is pending.
+
+      Written and read only through `Arbiter.Mergers.PendingMerge`, which owns
+      the shape. `Arbiter.Workflows.PendingMergeSweeper` re-arms a worker-less
+      retry for any stamp nobody owns any more. Cleared by `:close`,
+      `:await_verification`, a merge, or a closed PR.
+      """
     end
 
     create_timestamp :created_at

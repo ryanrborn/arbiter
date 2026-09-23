@@ -180,6 +180,9 @@ config :arbiter, :pr_state_poller, enabled: false
 # synchronously with an explicit :timeout_ms.
 config :arbiter, :stale_review_reaper, enabled: false
 
+# bd-a370ak: tests drive PendingMergeSweeper.sweep/1 synchronously.
+config :arbiter, :pending_merge_sweeper, enabled: false
+
 # Disable the coordinator-session reaping GenServers in test — they would
 # otherwise sweep/touch on a timer, off the sandbox connection. Tests drive
 # `Arbiter.Sessions.IdleReaper.reap/1`, `Arbiter.Sessions.OrphanReaper.sweep_once/2`
