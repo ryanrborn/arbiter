@@ -222,6 +222,8 @@ defmodule Arbiter.Tasks.Issue do
         :tracker_context_ref,
         :pr_ref,
         :pr_body,
+        :pr_opened_notified_ref,
+        :pr_opened_transitioned_ref,
         :target_branch,
         :repo,
         :review_only,
@@ -472,6 +474,14 @@ defmodule Arbiter.Tasks.Issue do
       # dispatch opens a new PR and the finalizer never targets the wrong task.
       change set_attribute(:pr_ref, nil)
       change set_attribute(:source_pr, nil)
+
+      # bd-bqlwjo: a new PR opened after this reopen must still get its own
+      # "opened a pull request" comment even though the ticket row itself
+      # persists across the cycle — clear the last-announced ref alongside
+      # `pr_ref` rather than relying on the (very likely, but not guaranteed)
+      # new PR having a different URL.
+      change set_attribute(:pr_opened_notified_ref, nil)
+      change set_attribute(:pr_opened_transitioned_ref, nil)
 
       # bd-bsco7f: same reasoning for the recorded close intent — it describes a
       # close that no longer stands. The next close records its own.
@@ -754,6 +764,43 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 255, trim?: true
 
       description "PR/MR number opened for this task (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
+    end
+
+    attribute :pr_opened_notified_ref, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 2048, trim?: true
+
+      description """
+      The PR/MR URL `Arbiter.Trackers.Sync` last posted the "Arbiter opened a
+      pull request for this ticket" comment for (bd-bqlwjo). A `:pr_opened`
+      lifecycle event whose `pr_url` matches this value is a repeat run on the
+      same PR — a ReviewGate implementation round, a `worker_resume`, or a
+      re-open of an already-linked PR — and both the status transition and the
+      comment/remote-link are skipped. Cleared implicitly by `reopen` clearing
+      `pr_ref`, so a new PR after `task_reopen` gets its own comment even
+      though the ticket itself is unchanged. Durable (not an ETS/process
+      cache) so idempotency survives a server restart.
+      """
+    end
+
+    attribute :pr_opened_transitioned_ref, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 2048, trim?: true
+
+      description """
+      The PR/MR URL `Arbiter.Trackers.Sync` last successfully drove the
+      `:pr_opened` status transition for (bd-bqlwjo). Tracked separately from
+      `pr_opened_notified_ref`: the comment/remote-link is posted at most once
+      per PR ref regardless of outcome (a repeat is a visible duplicate the
+      user is showing us), but the status transition itself must keep
+      retrying on the next run for the same PR ref until it actually lands —
+      e.g. after a gated-fields escalation (blank qa_notes/deployment_notes)
+      or a transient tracker failure on the first attempt. Set only when
+      `transition_event/2` returns `:ok` for `:pr_opened`. Cleared alongside
+      `pr_opened_notified_ref` by `reopen`.
+      """
     end
 
     attribute :source_pr, :string do

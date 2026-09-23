@@ -91,7 +91,7 @@ entire agent spend spent on the gate misfiring.
 ### 1.1 The two root causes, stated precisely
 
 **RC1 — "the reviewed SHA" is a single value.** `issues.last_reviewed_sha`
-(`apps/arbiter/lib/arbiter/tasks/issue.ex:909` (`last_reviewed_sha`)) is one
+(`apps/arbiter/lib/arbiter/tasks/issue.ex:987` (`last_reviewed_sha`)) is one
 nullable string, written by whichever of four unrelated writers ran last. There
 is no record of *which* commits an approval covered, so every consumer
 reconstructs one — badly, and differently. `Arbiter.Mergers.ReviewedSha` invents
