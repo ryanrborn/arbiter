@@ -23,11 +23,12 @@ common DCO sign-off. See [Licensing Model & Open-Core
 Architecture](docs/licensing-model.md#4-contributor-license-agreement-cla-requirement)
 for the full rationale.
 
-> **Setup status:** the CLA check currently runs in a degraded, always-passing
-> mode until the repository owner completes a one-time setup (storing a
-> signature-bot PAT as a repository secret and configuring the signature
-> store). Until that lands, the check will not block merges — but the CLA
-> itself, and the requirement to sign it, still apply.
+> **Setup status:** the CLA check is currently skipped (neutral, not passing)
+> until the repository owner completes a one-time setup — storing a
+> signature-bot PAT as the `CLA_ASSISTANT_PAT` repository secret, and creating
+> the `cla-signatures` branch that stores recorded signatures. Until that
+> lands, the check will not block merges — but the CLA itself, and the
+> requirement to sign it, still apply.
 
 ## Local development
 

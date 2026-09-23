@@ -12,7 +12,7 @@ on:
 # metadata and posts a status check + comment.
 permissions:
   actions: write
-  contents: read
+  contents: write
   pull-requests: write
   statuses: write
 
@@ -23,8 +23,10 @@ jobs:
       pat_present: ${{ steps.check.outputs.pat_present }}
     steps:
       - id: check
+        env:
+          CLA_ASSISTANT_PAT: ${{ secrets.CLA_ASSISTANT_PAT }}
         run: |
-          if [ -n "${{ secrets.CLA_ASSISTANT_PAT }}" ]; then
+          if [ -n "$CLA_ASSISTANT_PAT" ]; then
             echo "pat_present=true" >> "$GITHUB_OUTPUT"
           else
             echo "pat_present=false" >> "$GITHUB_OUTPUT"

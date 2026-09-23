@@ -8,4 +8,4 @@
 
 ## Contributor License Agreement
 
-- [ ] I have read and agree to the [Contributor License Agreement](../CLA.md).
+- [ ] I have read and agree to the [Contributor License Agreement](https://github.com/ryanrborn/arbiter/blob/main/CLA.md).
