@@ -525,3 +525,12 @@ Architecture and design decision records live in [`docs/`](docs/):
 - [Worker Security Policy](docs/worker-security.md) — Execution sandbox and security isolation for agent workers.
 - [Remote Access](docs/remote-access.md) — Connecting to dashboard and sessions over SSH tunnels.
 
+## License
+
+Arbiter is licensed under the [Apache License, Version 2.0](LICENSE). Third-party
+dependencies and their licenses are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+Arbiter follows an open-core model: future commercially-licensed components ship
+as separate packages and are not covered by this repository's license. See
+[Licensing Model & Open-Core Architecture](docs/licensing-model.md) for details.
+
