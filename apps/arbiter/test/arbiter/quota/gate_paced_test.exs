@@ -130,7 +130,9 @@ defmodule Arbiter.Quota.GatePacedTest do
     end
 
     test "in the last minute of the window 0.99 does not hold" do
-      q = snap(%{secondary_utilization: 0.99, secondary_reset_at: DateTime.add(@now, 30, :second)})
+      q =
+        snap(%{secondary_utilization: 0.99, secondary_reset_at: DateTime.add(@now, 30, :second)})
+
       refute gate(q, paced())
     end
   end
@@ -188,7 +190,9 @@ defmodule Arbiter.Quota.GatePacedTest do
 
     test "weekly_warning_policy :hold still holds on allowed_warning" do
       q = long(0.01, 0.99, %{secondary_status: "allowed_warning"})
-      assert %{window: "7d", signal: :warning} = gate(q, paced(%{"weekly_warning_policy" => "hold"}))
+
+      assert %{window: "7d", signal: :warning} =
+               gate(q, paced(%{"weekly_warning_policy" => "hold"}))
     end
 
     test "a stale primary window still fails open" do
@@ -197,7 +201,9 @@ defmodule Arbiter.Quota.GatePacedTest do
     end
 
     test "a stale long window still drops the long rules" do
-      q = snap(%{secondary_utilization: 0.9, secondary_reset_at: DateTime.add(@now, -60, :second)})
+      q =
+        snap(%{secondary_utilization: 0.9, secondary_reset_at: DateTime.add(@now, -60, :second)})
+
       refute gate(q, paced())
     end
   end
@@ -254,7 +260,9 @@ defmodule Arbiter.Quota.GatePacedTest do
     end
 
     test "invalid account values fall back to the built-in table" do
-      assert Gate.window_seconds("5h", account(%{"window_seconds" => %{"5h" => "nope"}})) == 18_000
+      assert Gate.window_seconds("5h", account(%{"window_seconds" => %{"5h" => "nope"}})) ==
+               18_000
+
       assert Gate.window_seconds("5h", account(%{"window_seconds" => %{"5h" => -5}})) == 18_000
       assert Gate.window_seconds("5h", account(%{"window_seconds" => "garbage"})) == 18_000
     end
@@ -310,7 +318,11 @@ defmodule Arbiter.Quota.GatePacedTest do
 
       assert %{window: "weekly", mode: :paced} =
                gate(
-                 %{q | secondary_utilization: 0.3, secondary_reset_at: reset_after(0.1, @seven_days)},
+                 %{
+                   q
+                   | secondary_utilization: 0.3,
+                     secondary_reset_at: reset_after(0.1, @seven_days)
+                 },
                  paced()
                )
     end
@@ -363,7 +375,11 @@ defmodule Arbiter.Quota.GatePacedTest do
     test "accepts the documented values" do
       assert {:ok, _} =
                create(
-                 %{"threshold_mode" => "paced", "paced_floor" => 0.4, "weekly_paced_floor" => "1"},
+                 %{
+                   "threshold_mode" => "paced",
+                   "paced_floor" => 0.4,
+                   "weekly_paced_floor" => "1"
+                 },
                  "pa"
                )
 

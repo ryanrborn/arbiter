@@ -825,7 +825,9 @@ defmodule Arbiter.Quota.Gate do
   defp long_threshold(%Snapshot{} = s, policy, now),
     do: window_threshold(policy, :long, s.secondary_window_label, s.secondary_reset_at, now)
 
-  defp put_pace(binding, :paced, elapsed), do: Map.merge(binding, %{mode: :paced, elapsed: elapsed})
+  defp put_pace(binding, :paced, elapsed),
+    do: Map.merge(binding, %{mode: :paced, elapsed: elapsed})
+
   defp put_pace(binding, :flat, _elapsed), do: binding
 
   # Long-window statuses: nil / "allowed" are fine, "allowed_warning" is the
