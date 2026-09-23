@@ -91,7 +91,7 @@ defmodule ArbiterWeb.LiveHooksTest do
       refute html =~ "Gemini CLI"
     end
 
-    test "on_mount(:quota) filters antigravity at mount time", %{conn: conn} do
+    test "on_mount(:quota) no longer filters antigravity at mount time (bd-gukyy1)", %{conn: conn} do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
 
       # Capture a normal provider and antigravity
@@ -107,9 +107,10 @@ defmodule ArbiterWeb.LiveHooksTest do
 
       {:ok, _view, html} = live(conn, ~p"/")
 
-      # Claude should be present, Antigravity should be filtered out
+      # The `agy` CLI `/usage` probe superseded the stale-token reason
+      # Antigravity was hidden for, so it renders alongside Claude.
       assert html =~ "Claude"
-      refute html =~ "Antigravity"
+      assert html =~ "Antigravity"
     end
 
     test "on_mount(:quota) handle_info returns :halt for gemini_cli broadcasts", %{conn: conn} do
@@ -134,7 +135,7 @@ defmodule ArbiterWeb.LiveHooksTest do
       refute html2 =~ "Gemini CLI"
     end
 
-    test "on_mount(:quota) handle_info returns :halt for antigravity broadcasts", %{conn: conn} do
+    test "on_mount(:quota) handle_info applies antigravity broadcasts (bd-gukyy1)", %{conn: conn} do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
 
       {:ok, _} =
@@ -153,7 +154,7 @@ defmodule ArbiterWeb.LiveHooksTest do
         )
 
       html2 = render(view)
-      refute html2 =~ "Antigravity"
+      assert html2 =~ "Antigravity"
     end
   end
 

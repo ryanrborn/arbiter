@@ -19,6 +19,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
+  alias ArbiterWeb.QuotaHelpers
 
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
@@ -860,21 +861,16 @@ defmodule ArbiterWeb.WorkerDetailLive do
                     Quota
                   </span>
                   <.quota_bar
+                    :for={{w, i} <- Enum.with_index(QuotaHelpers.quota_windows(hd(@quotas)))}
                     provider={hd(@quotas).provider}
-                    window="5h"
-                    utilization={hd(@quotas).utilization_5h}
-                    reset_at={hd(@quotas).reset_5h_at}
+                    show_label={i == 0}
+                    window={w.window}
+                    label={w.label}
+                    utilization={w.utilization}
+                    reset_at={w.reset_at}
                     overage_status={hd(@quotas).overage_status}
                     representative_claim={hd(@quotas).representative_claim}
-                    width={140}
-                  />
-                  <.quota_bar
-                    window="7d"
-                    show_label={false}
-                    utilization={hd(@quotas).utilization_7d}
-                    reset_at={hd(@quotas).reset_7d_at}
-                    overage_status={hd(@quotas).overage_status}
-                    representative_claim={hd(@quotas).representative_claim}
+                    stale_message={hd(@quotas).message}
                     width={140}
                   />
                 </div>
