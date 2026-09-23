@@ -602,6 +602,153 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
     end
   end
 
+  # ---- a running retry stands down when the task stops owing the merge ------
+
+  describe "a running retry whose task no longer owes the merge" do
+    # Starts a retry held on CI :running and waits until it is actually
+    # polling, so the change under test lands mid-wait rather than before the
+    # retry ever ran.
+    defp start_held_retry(label) do
+      reviewed = sha(label)
+      mr_ref = "!pm-#{label}"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :running}
+      ])
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> StubMerger.get_count(mr_ref) >= 2 end)
+      end)
+
+      retry = Watchdog.retry_whereis(task.id)
+      assert is_pid(retry)
+      {task, mr_ref, reviewed, retry}
+    end
+
+    defp assert_stands_down_without_merging(retry, mr_ref, reviewed) do
+      ref = Process.monitor(retry)
+
+      capture_log(fn ->
+        # CI goes green: a retry that still thought it owned the merge would
+        # merge on this poll.
+        StubMerger.queue_get(mr_ref, [
+          %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :success}
+        ])
+
+        # `:noproc` — it already stood down on the poll that saw the change
+        # (e.g. the `:close` half of a close-then-reopen).
+        assert_receive {:DOWN, ^ref, :process, ^retry, reason}, 3_000
+        assert reason in [:normal, :noproc]
+      end)
+
+      assert StubMerger.merge_count(mr_ref) == 0
+    end
+
+    test "closing the task (won't-do) stops it before it can merge" do
+      {task, mr_ref, reviewed, retry} = start_held_retry("close-mid-retry")
+
+      {:ok, _} = Ash.update(reload(task), %{close_upstream: false}, action: :close)
+
+      assert_stands_down_without_merging(retry, mr_ref, reviewed)
+      assert escalations(task.id) == []
+    end
+
+    test "reopening the task stops it before it can merge the old PR" do
+      {task, mr_ref, reviewed, retry} = start_held_retry("reopen-mid-retry")
+
+      {:ok, closed} = Ash.update(reload(task), %{close_upstream: false}, action: :close)
+      {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
+      assert reopened.status == :open
+
+      assert_stands_down_without_merging(retry, mr_ref, reviewed)
+      assert PendingMerge.get(reload(task)) == nil
+    end
+
+    test "a stamp re-pointed at a different PR stops it" do
+      {task, mr_ref, reviewed, retry} = start_held_retry("repointed-mid-retry")
+
+      stamp!(task, reviewed, %{mr_ref: "!pm-some-newer-pr"})
+
+      assert_stands_down_without_merging(retry, mr_ref, reviewed)
+    end
+
+    test "a stamp latched escalated stops it" do
+      {task, mr_ref, reviewed, retry} = start_held_retry("escalated-mid-retry")
+
+      :ok = PendingMerge.mark_escalated(task.id, :operator_took_over)
+
+      assert_stands_down_without_merging(retry, mr_ref, reviewed)
+    end
+  end
+
+  # ---- a retry cannot wait forever ------------------------------------------
+
+  describe "a retry waiting on a blocker it cannot clear" do
+    test "gives up and pages once when the pending merge outlives max_wait_ms" do
+      reviewed = sha("wait-exhausted")
+      mr_ref = "!pm-wait-exhausted"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed, %{reason: :merge_failed})
+
+      # The PR has sat as a draft for three days since the merge first waited.
+      three_days_ago =
+        DateTime.utc_now() |> DateTime.add(-3 * 24 * 3600, :second) |> DateTime.to_iso8601()
+
+      raw = Map.put(reload(task).pending_merge, "since", three_days_ago)
+      {:ok, _} = Ash.update(reload(task), %{pending_merge: raw}, action: :set_pending_merge)
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, head_sha: reviewed, base_ref: "main", block_reason: :draft}
+      ])
+
+      capture_log(fn ->
+        assert %{retried: [_]} =
+                 sweep(retry_opts: [interval_ms: 15, initial_delay_ms: 0, max_wait_ms: 3_600_000])
+
+        wait_until(fn -> PendingMerge.get(reload(task)).escalated_at != nil end)
+        wait_until(fn -> is_nil(Watchdog.retry_whereis(task.id)) end)
+
+        # Latched: later sweeps leave it to the human it paged.
+        assert %{retried: []} = sweep()
+      end)
+
+      assert PendingMerge.get(reload(task)).escalation_reason =~ "wait_exhausted"
+      assert [_one] = escalations(task.id)
+      assert StubMerger.merge_count(mr_ref) == 0
+    end
+
+    test "keeps waiting while the pending merge is inside max_wait_ms" do
+      reviewed = sha("wait-inside")
+      mr_ref = "!pm-wait-inside"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, head_sha: reviewed, base_ref: "main", block_reason: :draft}
+      ])
+
+      capture_log(fn ->
+        assert %{retried: [_]} =
+                 sweep(retry_opts: [interval_ms: 15, initial_delay_ms: 0, max_wait_ms: 3_600_000])
+
+        wait_until(fn -> StubMerger.get_count(mr_ref) >= 5 end)
+      end)
+
+      assert is_pid(Watchdog.retry_whereis(task.id))
+      assert PendingMerge.get(reload(task)).escalated_at == nil
+      assert escalations(task.id) == []
+    end
+  end
+
   describe "sweeper scope" do
     test "a workspace with auto_merge turned off is not retried" do
       reviewed = sha("manual")

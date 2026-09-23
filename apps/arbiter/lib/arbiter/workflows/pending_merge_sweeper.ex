@@ -44,6 +44,10 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
       drive `sweep/1` synchronously).
     * `:interval_ms` — sweep cadence (default 300 000, 5 minutes).
     * `:initial_delay_ms` — first sweep after boot (default 30 000).
+    * `:max_retry_wait_ms` — how long a retry keeps waiting on a draft or
+      pending CI, measured from the stamp's `since`, before it pages once and
+      latches the stamp escalated (default 48 hours; read by
+      `Arbiter.Worker.Watchdog.start_retry/1`).
   """
 
   use GenServer

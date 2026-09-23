@@ -366,6 +366,13 @@ defmodule Arbiter.Worker.Watchdog do
   # tolerates before it gives up and pages anyway. Transient means "the forge
   # expects this to clear", not "retry forever".
   @retry_transient_failure_limit 30
+
+  # How long a pending merge may sit waiting on a blocker the retry cannot act
+  # on (a draft, CI that never finishes) before the retry stops polling and
+  # pages. Measured from the stamp's `since`, so a server restart does not
+  # reset the clock. Override per call with `:max_wait_ms`, or fleet-wide via
+  # `config :arbiter, :pending_merge_sweeper, max_retry_wait_ms: ...`.
+  @default_retry_max_wait_ms 48 * 60 * 60_000
   # Bounded rebase attempts before the Watchdog gives up auto-resolving a
   # `:conflict` block and escalates to the coordinator (#354, Phase 2b). Each
   # attempt is one dispatched rebase-resolve worker; if two consecutive passes
@@ -471,7 +478,14 @@ defmodule Arbiter.Worker.Watchdog do
   baseline the stamp recorded; `nil` is accepted and refused on the first
   poll). Optional: `:workspace`, `:repo`, `:via_review_gate`,
   `:interval_ms` (default `#{@default_retry_interval_ms}`), `:initial_delay_ms`,
-  `:merge_fail_notify_threshold`.
+  `:merge_fail_notify_threshold`, `:max_wait_ms` (how long the pending merge
+  may wait on a draft / pending CI, measured from the stamp's `since`; default
+  `config :arbiter, :pending_merge_sweeper, :max_retry_wait_ms`, else 48h).
+
+  It re-reads the task before every poll and again before the merge call, and
+  stops without merging once the task no longer owes this merge: closed or
+  finalized, reopened, its stamp cleared, re-pointed at another PR, or
+  escalated.
 
   It polls the PR and runs the very merge decision a live Watchdog runs —
   the reviewed-SHA guard, the coverage decision, the base-merge-only
@@ -1242,7 +1256,12 @@ defmodule Arbiter.Worker.Watchdog do
         repo: Keyword.get(opts, :repo),
         pending_merge_stamp: nil,
         retry_merge_failures: 0,
-        retry_transient_failures: 0
+        retry_transient_failures: 0,
+        # When the pending merge first started waiting (the stamp's `since`),
+        # refreshed from the task on every retry poll, and the total wait a
+        # retry tolerates before it gives up (`@default_retry_max_wait_ms`).
+        pending_since: nil,
+        max_wait_ms: Keyword.get(opts, :max_wait_ms) || configured_retry_max_wait_ms()
       }
 
       if is_pid(worker_pid), do: Process.monitor(worker_pid)
@@ -1359,7 +1378,7 @@ defmodule Arbiter.Worker.Watchdog do
   def handle_info(:poll, %{detached: true} = state) do
     case live_merge_owner(state.task_id) do
       nil ->
-        detached_poll(state)
+        with {:ok, state} <- retry_still_owed(state), do: detached_poll(state)
 
       owner ->
         Logger.info(
@@ -1596,27 +1615,31 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
+  # Re-checks ownership immediately before the merge call as well as at the top
+  # of the poll: the merge is irreversible, and the task read is cheap.
   defp detached_attempt_merge(state, expected_sha) do
-    merge_result =
-      if empty_net_diff_at_merge?(state, expected_sha),
-        do: {:error, :empty_net_diff},
-        else: do_safe_merge(state, expected_sha)
+    with {:ok, state} <- retry_still_owed(state) do
+      merge_result =
+        if empty_net_diff_at_merge?(state, expected_sha),
+          do: {:error, :empty_net_diff},
+          else: do_safe_merge(state, expected_sha)
 
-    case merge_result do
-      :ok ->
-        Logger.info(
-          "Worker.Watchdog: merge_retry auto-merged orphaned approved MR #{state.mr_ref} " <>
-            "for task=#{state.task_id} (pinned to #{expected_sha})"
-        )
+      case merge_result do
+        :ok ->
+          Logger.info(
+            "Worker.Watchdog: merge_retry auto-merged orphaned approved MR #{state.mr_ref} " <>
+              "for task=#{state.task_id} (pinned to #{expected_sha})"
+          )
 
-        finalize_detached_merge(state)
-        {:stop, :normal, state}
+          finalize_detached_merge(state)
+          {:stop, :normal, state}
 
-      {:error, :empty_net_diff} ->
-        give_up_retry(state, :empty_net_diff)
+        {:error, :empty_net_diff} ->
+          give_up_retry(state, :empty_net_diff)
 
-      {:error, reason} ->
-        handle_retry_merge_failure(state, reason)
+        {:error, reason} ->
+          handle_retry_merge_failure(state, reason)
+      end
     end
   end
 
@@ -1641,12 +1664,94 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp detached_wait(state, why) do
-    Logger.debug(
-      "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} waiting: #{why}"
-    )
+    if retry_wait_exhausted?(state) do
+      give_up_retry(state, {:wait_exhausted, why})
+    else
+      Logger.debug(
+        "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} waiting: #{why}"
+      )
 
-    detached_reschedule(state)
+      detached_reschedule(state)
+    end
   end
+
+  defp retry_wait_exhausted?(%{pending_since: %DateTime{} = since, max_wait_ms: max})
+       when is_integer(max) do
+    DateTime.diff(DateTime.utc_now(), since, :millisecond) >= max
+  end
+
+  defp retry_wait_exhausted?(_state), do: false
+
+  defp configured_retry_max_wait_ms do
+    :arbiter
+    |> Application.get_env(:pending_merge_sweeper, [])
+    |> Keyword.get(:max_retry_wait_ms, @default_retry_max_wait_ms)
+  end
+
+  # The retry runs outside the task's registry family, so nothing that ends the
+  # task's claim on this merge stops it — `:close` (won't-do), `:reopen` (drops
+  # the PR), the Driver finalizing it, an operator latching the stamp. It
+  # re-reads the task before every poll and again immediately before the merge
+  # call, and stands down unless the task is still open and still carries the
+  # same, un-escalated pending merge for this PR. A task read that fails is a
+  # transient wait, never a licence to merge.
+  defp retry_still_owed(state) do
+    case Ash.get(Arbiter.Tasks.Issue, state.task_id) do
+      {:ok, task} ->
+        pending = PendingMerge.get(task)
+
+        case retry_disowned_reason(task, pending, state) do
+          nil ->
+            {:ok, %{state | pending_since: parse_since(pending.since)}}
+
+          why ->
+            Logger.info(
+              "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} standing " <>
+                "down — #{why}"
+            )
+
+            {:stop, :normal, state}
+        end
+
+      {:error, reason} ->
+        Logger.debug(
+          "Worker.Watchdog: merge_retry could not read task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        detached_reschedule(state)
+    end
+  rescue
+    e ->
+      Logger.debug(
+        "Worker.Watchdog: merge_retry task read raised for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      detached_reschedule(state)
+  end
+
+  defp retry_disowned_reason(%{status: status}, _pending, _state)
+       when status in [:closed, :awaiting_verification],
+       do: "the task is #{status}"
+
+  defp retry_disowned_reason(_task, nil, _state), do: "the pending merge was cleared"
+
+  defp retry_disowned_reason(_task, %{mr_ref: ref}, %{mr_ref: ref2}) when ref != ref2,
+    do: "the pending merge is now for #{inspect(ref)}"
+
+  defp retry_disowned_reason(_task, %{escalated_at: at}, _state) when is_binary(at),
+    do: "the pending merge was escalated at #{at}"
+
+  defp retry_disowned_reason(_task, _pending, _state), do: nil
+
+  defp parse_since(since) when is_binary(since) do
+    case DateTime.from_iso8601(since) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp parse_since(_since), do: nil
 
   defp detached_reschedule(state) do
     schedule(self(), state.interval_ms)

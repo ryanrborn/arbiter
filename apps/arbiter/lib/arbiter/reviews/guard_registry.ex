@@ -881,10 +881,14 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Watchdog, :detached_outcome, 3},
         {Watchdog, :detached_attempt_merge, 2},
         {Watchdog, :handle_retry_merge_failure, 2},
+        {Watchdog, :retry_still_owed, 1},
+        {Watchdog, :detached_wait, 2},
         {Watchdog, :give_up_retry, 2}
       ],
       anchors: [
         "@retry_transient_failure_limit",
+        "@default_retry_max_wait_ms",
+        "wait_exhausted",
         "merge_fail_notify_threshold",
         "orphaned_merge_abandoned",
         "mark_escalated"
