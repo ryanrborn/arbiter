@@ -371,6 +371,65 @@ defmodule Arbiter.Quota.GatePacedTest do
     end
   end
 
+  describe "production path: a persisted paced account (real clock)" do
+    # The dispatcher and the board both resolve the linked account from the
+    # DB and hand it to the gate; this drives that path with a round-tripped
+    # `quota_config` rather than a hand-built struct.
+    setup do
+      n = System.unique_integer([:positive])
+      ws = Ash.create!(Workspace, %{name: "paced-prod-#{n}", prefix: "ppr#{n}"})
+      %{ws: ws, n: n}
+    end
+
+    defp linked_account!(ws, n, quota_config) do
+      account =
+        Ash.create!(ProviderAccount, %{
+          provider: :claude,
+          slug: "paced-#{n}-#{System.unique_integer([:positive])}",
+          label: "paced",
+          quota_config: quota_config
+        })
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      # 40% used, 30 minutes into the 5h window: under a flat 0.85, over the
+      # paced 0.35 floor.
+      quota =
+        Ash.create!(Arbiter.Quota.AnthropicQuota, %{
+          provider_account_id: account.id,
+          provider: "claude",
+          utilization_5h: 0.40,
+          status_5h: "allowed",
+          reset_5h_at: DateTime.add(DateTime.utc_now(), 16_200, :second),
+          captured_at: DateTime.utc_now()
+        })
+
+      {account, quota}
+    end
+
+    test "the board and Throttle.check hold a paced account ahead of pace", %{ws: ws, n: n} do
+      {account, quota} = linked_account!(ws, n, %{"threshold_mode" => "paced"})
+
+      assert {:hold, _} = Arbiter.Board.Snapshot.quota_hold(ws.id)
+
+      assert {:hold, %{mode: :paced, window: "5h", threshold: 0.35, phrase: phrase}} =
+               Gate.Throttle.check(nil, quota, ws, account: account)
+
+      assert phrase =~ "quota ahead of pace (40% of window used, paced ceiling 35%, 10% elapsed)"
+    end
+
+    test "the same reading dispatches under the default flat mode", %{ws: ws, n: n} do
+      {account, quota} = linked_account!(ws, n, %{})
+
+      assert Arbiter.Board.Snapshot.quota_hold(ws.id) == :ok
+      assert Gate.Throttle.check(nil, quota, ws, account: account) == :allow
+    end
+  end
+
   describe "workspace config validation" do
     test "accepts the documented values" do
       assert {:ok, _} =
