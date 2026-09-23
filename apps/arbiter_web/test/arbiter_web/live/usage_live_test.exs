@@ -2,6 +2,7 @@ defmodule ArbiterWeb.UsageLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.QuotaFixtures
 
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
@@ -225,4 +226,80 @@ defmodule ArbiterWeb.UsageLiveTest do
     assert html =~ "grid-cols-1"
     assert html =~ "lg:grid-cols-[minmax(0,1fr)_320px]"
   end
+
+  describe "Rate limits panel with antigravity (bd-gukyy1)" do
+    test "antigravity renders four bars in two labelled groups; claude stays a pair", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+      antigravity_quota!(ws)
+
+      {:ok, view, html} = live(conn, ~p"/usage")
+      doc = LazyHTML.from_fragment(html)
+
+      assert quota_bars(doc, "#usage-quota-claude") == 2
+      assert quota_bars(doc, "#usage-quota-antigravity") == 4
+
+      gemini = "#usage-quota-antigravity-gemini_models"
+      claude_gpt = "#usage-quota-antigravity-claude_and_gpt_models"
+
+      assert has_element?(view, gemini, "Gemini Models")
+      assert has_element?(view, claude_gpt, "Claude and GPT models")
+      assert quota_pcts(doc, gemini) == ["25%", "60%"]
+      assert quota_pcts(doc, claude_gpt) == ["10%", "20%"]
+      assert quota_labels(doc, gemini) == ["5h", "weekly"]
+      assert quota_labels(doc, claude_gpt) == ["5h", "weekly"]
+    end
+
+    test "a stale antigravity reading is muted with the message in its title", %{
+      conn: conn,
+      ws: ws
+    } do
+      antigravity_quota!(ws, message: agy_missing_message())
+
+      {:ok, view, _html} = live(conn, ~p"/usage")
+
+      assert has_element?(view, "#usage-quota-antigravity [data-quota-bar][data-quota-stale]")
+
+      refute has_element?(
+               view,
+               "#usage-quota-antigravity [data-quota-bar]:not([data-quota-stale])"
+             )
+
+      assert has_element?(view, "#usage-quota-antigravity [data-quota-note]", "stale")
+
+      assert has_element?(
+               view,
+               ~s(#usage-quota-antigravity [data-quota-bar][title*="is not installed on this host"])
+             )
+    end
+
+    test "a snapshot with no parseable buckets renders the single collapsed bar", %{
+      conn: conn,
+      ws: ws
+    } do
+      antigravity_quota!(ws, models: [])
+
+      {:ok, _view, html} = live(conn, ~p"/usage")
+      doc = LazyHTML.from_fragment(html)
+
+      assert quota_bars(doc, "#usage-quota-antigravity") == 1
+      assert quota_labels(doc, "#usage-quota-antigravity") == ["used"]
+    end
+  end
+
+  defp quota_bars(doc, scope),
+    do: doc |> LazyHTML.query("#{scope} [data-quota-bar]") |> Enum.count()
+
+  defp quota_labels(doc, scope),
+    do: doc |> LazyHTML.query("#{scope} [data-quota-label]") |> Enum.map(&LazyHTML.text/1)
+
+  defp quota_pcts(doc, scope),
+    do:
+      doc
+      |> LazyHTML.query("#{scope} [data-quota-pct]")
+      |> Enum.map(&String.trim(LazyHTML.text(&1)))
 end

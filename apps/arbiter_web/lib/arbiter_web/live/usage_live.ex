@@ -419,32 +419,41 @@ defmodule ArbiterWeb.UsageLive do
           <div class="flex flex-col gap-4">
             <.panel title="Rate limits" meta="live">
               <div class="flex flex-col gap-3">
-                <div :for={quota <- @quotas} class="flex flex-col gap-[3px]">
+                <div
+                  :for={quota <- @quotas}
+                  id={"usage-quota-#{quota.provider}"}
+                  class="flex flex-col gap-[3px]"
+                >
                   <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
                     {quota_provider_label(quota.provider)}
                   </span>
-                  <div class="flex flex-col gap-[6px]">
-                    <Feedback.quota_bar
-                      provider={quota.provider}
-                      show_label={false}
-                      window="5h"
-                      utilization={quota.utilization_5h}
-                      reset_at={quota.reset_5h_at}
-                      overage_status={quota.overage_status}
-                      representative_claim={quota.representative_claim}
-                      width={170}
-                    />
-                    <Feedback.quota_bar
-                      provider={quota.provider}
-                      show_label={false}
-                      window="7d"
-                      utilization={quota.utilization_7d}
-                      reset_at={quota.reset_7d_at}
-                      overage_status={quota.overage_status}
-                      representative_claim={quota.representative_claim}
-                      width={170}
-                    />
-                  </div>
+                  <%!-- Antigravity's two bucket groups each get their own pair
+                        (bd-gukyy1); anything else — including an antigravity
+                        row with no parseable buckets — is the view's own
+                        primary/secondary windows. --%>
+                  <%= case usage_quota_groups(quota) do %>
+                    <% [] -> %>
+                      <div class="flex flex-col gap-[6px]">
+                        <.usage_quota_bar
+                          :for={w <- quota_windows(quota)}
+                          quota={quota}
+                          w={w}
+                        />
+                      </div>
+                    <% groups -> %>
+                      <div
+                        :for={group <- groups}
+                        id={"usage-quota-#{quota.provider}-#{group.group}"}
+                        class="flex flex-col gap-[4px] mt-[3px]"
+                      >
+                        <span class="text-[10px] leading-none text-[var(--text-secondary)] font-[family-name:var(--font-mono)]">
+                          {group.label}
+                        </span>
+                        <div class="flex flex-col gap-[6px]">
+                          <.usage_quota_bar :for={w <- group.windows} quota={quota} w={w} />
+                        </div>
+                      </div>
+                  <% end %>
                 </div>
                 <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
                   The hairline is elapsed time. Bar past the line means you are burning faster than the window.
@@ -496,6 +505,31 @@ defmodule ArbiterWeb.UsageLive do
     </Layouts.app>
     """
   end
+
+  # One rate-limit bar: `w` is a `QuotaHelpers.quota_windows/1` /
+  # `quota_antigravity_groups/1` window, `quota` the view it came from.
+  attr :quota, :map, required: true
+  attr :w, :map, required: true
+
+  defp usage_quota_bar(assigns) do
+    ~H"""
+    <Feedback.quota_bar
+      provider={@quota.provider}
+      show_label={false}
+      window={@w.window}
+      label={@w.label}
+      utilization={@w.utilization}
+      reset_at={@w.reset_at}
+      overage_status={@quota.overage_status}
+      representative_claim={@quota.representative_claim}
+      stale_message={@quota.message}
+      width={170}
+    />
+    """
+  end
+
+  defp usage_quota_groups(%{provider: "antigravity"} = quota), do: quota_antigravity_groups(quota)
+  defp usage_quota_groups(_quota), do: []
 
   attr :label, :string, required: true
   attr :value, :string, required: true

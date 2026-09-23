@@ -21,10 +21,18 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       quota_elapsed_pct_7d: 2,
       quota_color_5h: 4,
       quota_color_7d: 4,
+      quota_pace_state_5h: 4,
+      quota_pace_state_7d: 4,
       quota_pace_label_5h: 5,
       quota_pace_label_7d: 5,
+      quota_pace_ratio_5h: 3,
+      quota_pace_ratio_7d: 3,
+      quota_tooltip_5h: 3,
+      quota_tooltip_7d: 3,
+      quota_provider_hue: 1,
       quota_reset_label: 1,
-      quota_binding_class: 2
+      quota_binding_class: 2,
+      quota_bar_title: 1
     ]
 
   import ArbiterWeb.StatusHelpers,
@@ -188,27 +196,52 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
 
   @doc """
   The rate-limit widget from the product chrome: a fill, an elapsed hairline,
-  a percentage. Pass the raw quota fields — `quota_pct/1`,
-  `quota_elapsed_pct_5h/2` (or `_7d`), `quota_color_5h/4` (or `_7d`),
-  `quota_pace_label_5h/5` (or `_7d`), `quota_reset_label/1`, and
-  `quota_binding_class/2` do the math, unchanged from the existing topbar
-  widget; only the markup here is new.
+  a percentage, a note. Pass the raw quota fields — `QuotaHelpers` does the
+  math (`quota_pct/1`, `quota_elapsed_pct_5h/2`, `quota_pace_state_5h/4`,
+  `quota_pace_label_5h/5`, `quota_reset_label/1`, `quota_binding_class/2`, and
+  their `_7d` twins); only the markup lives here.
 
   ## Examples
 
-      <.quota_bar provider="anthropic" window="5h" utilization={0.68} reset_at={reset_at} />
-      <.quota_bar window="7d" utilization={0.21} reset_at={reset_at} overage_status="ok" representative_claim="five_hour" />
+      <.quota_bar provider="claude" window="5h" utilization={0.68} reset_at={reset_at} />
+      <.quota_bar provider="antigravity" window="7d" label="weekly" utilization={0.21} reset_at={reset_at} />
 
-  The hairline is elapsed time — the fill crossing it is what turns the bar
-  amber. The bar itself is the only pill-radius element besides the live dot.
+  **Colour (bd-gukyy1).** The fill answers "whose quota is this, and is it on
+  fire": it carries the provider's hue (`quota_provider_hue/1`), and the one
+  override is a `:red` pace state — which includes `overage_status ==
+  "in_overage"` — painting it `--arb-fail`. Amber and the grey sampling state
+  never touch the fill; they live in the note (a warning glyph plus the pace
+  label, coloured from `quota_color_5h/4`, or the word "sampling"). The
+  `title` repeats utilization, elapsed window, pace and pace label in words so
+  no state depends on colour alone.
+
+  `window` only picks the pace math (`"5h"` or `"7d"` duration); `label` is
+  the text the bar shows, supplied by the caller from the quota view's
+  `primary_label` / `secondary_label` (Antigravity's second window is
+  "weekly", not "7d"). It defaults to `window`.
+
+  `stale_message` is the quota view's `message`: non-nil means the figures are
+  a preserved last-good reading (`CloudCode.preserve_last_good/3`), so the bar
+  goes muted, its note says "stale", and the message is in the `title`.
+
+  The hairline is elapsed time. The bar itself is the only pill-radius element
+  besides the live dot.
   """
-  attr :provider, :string, default: nil, doc: ~s(label above the bars, e.g. "anthropic")
-  attr :window, :string, values: ~w(5h 7d), default: "5h"
+  attr :id, :string, default: nil
+  attr :provider, :string, default: nil, doc: ~s(label above the bars, e.g. "claude")
+
+  attr :window, :string,
+    values: ~w(5h 7d),
+    default: "5h",
+    doc: "which window duration the pace math uses"
+
+  attr :label, :string, default: nil, doc: ~s(the bar's window label; defaults to `window`)
   attr :utilization, :any, default: nil
   attr :reset_at, :any, default: nil
   attr :overage_status, :any, default: nil
   attr :on_exhaustion, :any, default: nil
   attr :representative_claim, :any, default: nil
+  attr :stale_message, :string, default: nil
   attr :width, :integer, default: 96
   attr :class, :any, default: nil
 
@@ -220,8 +253,9 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   def quota_bar(assigns) do
     pct = quota_pct(assigns.utilization)
     elapsed_pct = quota_elapsed_pct(assigns)
-    color = quota_color(assigns)
-    note = quota_note(assigns)
+    state = quota_pace_state(assigns)
+    pace_label = quota_pace_label(assigns)
+    stale? = assigns.stale_message != nil
     over = elapsed_pct != nil and pct > elapsed_pct
     binding_window = if assigns.window == "5h", do: "five_hour", else: "seven_day"
 
@@ -229,14 +263,25 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       assign(assigns,
         pct: pct,
         elapsed_pct: elapsed_pct,
-        color: color,
-        note: note,
+        state: state,
+        stale?: stale?,
+        fill: quota_fill(assigns.provider, state, stale?),
+        note: quota_note(assigns, state, pace_label, stale?),
+        note_color: pace_label && !stale? && quota_color(assigns),
+        title: quota_title(assigns, pct, pace_label),
         over: over,
         binding_class: quota_binding_class(assigns.representative_claim, binding_window)
       )
 
     ~H"""
-    <div class={["flex flex-col gap-[3px]", @binding_class, @class]}>
+    <div
+      id={@id}
+      data-quota-bar={@provider || ""}
+      data-quota-state={@state}
+      data-quota-stale={@stale?}
+      title={@title}
+      class={["flex flex-col gap-[3px]", @binding_class, @stale? && "opacity-60", @class]}
+    >
       <span
         :if={@provider && @show_label}
         class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]"
@@ -244,16 +289,20 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
         {@provider}
       </span>
       <div class="flex items-center gap-[7px]">
-        <span class="flex-none w-[14px] text-[9.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-          {@window}
+        <span
+          data-quota-label
+          class="flex-none min-w-[14px] text-[9.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+        >
+          {@label || @window}
         </span>
         <span
           class="relative flex-none h-[5px] rounded-[var(--radius-pill)] bg-[var(--arb-done-wash)] overflow-hidden"
           style={"width: #{@width}px;"}
         >
           <span
-            class="absolute inset-y-0 left-0 rounded-[var(--radius-pill)] transition-[width] duration-[var(--dur-bar)] ease-[var(--arb-ease-out)]"
-            style={"width: #{@pct}%; background-color: #{@color};"}
+            data-quota-fill
+            class="absolute inset-y-0 left-0 rounded-[var(--radius-pill)] transition-[width,background-color] duration-[var(--dur-bar)] ease-[var(--arb-ease-out)]"
+            style={"width: #{@pct}%; background-color: #{@fill};"}
           />
           <span
             :if={@elapsed_pct}
@@ -261,18 +310,29 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
             style={"left: #{@elapsed_pct}%;"}
           />
         </span>
-        <span class="flex-none min-w-[26px] text-right text-[9.5px] tabular-nums text-[var(--text-secondary)] font-[family-name:var(--font-mono)]">
+        <span
+          data-quota-pct
+          class="flex-none min-w-[26px] text-right text-[9.5px] tabular-nums text-[var(--text-secondary)] font-[family-name:var(--font-mono)]"
+        >
           {@pct}%
         </span>
         <span
           :if={@note}
+          data-quota-note
+          style={@note_color && "color: #{@note_color};"}
           class={[
-            "text-[9.5px] font-[family-name:var(--font-mono)]",
-            @over && "text-[var(--arb-attention)]",
-            !@over && "text-[var(--text-label)]"
+            "inline-flex items-center gap-[3px] text-[9.5px] font-[family-name:var(--font-mono)]",
+            !@note_color && @over && !@stale? && "text-[var(--arb-attention)]",
+            !@note_color && !(@over && !@stale?) && "text-[var(--text-label)]"
           ]}
         >
-          {@note}
+          <.icon
+            :if={@note_color}
+            name="hero-exclamation-triangle"
+            size={10}
+            class="flex-none"
+            data-quota-glyph
+          />{@note}
         </span>
       </div>
     </div>
@@ -285,20 +345,68 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   defp quota_elapsed_pct(%{window: "7d", provider: provider, reset_at: reset_at}),
     do: quota_elapsed_pct_7d(provider, reset_at)
 
+  defp quota_pace_state(%{window: "5h"} = a),
+    do: quota_pace_state_5h(a.provider, a.utilization, a.reset_at, a.overage_status)
+
+  defp quota_pace_state(%{window: "7d"} = a),
+    do: quota_pace_state_7d(a.provider, a.utilization, a.reset_at, a.overage_status)
+
   defp quota_color(%{window: "5h"} = a),
     do: quota_color_5h(a.provider, a.utilization, a.reset_at, a.overage_status)
 
   defp quota_color(%{window: "7d"} = a),
     do: quota_color_7d(a.provider, a.utilization, a.reset_at, a.overage_status)
 
-  defp quota_note(%{window: "5h"} = a) do
-    quota_pace_label_5h(a.provider, a.utilization, a.reset_at, a.overage_status, a.on_exhaustion) ||
-      quota_reset_label(a.reset_at)
-  end
+  defp quota_pace_label(%{window: "5h"} = a),
+    do:
+      quota_pace_label_5h(
+        a.provider,
+        a.utilization,
+        a.reset_at,
+        a.overage_status,
+        a.on_exhaustion
+      )
 
-  defp quota_note(%{window: "7d"} = a) do
-    quota_pace_label_7d(a.provider, a.utilization, a.reset_at, a.overage_status, a.on_exhaustion) ||
-      quota_reset_label(a.reset_at)
+  defp quota_pace_label(%{window: "7d"} = a),
+    do:
+      quota_pace_label_7d(
+        a.provider,
+        a.utilization,
+        a.reset_at,
+        a.overage_status,
+        a.on_exhaustion
+      )
+
+  defp quota_pace_ratio(%{window: "5h"} = a),
+    do: quota_pace_ratio_5h(a.provider, a.utilization, a.reset_at)
+
+  defp quota_pace_ratio(%{window: "7d"} = a),
+    do: quota_pace_ratio_7d(a.provider, a.utilization, a.reset_at)
+
+  defp quota_tooltip(%{window: "5h"} = a),
+    do: quota_tooltip_5h(a.provider, a.utilization, a.reset_at)
+
+  defp quota_tooltip(%{window: "7d"} = a),
+    do: quota_tooltip_7d(a.provider, a.utilization, a.reset_at)
+
+  # A preserved last-good reading is muted to the neutral `--arb-done` so its
+  # figures never look current — not even a confident red.
+  defp quota_fill(_provider, _state, true), do: "var(--arb-done)"
+  defp quota_fill(_provider, :red, false), do: "var(--arb-fail)"
+  defp quota_fill(provider, _state, false), do: quota_provider_hue(provider)
+
+  defp quota_note(_assigns, _state, _pace_label, true), do: "stale"
+  defp quota_note(_assigns, _state, pace_label, false) when is_binary(pace_label), do: pace_label
+  defp quota_note(_assigns, :grey, nil, false), do: "sampling"
+  defp quota_note(assigns, _state, nil, false), do: quota_reset_label(assigns.reset_at)
+
+  defp quota_title(assigns, pct, pace_label) do
+    quota_bar_title([
+      assigns.stale_message && "stale reading: #{assigns.stale_message}",
+      quota_tooltip(assigns) || "#{pct}% quota used",
+      quota_pace_ratio(assigns),
+      pace_label
+    ])
   end
 
   @doc """
