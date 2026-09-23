@@ -86,6 +86,7 @@ defmodule Arbiter.Quota.Gate do
 
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Quota.Pace
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
@@ -324,51 +325,102 @@ defmodule Arbiter.Quota.Gate do
 
   # ---- the threshold in force at the moment of the check (bd-2daof2) -------
 
-  # `{threshold, mode, elapsed}` for one window. Each side (account,
-  # workspace) turns its own mode into a number for *now*, and the stricter
-  # side wins — the same `min(account, workspace)` rule as the flat settings,
-  # just evaluated at the check rather than once. `mode` is `:paced` only when
-  # the winning number came from pacing, so the hold reason can say so.
-  #
-  # Neither side configured anything → the flat global / built-in default,
-  # exactly as `threshold/1` / `weekly_threshold/1` resolve it.
-  defp window_threshold(policy, window, label, reset_at, now) do
+  @doc """
+  The pace verdict for one window under `policy` (bd-clzkvp): the gate's own
+  thresholds for that window, evaluated by `Arbiter.Quota.Pace.evaluate/4`.
+
+  `window` is `:primary` (5h / session) or `:long` (7d / weekly) and picks
+  which settings apply; `label` is the snapshot's window label, which
+  `window_seconds/2` turns into the window's length. The gate's utilization
+  rules hold exactly when this returns `verdict: :holding` — they are decided
+  through it — so a quota bar coloured from this can never read red while the
+  gate dispatches at the same inputs, or the other way round.
+
+  Only the utilization rule is evaluated here; the past-plan `status`,
+  long-window `rejected` and `weekly_warning_policy` rules are the gate's own
+  and are not a pace question.
+
+  Options: `:now` (default `DateTime.utc_now/0`) and `:account`, as in
+  `gating_window/3`. To colour by the paced thresholds for an account that
+  has not opted into them, pass `paced_policy/1`.
+  """
+  @spec pace(
+          policy(),
+          :primary | :long,
+          String.t() | nil,
+          number() | nil,
+          DateTime.t() | nil,
+          keyword()
+        ) :: Pace.t()
+  def pace(policy, window, label, utilization, reset_at, opts \\ []) do
+    {account, _workspace} =
+      policy = policy |> merge_account(Keyword.get(opts, :account)) |> split_policy()
+
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    seconds = window_seconds(label, account)
+
+    Pace.evaluate(
+      utilization,
+      Pace.elapsed_seconds(reset_at, seconds, now),
+      seconds,
+      pace_thresholds(policy, window)
+    )
+  end
+
+  @doc """
+  `policy` with its account switched into `threshold_mode: "paced"` — the
+  thresholds the gate *would* hold at had the account opted into pacing
+  (bd-clzkvp). The account keeps its own floors and window lengths, and the
+  workspace side is left alone, so a workspace can still tighten. A policy
+  with no account gets one carrying nothing but the mode, so the built-in
+  floors apply.
+
+  The quota bars colour by this whatever the account's real mode is, and
+  compare it with `pace/6` under the real policy to tell "would hold" from
+  "is holding".
+  """
+  @spec paced_policy(policy()) :: {ProviderAccount.t(), Workspace.t() | nil}
+  def paced_policy(policy) do
     {account, workspace} = split_policy(policy)
-    elapsed = elapsed(reset_at, window_seconds(label, account), now)
+    {force_paced(account), workspace}
+  end
 
-    [
-      side_threshold(account_config(account), window, elapsed),
-      side_threshold(ws_quota(workspace), window, elapsed)
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.min_by(fn {t, _mode} -> t end, fn -> {flat_default(window), :flat} end)
-    |> case do
-      {t, :paced} -> {t, :paced, elapsed}
-      {t, :flat} -> {t, :flat, nil}
+  defp force_paced(%ProviderAccount{} = account),
+    do: %{account | quota_config: Map.put(account_config(account), "threshold_mode", "paced")}
+
+  defp force_paced(_account),
+    do: %ProviderAccount{quota_config: %{"threshold_mode" => "paced"}}
+
+  # One `Pace` side per policy side that configured anything for this window.
+  # A paced side carries its own flat setting as the fallback for a window
+  # whose elapsed fraction is unknown (no length, no `reset_at`). Neither side
+  # configured anything → no sides, and the flat global / built-in default
+  # applies, exactly as `threshold/1` / `weekly_threshold/1` resolve it.
+  defp pace_thresholds({account, workspace}, window) do
+    %{
+      sides:
+        Enum.reject(
+          [side(account_config(account), window), side(ws_quota(workspace), window)],
+          &is_nil/1
+        ),
+      default: flat_default(window)
+    }
+  end
+
+  defp side(config, window) do
+    flat = config |> Map.get(flat_key(window)) |> parse_fraction()
+
+    cond do
+      parse_mode(Map.get(config, "threshold_mode")) == :paced ->
+        {:paced, paced_floor(config, window), flat}
+
+      flat ->
+        {:flat, flat}
+
+      true ->
+        nil
     end
   end
-
-  # A paced side needs a known elapsed fraction; without one (unknown window
-  # length, or no `reset_at`) it falls back to its own flat setting.
-  defp side_threshold(config, window, elapsed) do
-    if is_float(elapsed) and parse_mode(Map.get(config, "threshold_mode")) == :paced do
-      {max(paced_floor(config, window), elapsed), :paced}
-    else
-      case config |> Map.get(flat_key(window)) |> parse_fraction() do
-        nil -> nil
-        t -> {t, :flat}
-      end
-    end
-  end
-
-  # `clamp(1 - (reset_at - now) / window_seconds, 0.0, 1.0)`, or `nil` when
-  # the window has no known length or no `reset_at` to measure from.
-  defp elapsed(%DateTime{} = reset_at, seconds, %DateTime{} = now) when is_integer(seconds) do
-    remaining = DateTime.diff(reset_at, now, :millisecond) / 1000
-    (1 - remaining / seconds) |> max(0.0) |> min(1.0)
-  end
-
-  defp elapsed(_reset_at, _seconds, _now), do: nil
 
   defp paced_floor(config, :primary),
     do: parse_fraction(Map.get(config, "paced_floor")) || @default_paced_floor
@@ -776,59 +828,72 @@ defmodule Arbiter.Quota.Gate do
   end
 
   defp primary_utilization_binding(%Snapshot{} = s, policy, now) do
-    {t, mode, elapsed} = window_threshold(policy, :primary, s.window_label, s.reset_at, now)
+    case pace(policy, :primary, s.window_label, s.utilization, s.reset_at, now: now) do
+      %{verdict: :holding} = pace ->
+        %{
+          provider: s.provider,
+          window: s.window_label,
+          signal: :utilization,
+          status: s.status,
+          utilization: s.utilization,
+          threshold: pace.ceiling
+        }
+        |> put_pace(pace)
 
-    if utilization_over?(s.utilization, t) do
-      %{
-        provider: s.provider,
-        window: s.window_label,
-        signal: :utilization,
-        status: s.status,
-        utilization: s.utilization,
-        threshold: t
-      }
-      |> put_pace(mode, elapsed)
+      _ ->
+        nil
     end
   end
 
-  defp secondary_utilization_binding(%Snapshot{} = s, policy, now) do
-    {t, mode, elapsed} = long_threshold(s, policy, now)
+  defp secondary_utilization_binding(%Snapshot{secondary_window_label: nil}, _policy, _now),
+    do: nil
 
-    if s.secondary_window_label && utilization_over?(s.secondary_utilization, t) do
-      %{
-        provider: s.provider,
-        window: s.secondary_window_label,
-        signal: :utilization,
-        status: s.secondary_status,
-        utilization: s.secondary_utilization,
-        threshold: t
-      }
-      |> put_pace(mode, elapsed)
+  defp secondary_utilization_binding(%Snapshot{} = s, policy, now) do
+    case long_pace(s, policy, now) do
+      %{verdict: :holding} = pace ->
+        %{
+          provider: s.provider,
+          window: s.secondary_window_label,
+          signal: :utilization,
+          status: s.secondary_status,
+          utilization: s.secondary_utilization,
+          threshold: pace.ceiling
+        }
+        |> put_pace(pace)
+
+      _ ->
+        nil
     end
   end
 
   defp secondary_warning_binding(%Snapshot{} = s, policy, now) do
     if s.secondary_status == "allowed_warning" and weekly_warning_policy(policy) == :hold do
-      {t, _mode, _elapsed} = long_threshold(s, policy, now)
-
       %{
         provider: s.provider,
         window: s.secondary_window_label,
         signal: :warning,
         status: s.secondary_status,
         utilization: s.secondary_utilization,
-        threshold: t
+        threshold: long_pace(s, policy, now).ceiling
       }
     end
   end
 
-  defp long_threshold(%Snapshot{} = s, policy, now),
-    do: window_threshold(policy, :long, s.secondary_window_label, s.secondary_reset_at, now)
+  defp long_pace(%Snapshot{} = s, policy, now) do
+    pace(
+      policy,
+      :long,
+      s.secondary_window_label,
+      s.secondary_utilization,
+      s.secondary_reset_at,
+      now: now
+    )
+  end
 
-  defp put_pace(binding, :paced, elapsed),
+  defp put_pace(binding, %{mode: :paced, elapsed: elapsed}),
     do: Map.merge(binding, %{mode: :paced, elapsed: elapsed})
 
-  defp put_pace(binding, :flat, _elapsed), do: binding
+  defp put_pace(binding, %{mode: :flat}), do: binding
 
   # Long-window statuses: nil / "allowed" are fine, "allowed_warning" is the
   # policy-governed warning tier, everything else ("rejected", …) is a hard stop.
@@ -955,9 +1020,4 @@ defmodule Arbiter.Quota.Gate do
 
   defp status_not_allowed?(status) when is_binary(status), do: status != "allowed"
   defp status_not_allowed?(_), do: false
-
-  defp utilization_over?(u, threshold) when is_number(u) and is_number(threshold),
-    do: u >= threshold
-
-  defp utilization_over?(_, _), do: false
 end
