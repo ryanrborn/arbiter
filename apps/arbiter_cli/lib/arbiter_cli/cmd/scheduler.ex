@@ -187,6 +187,9 @@ defmodule ArbiterCli.Cmd.Scheduler do
     Enum.each(SchedulerState.entry_lines(body), &IO.puts("  " <> &1))
   end
 
+  # Terminates the VM on every clause — spelled out so dialyzer does not
+  # report it as an accidental "no local return".
+  @spec die(Client.Error.t()) :: no_return()
   defp die(%Client.Error{kind: :http, body: body}) when is_map(body) do
     Output.die(get_in(body, ["error", "message"]) || inspect(body))
   end
