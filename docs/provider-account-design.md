@@ -1,7 +1,6 @@
 # Provider accounts — extracting credentials, quota and cost out of the workspace
 
-**Status:** design proposal (this is the design deliverable for #1593; not yet
-approved, no implementation)
+**Status:** implemented (P0–P11 all shipped as of 2026-09-23). No significant deviations from the design.
 **Date:** 2026-09-12
 **Task:** bd-7df8nh · **Tracker:** github:1593
 **Author:** worker

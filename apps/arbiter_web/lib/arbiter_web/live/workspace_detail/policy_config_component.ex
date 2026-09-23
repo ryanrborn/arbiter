@@ -780,7 +780,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
 
             <.setting_row
               name="Max concurrent workers"
-              consequence="conductor.max_concurrent — per workspace; the effective cap is the lowest of this, the system cap and quota headroom"
+              consequence="conductor.max_concurrent — the effective cap is the lowest of this, the account ceiling (P8, if configured), the system cap and quota headroom (P7)"
             >
               <:control>
                 <Forms.input

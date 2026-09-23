@@ -8,8 +8,9 @@ defmodule ArbiterCli.Cmd.Quota do
 
   * Claude: OAuth polling of Anthropic's `/api/oauth/usage` endpoint plus
     `anthropic-ratelimit-unified-*` headers captured from worker responses.
-    Stores the latest snapshot per workspace, including per-model weekly
-    breakdown and `extra_usage` overage (bd-8tpha6, bd-b0zody).
+    Stores the latest snapshot per account (P5, `docs/provider-account-design.md`
+    §6), including per-model weekly breakdown and `extra_usage` overage
+    (bd-8tpha6, bd-b0zody).
   * Codex: OpenAI session + weekly windows, refreshed by the quota probe using
     the `codex` CLI's stored token. Shows a short message until a snapshot has
     been captured (i.e. the CLI isn't authenticated on this host).
