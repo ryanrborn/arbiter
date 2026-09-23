@@ -497,6 +497,23 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert out =~ "9.50"
     end
 
+    test "--by account is accepted as an alias for --by provider_account" do
+      # The server normalizes `by=account` to `provider_account` (`Usage.normalize_by/1`)
+      # and echoes the normalized name back, same as any other `--by` value.
+      stub_get("/api/usage", %{
+        "by" => "provider_account",
+        "data" => [
+          %{"group" => "acct-1", "rows" => 12, "total_cost_usd" => 9.5}
+        ]
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "account"]) end)
+
+      assert code == 0
+      assert out =~ "acct-1"
+      assert out =~ "9.50"
+    end
+
     test "--account is forwarded to the summarize API as a query param" do
       stub_routes([
         {{"get", "/api/usage"},

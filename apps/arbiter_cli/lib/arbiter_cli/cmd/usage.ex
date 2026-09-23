@@ -11,6 +11,7 @@ defmodule ArbiterCli.Cmd.Usage do
   Usage:
 
       arb usage [--by day|task|epic|workspace|provider_account|repo|model|step|provider|source|session]
+                (`--by account` also accepted, an alias for `--by provider_account`)
                 [--since YYYY-MM-DD | <iso8601>]
                 [--workspace <id>]
                 [--account <id|provider:slug|slug>]
@@ -32,9 +33,10 @@ defmodule ArbiterCli.Cmd.Usage do
 
   "How much of *this plan* have I spent?" is an account question, not a
   workspace one — three workspaces can share one Claude plan. `--by
-  provider_account` rolls spend up by the provider account (`arb account
-  list` for slugs); `--account <ref>` (a UUID, a `provider:slug` ref, or a
-  bare unambiguous slug) narrows any rollup or `events` to one account.
+  provider_account` (or `--by account`, accepted as an alias) rolls spend up
+  by the provider account (`arb account list` for slugs); `--account <ref>`
+  (a UUID, a `provider:slug` ref, or a bare unambiguous slug) narrows any
+  rollup or `events` to one account.
 
   This includes quota probe / pre-flight rows, which carry no workspace but
   always an account — dropping them would under-report the plan's actual

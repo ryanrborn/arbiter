@@ -366,6 +366,37 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       conn = get(conn, ~p"/api/usage", %{by: "task", account: "no-such-account"})
       assert json_response(conn, 400)
     end
+
+    test "by=account is accepted as an alias for by=provider_account, including probe rows", %{
+      conn: conn
+    } do
+      account = account!()
+
+      _ =
+        insert_event!(%{
+          task_id: "bd-acct6",
+          source: :task,
+          cost_usd: 1.0,
+          provider_account_id: account.id
+        })
+
+      _ =
+        insert_event!(%{
+          task_id: nil,
+          source: :preflight,
+          workspace_id: nil,
+          cost_usd: 0.5,
+          provider_account_id: account.id
+        })
+
+      conn = get(conn, ~p"/api/usage", %{by: "account"})
+      body = json_response(conn, 200)
+      data = Map.new(body["data"], &{&1["group"], &1})
+
+      assert body["by"] == "provider_account"
+      assert data[account.id]["rows"] == 2
+      assert_in_delta data[account.id]["total_cost_usd"], 1.5, 0.001
+    end
   end
 
   # bd-3j4ch4: the mis-rating report backing `arb usage --calibration`.

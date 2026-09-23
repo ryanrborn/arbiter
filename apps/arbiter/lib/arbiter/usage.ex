@@ -106,7 +106,12 @@ defmodule Arbiter.Usage do
   # `campaign` was the old name for the `epic` grouping. Accepted as a
   # deprecated alias for one release; normalized to `:epic` before validation
   # so every caller (CLI, REST, MCP) gets the same grouping.
-  @deprecated_by %{campaign: :epic}
+  #
+  # `account` is not deprecated — it's the spelling the design doc (§8) and
+  # task use for this grouping — but it rides the same alias mechanism as
+  # `campaign` so `--by account` normalizes to `:provider_account` before
+  # validation, same as every other caller.
+  @deprecated_by %{campaign: :epic, account: :provider_account}
 
   @doc """
   Roll up usage events into a list of summary rows.
@@ -114,7 +119,9 @@ defmodule Arbiter.Usage do
   ## Options
 
     * `:by` — one of `#{inspect(@valid_by)}` (`:campaign` also accepted as a
-      deprecated alias for `:epic`). Required.
+      deprecated alias for `:epic`; `:account` accepted as an alias for
+      `:provider_account`, the spelling `docs/provider-account-design.md`
+      §8 and the CLI/REST docs use). Required.
     * `:since` — `%DateTime{}` filter on `occurred_at`. Optional.
     * `:workspace_id` — restrict to one workspace. Optional.
     * `:provider_account_id` — restrict to one provider account

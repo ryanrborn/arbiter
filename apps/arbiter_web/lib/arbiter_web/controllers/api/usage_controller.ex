@@ -9,8 +9,10 @@ defmodule ArbiterWeb.Api.UsageController do
                                   provider_account | repo | model | step |
                                   provider | source | session`; `campaign`
                                   also accepted as a deprecated alias for
-                                  `epic`). Optional: `workspace_id`, `account`,
-                                  `since` (ISO8601), `limit`.
+                                  `epic`, and `account` accepted as an alias
+                                  for `provider_account`). Optional:
+                                  `workspace_id`, `account`, `since`
+                                  (ISO8601), `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
                                   filters: `workspace_id`, `account`, `task_id`,
                                   `session_id`, `since`, `step`, `source`,

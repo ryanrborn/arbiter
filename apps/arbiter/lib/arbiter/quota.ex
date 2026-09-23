@@ -1032,28 +1032,21 @@ defmodule Arbiter.Quota do
   # Each view carries its *own* account's spend and workspace breakdown — two
   # accounts in one list are two separate budgets and must not be summed.
   #
-  # The headline `cost_usd` is the sum of the breakdown rather than a second
-  # pass over the ledger, so `arb quota`'s account total always equals the
-  # per-workspace line printed under it, and one view costs one ledger read
-  # per workspace instead of two.
+  # The headline `cost_usd` is `provider_spend/1` read straight off the
+  # account's `usage_events`, NOT a sum of the per-workspace breakdown below:
+  # `account_fields/3`'s `workspaces` list is built from `workspace_spend/1`,
+  # which only sums rows carrying a `workspace_id`, so a probe/pre-flight row
+  # (`workspace_id: nil`, always a `provider_account_id`) would silently drop
+  # out of a summed total — the exact under-reporting bias bd-adyhvn measured.
+  # The total can therefore be *larger* than the sum of the breakdown lines
+  # printed under it; that gap is exactly the account's workspace-less spend.
   defp decorate_view(view, cache) do
     fields = account_fields(view.provider_account_id, view.provider, cache)
+    total = cost_for(view.provider, provider_spend(view.provider_account_id))
 
     view
     |> Map.merge(fields)
-    |> Map.put(:cost_usd, total_cost(fields.workspaces))
-  end
-
-  # `nil` (not `0.0`) when no workspace on the account has attributable spend,
-  # matching `cost_for/2` — the UI shows "—" rather than a misleading "$0.00".
-  defp total_cost(workspaces) do
-    workspaces
-    |> Enum.map(& &1.cost_usd)
-    |> Enum.filter(&is_number/1)
-    |> case do
-      [] -> nil
-      costs -> costs |> Enum.sum() |> Float.round(6)
-    end
+    |> Map.put(:cost_usd, total)
   end
 
   @doc """

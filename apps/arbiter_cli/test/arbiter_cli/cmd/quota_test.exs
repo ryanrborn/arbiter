@@ -367,6 +367,35 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "default $10.00 · emricare $12.50 · vstim $7.50"
     end
 
+    test "the total can exceed the workspace breakdown sum (probe/preflight spend, bd-adyhvn)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              # Server-computed total (workspace spend + a preflight row with
+              # no workspace_id) is bigger than the two breakdown lines sum
+              # to (10.0 + 12.5 = 22.5) — the CLI must print the server's
+              # figure verbatim, not recompute it from the breakdown.
+              "cost_usd" => 23.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 12.5}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $23.00"
+      assert out =~ "default $10.00 · emricare $12.50"
+    end
+
     test "omits the breakdown when the account has a single workspace" do
       stub_get("/api/quota", %{
         "data" => %{

@@ -354,5 +354,50 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
       resp = conn |> get("/api/quota?account=no-such-account") |> json_response(404)
       assert resp["error"]["type"] == "not_found"
     end
+
+    test "cost_usd includes a preflight row that carries no workspace_id (bd-adyhvn)", %{
+      conn: conn,
+      ws: ws
+    } do
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "personal-max"})
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      {:ok, _} =
+        Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+      Ash.create!(Arbiter.Usage.Event, %{
+        task_id: "bd-quota-ctrl-1",
+        source: :task,
+        step: :work,
+        provider: "claude",
+        provider_account_id: account.id,
+        workspace_id: ws.id,
+        cost_usd: 1.0,
+        occurred_at: DateTime.utc_now()
+      })
+
+      Ash.create!(Arbiter.Usage.Event, %{
+        task_id: nil,
+        source: :preflight,
+        step: :other,
+        provider: "claude",
+        provider_account_id: account.id,
+        workspace_id: nil,
+        cost_usd: 0.5,
+        occurred_at: DateTime.utc_now()
+      })
+
+      resp = conn |> get("/api/quota?account=personal-max") |> json_response(200)
+      claude = Enum.find(resp["data"]["quotas"], &(&1["provider"] == "claude"))
+
+      # The headline total is the account's whole spend (task + preflight,
+      # 1.0 + 0.5), not just the workspace-scoped breakdown (1.0) below it.
+      assert_in_delta claude["cost_usd"], 1.5, 0.0001
+    end
   end
 end

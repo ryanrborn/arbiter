@@ -1,7 +1,9 @@
 defmodule Arbiter.Quota.ProviderSpendTest do
   @moduledoc """
   Provider accounts P10 (`docs/provider-account-design.md` §8, bd-icwk2k):
-  `Quota.provider_spend/1` is the account total `arb quota --account` prints.
+  `Quota.provider_spend/1` backs the account total `arb quota --account`
+  prints — `decorate_view/2` (`list_latest/2`) calls it directly for the
+  headline `cost_usd`, separately from the per-workspace breakdown below it.
 
   Pre-P9 it summed `workspace_spend/1` over the account's workspaces, which
   by construction excludes probe/pre-flight rows (`workspace_id: nil`) —
