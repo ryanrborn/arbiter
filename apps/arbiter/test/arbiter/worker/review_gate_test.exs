@@ -57,6 +57,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
                                      __DIR__
                                    )
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
+  @reject_twice Path.expand("../../fixtures/review_reject_twice.sh", __DIR__)
+  @revise_slow_then_fast Path.expand("../../fixtures/revise_slow_then_fast.sh", __DIR__)
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
@@ -3574,6 +3576,84 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       impl_rounds = Enum.filter(rounds, &(&1.role == :impl))
       assert [%{round: 1, verdict: nil}] = impl_rounds
+    end
+
+    # bd-28u8v4: `attempt` resets to 0 at the start of every round (bd-bgeo6i),
+    # so round 1's implementer and round 2's implementer are both launched as
+    # `attempt` 2 within their own round. The timer armed for round 1's
+    # implementer must not be able to escalate round 2's implementer just
+    # because the attempt numbers collide.
+    #
+    # Round 1's implementer (`revise_slow_then_fast.sh`) sleeps for most of the
+    # per-pass timeout before committing — long enough that its stale timer
+    # fires only AFTER round 2's implementer has already launched. Round 2's
+    # implementer then keeps running well past that stale-timer instant, but
+    # still comfortably within its own fresh timeout. With the bug, the stale
+    # round-1 timer escalates round 2's revising pass as timed-out; fixed, the
+    # gate ignores it and round 2's implementer is allowed its own full
+    # budget, converging normally when round 3 approves.
+    test "a round-1 implementer's timer does not escalate a round-2 implementer at the same attempt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 3,
+            worktree_path: repo,
+            review_command: [@reject_twice],
+            # pass 1 (round-1 implementer) sleeps 1.9s; pass 2 (round-2
+            # implementer) sleeps 1.0s — both well under the 2.5s per-pass
+            # timeout on their own, but round 1's stale timer (armed at
+            # implementer-1-start + 2.5s) lands mid-flight through round 2's
+            # implementer run.
+            revise_command: [@revise_slow_then_fast, "19", "10"],
+            review_timeout_ms: 2_500
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Round 1 rejects → slow implementer revises → round 2 rejects → second
+      # implementer revises (surviving the stale round-1 timer) → round 3
+      # approves → merge. No timeout escalation anywhere in between.
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+      assert merge_commit_count(repo) == 1
+      refute Worker.state(pid).meta[:failure_reason]
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
+             "expected a distinct implementer run row for round 1"
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl2")),
+             "expected a distinct implementer run row for round 2 — it must not have been " <>
+               "killed by round 1's stale timer"
+
+      require Ash.Query
+
+      rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        |> Ash.read!()
+
+      # No round anywhere recorded a timed-out verdict — the only source of
+      # `:timed_out` in this gate's vocabulary is the very bug under test.
+      refute Enum.any?(rounds, &(&1.verdict == :timed_out))
     end
 
     # bd-78vg4v: a large implementer transcript is CAPPED (head+tail) when

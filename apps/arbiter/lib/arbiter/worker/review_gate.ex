@@ -1225,9 +1225,16 @@ defmodule Arbiter.Worker.ReviewGate do
   # A stale exit from an worker we've moved on from.
   def handle_info({:worker_exited, _other, _status}, state), do: {:noreply, state}
 
-  # Timeouts are tagged with the attempt that scheduled them so a stale timer
-  # from a prior pass can't escalate a pass that has already advanced.
-  def handle_info({:timeout, _attempt}, %{reported?: true} = state), do: {:noreply, state}
+  # Timeouts are tagged with the {round, attempt} pair that scheduled them so
+  # a stale timer from a prior pass can't escalate a pass that has already
+  # advanced. `attempt` alone is not enough (bd-28u8v4): it resets to 0 at the
+  # start of every round (bd-bgeo6i, so reprompt budgets start fresh), so
+  # round N's implementer and round N+1's implementer are both launched as the
+  # same attempt number and a timer armed for the former would otherwise be
+  # accepted as belonging to the latter. `round` never repeats within a gate's
+  # lifetime, so the pair is unique for as long as the gate runs.
+  def handle_info({:timeout, _round, _attempt}, %{reported?: true} = state),
+    do: {:noreply, state}
 
   # A reviewing pass hit the ceiling. Before escalating as timed-out, retry the
   # pass once with a fresh reviewer mind (bd-78vg4v): a hung / overloaded session
@@ -1235,8 +1242,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # attempt converges where the first stalled. Only the reviewing phase is
   # retried — a revising (implementer) pass still escalates on timeout below.
   def handle_info(
-        {:timeout, attempt},
-        %{attempt: attempt, phase: :reviewing, timeout_retries_left: budget} = state
+        {:timeout, round, attempt},
+        %{round: round, attempt: attempt, phase: :reviewing, timeout_retries_left: budget} =
+          state
       )
       when budget > 0 and is_binary(state.current_prompt) do
     Logger.warning(
@@ -1266,7 +1274,7 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  def handle_info({:timeout, attempt}, %{attempt: attempt} = state) do
+  def handle_info({:timeout, round, attempt}, %{round: round, attempt: attempt} = state) do
     Logger.warning(
       "ReviewGate: #{state.phase} pass timed out for task=#{state.task_id} (round #{state.round})"
     )
@@ -1274,7 +1282,7 @@ defmodule Arbiter.Worker.ReviewGate do
     escalate_timeout(state)
   end
 
-  def handle_info({:timeout, _stale}, state), do: {:noreply, state}
+  def handle_info({:timeout, _stale_round, _stale_attempt}, state), do: {:noreply, state}
 
   # Author died before we could report — nothing to do.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{author: pid} = state) do
@@ -3878,7 +3886,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     case spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
-        Process.send_after(self(), {:timeout, attempt}, timeout_ms)
+        Process.send_after(self(), {:timeout, state.round, attempt}, timeout_ms)
 
         {:ok,
          %{
