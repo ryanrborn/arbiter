@@ -205,6 +205,151 @@ defmodule Arbiter.Trackers.SyncTest do
       assert escalation.body =~ "Deployment Notes"
     end
 
+    test "retries the transition (without re-posting the comment) once gated fields are filled in (bd-bqlwjo)" do
+      test_pid = self()
+      ws = jira_workspace(%{"pr_opened" => "In Code Review"})
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "51",
+                  "name" => "Pull request created",
+                  "to" => %{"name" => "In Code Review"}
+                }
+              ]
+            })
+
+          conn.method == "PUT" and String.ends_with?(path, "/issue/#{@ref}") ->
+            send(test_pid, :update_fields)
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            send(test_pid, :transition)
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/comment") ->
+            send(test_pid, :comment)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "1"})
+
+          conn.method == "POST" and String.ends_with?(path, "/remotelink") ->
+            send(test_pid, :remotelink)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 10_001})
+        end
+      end)
+
+      url = "https://github.com/acme/voice-id-core/pull/3606"
+
+      # First run: blank QA/Deployment notes — the transition is gated and
+      # escalates (bd-4isprn), but the comment/remote-link still post since
+      # `attach_pr_artifacts` runs regardless of the transition's outcome.
+      assert :ok = Sync.lifecycle(issue, :pr_opened, pr_url: url, pr_title: "PR #3606")
+      assert_receive :comment
+      assert_receive :remotelink
+      refute_receive :update_fields, 50
+      refute_receive :transition, 50
+      assert [_escalation] = escalations_for(ws.id)
+
+      reloaded = Ash.get!(Issue, issue.id)
+      assert reloaded.pr_opened_notified_ref == url
+      assert reloaded.pr_opened_transitioned_ref == nil
+
+      # The notes get filled in (e.g. the escalation is resolved) and the
+      # same PR is resolved again on the next run — the transition must be
+      # retried since it never actually landed, but the comment must NOT
+      # repeat since it already posted.
+      {:ok, filled} =
+        Ash.update(reloaded, %{
+          qa_notes: "Verify voice ID matches on re-enrollment.",
+          deployment_notes: "None."
+        })
+
+      assert :ok = Sync.lifecycle(filled, :pr_opened, pr_url: url, pr_title: "PR #3606")
+      assert_receive :update_fields
+      assert_receive :transition
+      refute_receive :comment, 50
+      refute_receive :remotelink, 50
+
+      final = Ash.get!(Issue, issue.id)
+      assert final.pr_opened_transitioned_ref == url
+    end
+
+    test "a first-time transition to an already-past-target Jira status is a benign no-op, not an escalation (bd-bqlwjo)" do
+      test_pid = self()
+      ws = jira_workspace(%{"pr_opened" => "In Code Review"})
+
+      issue =
+        jira_issue(ws, %{
+          qa_notes: "Verify voice ID matches on re-enrollment.",
+          deployment_notes: "None."
+        })
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          # No transition offers "In Code Review" as a target — the ticket is
+          # already at/past it (e.g. "Code Complete"), so the BFS in
+          # `Jira.resolve_multi_hop/3` finds no forward edge and yields
+          # `:no_transition_path`.
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "61",
+                  "name" => "Mark complete",
+                  "to" => %{"name" => "Code Complete"}
+                }
+              ]
+            })
+
+          conn.method == "GET" and String.ends_with?(path, "/issue/#{@ref}") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "fields" => %{
+                "status" => %{
+                  "name" => "Code Complete",
+                  "statusCategory" => %{"key" => "indeterminate"}
+                }
+              }
+            })
+
+          conn.method == "PUT" and String.ends_with?(path, "/issue/#{@ref}") ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/comment") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "1"})
+
+          conn.method == "POST" and String.ends_with?(path, "/remotelink") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 10_001})
+
+          true ->
+            send(test_pid, {:unexpected, conn.method, path})
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      url = "https://github.com/acme/voice-id-core/pull/3606"
+
+      assert :ok = Sync.lifecycle(issue, :pr_opened, pr_url: url, pr_title: "PR #3606")
+
+      refute_receive {:unexpected, _method, _path}
+      assert escalations_for(ws.id) == []
+
+      reloaded = Ash.get!(Issue, issue.id)
+      assert reloaded.pr_opened_transitioned_ref == url
+    end
+
     test "does not re-post the comment or re-attempt the transition for a PR already announced (bd-bqlwjo)" do
       test_pid = self()
       ws = jira_workspace(%{"pr_opened" => "In Code Review"})

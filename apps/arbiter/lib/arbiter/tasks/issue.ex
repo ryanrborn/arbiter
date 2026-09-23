@@ -223,6 +223,7 @@ defmodule Arbiter.Tasks.Issue do
         :pr_ref,
         :pr_body,
         :pr_opened_notified_ref,
+        :pr_opened_transitioned_ref,
         :target_branch,
         :repo,
         :review_only,
@@ -480,6 +481,7 @@ defmodule Arbiter.Tasks.Issue do
       # `pr_ref` rather than relying on the (very likely, but not guaranteed)
       # new PR having a different URL.
       change set_attribute(:pr_opened_notified_ref, nil)
+      change set_attribute(:pr_opened_transitioned_ref, nil)
 
       # bd-bsco7f: same reasoning for the recorded close intent — it describes a
       # close that no longer stands. The next close records its own.
@@ -779,6 +781,25 @@ defmodule Arbiter.Tasks.Issue do
       `pr_ref`, so a new PR after `task_reopen` gets its own comment even
       though the ticket itself is unchanged. Durable (not an ETS/process
       cache) so idempotency survives a server restart.
+      """
+    end
+
+    attribute :pr_opened_transitioned_ref, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 2048, trim?: true
+
+      description """
+      The PR/MR URL `Arbiter.Trackers.Sync` last successfully drove the
+      `:pr_opened` status transition for (bd-bqlwjo). Tracked separately from
+      `pr_opened_notified_ref`: the comment/remote-link is posted at most once
+      per PR ref regardless of outcome (a repeat is a visible duplicate the
+      user is showing us), but the status transition itself must keep
+      retrying on the next run for the same PR ref until it actually lands —
+      e.g. after a gated-fields escalation (blank qa_notes/deployment_notes)
+      or a transient tracker failure on the first attempt. Set only when
+      `transition_event/2` returns `:ok` for `:pr_opened`. Cleared alongside
+      `pr_opened_notified_ref` by `reopen`.
       """
     end
 
