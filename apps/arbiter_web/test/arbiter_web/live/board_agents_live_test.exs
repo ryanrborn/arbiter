@@ -54,9 +54,11 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
 
     slots = view |> element("#board-slots") |> render()
 
-    # The record is `running`; no agent is live for it, so the count is 0.
-    assert slots =~ "agents live"
-    assert slots =~ "0 of"
+    # The record is `running`; no agent is live for it, so the agent count is
+    # 0 — but the task is still in flight (bd-45pwo1), so it still holds its
+    # one slot.
+    assert slots =~ "agents live: 0"
+    assert slots =~ "slots used: 1"
   end
 
   test "a live agent subprocess is what the header counts", %{conn: conn, ws: ws} do
@@ -90,7 +92,10 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
     {:ok, view, _html} = live(conn, "/")
 
     slots = view |> element("#board-slots") |> render()
-    assert slots =~ "1 of"
+    # One live agent (the busy worker's OS subprocess), but two tasks still
+    # in flight — bd-45pwo1: the quiet one holds its slot too.
+    assert slots =~ "agents live: 1"
+    assert slots =~ "slots used: 2"
 
     # Two `running` records, one live agent — the quiet one is the card this
     # ticket exists to stop calling "running".
