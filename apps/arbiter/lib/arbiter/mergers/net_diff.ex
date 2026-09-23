@@ -132,6 +132,34 @@ defmodule Arbiter.Mergers.NetDiff do
 
   def fingerprint_local(_worktree_path, _range), do: nil
 
+  @doc """
+  Did `git -C worktree_path diff range` run successfully and produce no
+  output?
+
+  Distinct from `fingerprint_local/2` returning `nil` (bd-aq81qz), which also
+  covers a git failure — a non-zero exit (a `base_sha` not present in the
+  worktree, a lock or index error), a raise, or an exit. Those must never
+  read as "nothing to merge": `{:ok, false}` there would wrongly turn a
+  transient git failure into a positive claim of emptiness. Returns
+  `{:ok, blank?}` only when git actually ran and answered; `:error` on any
+  failure, for a caller that needs to tell "confirmed empty" apart from
+  "could not tell".
+  """
+  @spec local_diff_blank?(String.t(), String.t()) :: {:ok, boolean()} | :error
+  def local_diff_blank?(worktree_path, range)
+      when is_binary(worktree_path) and is_binary(range) do
+    case System.cmd("git", ["-C", worktree_path, "diff", range], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, String.trim(out) == ""}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
+  def local_diff_blank?(_worktree_path, _range), do: :error
+
   # Both endpoints present → a bounded `base...head` compare; otherwise the
   # adapter's whole-PR diff, which is already the PR's net contribution.
   defp compare_opts(base, head)
@@ -156,6 +184,21 @@ defmodule Arbiter.Mergers.NetDiff do
       _ -> false
     end
   end
+
+  @doc """
+  Is `diff` literally empty content — a diff that was successfully fetched but
+  describes no change?
+
+  Deliberately narrower than `fingerprint/1` returning `nil`: that also covers
+  a failed fetch or an unfingerprintable value, which must never read as
+  evidence of anything (bd-aq81qz). `blank?/1` is for callers who already have
+  a diff in hand (a successful `get_diff/2`) and want to know specifically
+  whether the merge it is about to authorise contributes nothing — a `false`
+  from a fetch failure would wrongly refuse a perfectly good merge.
+  """
+  @spec blank?(String.t() | nil) :: boolean()
+  def blank?(diff) when is_binary(diff), do: String.trim(diff) == ""
+  def blank?(_diff), do: false
 
   # Hunk headers carry line numbers (and a section heading) that move whenever
   # the base branch shifts the surrounding file; keep the marker, drop the rest.

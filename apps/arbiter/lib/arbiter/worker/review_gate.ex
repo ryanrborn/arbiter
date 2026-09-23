@@ -1433,11 +1433,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # (`head_sha != base_sha`), most often because those commits were already
   # squashed onto the target independently and this branch then merged the
   # target back in — `base_sha..HEAD` nets to nothing even though HEAD moved.
-  # `coverage_net_diff_id/1` already computes exactly this (it is the same
-  # fingerprint attempt the coverage row itself would use), so its
-  # `{:error, :no_net_diff}` is reused as the gate here rather than deriving
-  # emptiness a second way — the write-failure that used to only log a warning
-  # now decides the verdict instead.
+  #
+  # `NetDiff.local_diff_blank?/2` runs the same `git diff` the coverage write
+  # would fingerprint, but answers `{:ok, blank?}` only when git actually ran
+  # — unlike `coverage_net_diff_id/1` (built on `fingerprint_local/2`), whose
+  # `nil`/`{:error, :no_net_diff}` also covers a git failure (a `base_sha` not
+  # present in the worktree, a lock or index error). Reusing that broader
+  # signal here would misread a transient git failure as proof of emptiness
+  # and park a legitimate APPROVE; only a confirmed `{:ok, true}` parks.
   #
   # Gated on `worktree_on_expected_branch?/1` for the same reason
   # `reviewer_commit_check/1` and `commit_gate/1` already are: some test
@@ -1451,7 +1454,10 @@ defmodule Arbiter.Worker.ReviewGate do
   defp finalize_approval(state, verdict, findings) do
     empty_net_diff? =
       worktree_on_expected_branch?(state) and
-        match?({:error, :no_net_diff}, coverage_net_diff_id(state))
+        match?(
+          {:ok, true},
+          NetDiff.local_diff_blank?(Map.get(state, :worktree_path), diff_range(state))
+        )
 
     if empty_net_diff? do
       Logger.warning(
