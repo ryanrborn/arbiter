@@ -33,6 +33,7 @@ defmodule Arbiter.Board.AutopilotConfigTest do
     defaults = [
       name: nil,
       interval_ms: :never,
+      topics: [],
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 

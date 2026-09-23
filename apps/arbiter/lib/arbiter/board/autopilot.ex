@@ -128,9 +128,11 @@ defmodule Arbiter.Board.Autopilot do
 
     * `"tasks"` — `Arbiter.Tasks.Issue.broadcast_lifecycle/2`'s
       `{:task_lifecycle, event, issue}`, which covers a close, a promote to
-      Ready, a `ready_order` reorder, and a `depends_on`/`blocks`/
-      `conflicts_with` edge add or remove (`Arbiter.Tasks.Dependencies`
-      broadcasts on the same topic for both endpoints).
+      Ready, and a `depends_on`/`blocks`/`conflicts_with` edge add or remove
+      (`Arbiter.Tasks.Dependencies` broadcasts on the same topic for both
+      endpoints). `ready_order` is a `BoardLive` assign only — nothing
+      persists or broadcasts it server-side, so a reorder neither triggers a
+      pass nor changes what Autopilot would plan.
     * `"events"` (`Arbiter.Events`'s global topic) — `{:event, %{topic:
       "worker_done" | "worker_failed"}}`, meaning a slot just freed.
 
@@ -211,6 +213,11 @@ defmodule Arbiter.Board.Autopilot do
       when asked (a `tick/2` call or a reactive trigger).
     * `:debounce_ms` — how long a reactive trigger waits before running a
       pass, coalescing a burst into one; defaults to the app env (300ms).
+    * `:topics` — PubSub topics to subscribe to for reactive triggers;
+      defaults to `["tasks", "events"]`. Tests can pass `[]` (no reactive
+      triggers, drive with `send/2` or `tick/2` instead) or private topic
+      names to exercise the real `Phoenix.PubSub.subscribe/2` path without
+      picking up unrelated broadcasts from other tests.
     * `:snapshot` / `:dispatch` — seams for tests; default to
       `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/1`.
     * `:escalate` — seam for tests; defaults to `default_escalate/3`, which
@@ -299,8 +306,8 @@ defmodule Arbiter.Board.Autopilot do
         :error -> initial_paused_state()
       end
 
-    Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
-    Phoenix.PubSub.subscribe(Arbiter.PubSub, @events_topic)
+    topics = Keyword.get(opts, :topics, [@tasks_topic, @events_topic])
+    Enum.each(topics, &Phoenix.PubSub.subscribe(Arbiter.PubSub, &1))
 
     state = %{
       paused?: paused?,
@@ -386,9 +393,10 @@ defmodule Arbiter.Board.Autopilot do
     {:noreply, state}
   end
 
-  # A task closed, was promoted to Ready, had its `ready_order` changed, or
-  # gained/lost a dependency edge — `Arbiter.Tasks.Issue.broadcast_lifecycle/2`
-  # and `Arbiter.Tasks.Dependencies` both broadcast here for all of these.
+  # A task closed, was promoted to Ready, or gained/lost a dependency edge —
+  # `Arbiter.Tasks.Issue.broadcast_lifecycle/2` and `Arbiter.Tasks.Dependencies`
+  # both broadcast here for all of these. (`ready_order` is a LiveView-only
+  # assign — nothing broadcasts it, so it is not covered.)
   def handle_info({:task_lifecycle, _event, _issue}, state) do
     {:noreply, request_plan(state)}
   end

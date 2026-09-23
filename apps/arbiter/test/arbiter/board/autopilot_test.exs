@@ -34,6 +34,7 @@ defmodule Arbiter.Board.AutopilotTest do
       name: nil,
       interval_ms: :never,
       debounce_ms: 20,
+      topics: [],
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 
@@ -595,6 +596,46 @@ defmodule Arbiter.Board.AutopilotTest do
       send(pid, {:event, %{topic: "inbox", task_id: "bd-9"}})
 
       refute_receive {:dispatched, _}, 100
+    end
+
+    # These three drive the trigger through a real `Phoenix.PubSub.broadcast/3`
+    # instead of `send/2`, so they actually exercise the `subscribe` calls in
+    # `init/1` (and would fail if those were deleted or pointed at the wrong
+    # topic). Each uses its own private topic — passed via `:topics` — rather
+    # than the real "tasks"/"events" topics, so it isn't exposed to unrelated
+    # broadcasts from other async tests in the suite.
+    test "a task closing runs a pass when delivered over real PubSub" do
+      topic = "autopilot-test-tasks-#{System.unique_integer([:positive])}"
+      _pid = start(paused: false, topics: [topic])
+
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, topic, {:task_lifecycle, :closed, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a dependency edge add/remove runs a pass when delivered over real PubSub" do
+      # `Arbiter.Tasks.Dependencies.broadcast_endpoints/2` reloads each
+      # endpoint and re-broadcasts it as `{:task_lifecycle, :updated, issue}`
+      # on the "tasks" topic — the same shape used here.
+      topic = "autopilot-test-tasks-#{System.unique_integer([:positive])}"
+      _pid = start(paused: false, topics: [topic])
+
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, topic, {:task_lifecycle, :updated, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a worker finishing runs a pass when delivered over real PubSub" do
+      topic = "autopilot-test-events-#{System.unique_integer([:positive])}"
+      _pid = start(paused: false, topics: [topic])
+
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        topic,
+        {:event, %{topic: "worker_done", task_id: "bd-9"}}
+      )
+
+      assert_receive {:dispatched, "bd-1"}, 500
     end
 
     test "a burst of triggers in quick succession yields exactly one pass" do

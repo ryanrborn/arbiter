@@ -55,6 +55,11 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
             name: nil,
             interval_ms: :never,
             paused: false,
+            # This test drives every pass explicitly via `tick/2`; a real
+            # subscription would pick up this file's own (and other tests')
+            # `Ash.create`/`Ash.update` broadcasts on the real "tasks" topic
+            # and race an unplanned reactive pass against the explicit one.
+            topics: [],
             snapshot: &Snapshot.load/1,
             dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
           ],
