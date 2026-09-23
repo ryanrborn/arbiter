@@ -263,7 +263,7 @@ defmodule ArbiterCli.Cmd.Worker do
       )
 
       if r["failure_reason"], do: IO.puts("      #{reason_label(r)}: #{r["failure_reason"]}")
-      if r["failure_summary"], do: IO.puts("      summary: #{r["failure_summary"]}")
+      if r["failure_summary"], do: IO.puts("      #{summary_label(r)}: #{r["failure_summary"]}")
     end)
   end
 
@@ -271,6 +271,13 @@ defmodule ArbiterCli.Cmd.Worker do
   # cause in failure_reason too, but it is not a failure — don't label it one.
   defp reason_label(%{"status" => "interrupted"}), do: "reason"
   defp reason_label(_run), do: "failure"
+
+  # bd-1eb6fc: `failure_summary` also carries a non-failure completion note on
+  # a `:completed` run (arb done fired with a background task still RUNNING)
+  # — same reason_label/1 pattern above, so a completed run isn't labeled
+  # with the word "failure" it didn't have.
+  defp summary_label(%{"status" => "completed"}), do: "note"
+  defp summary_label(_run), do: "failure summary"
 
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
 

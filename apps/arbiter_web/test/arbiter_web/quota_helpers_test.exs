@@ -36,11 +36,19 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       assert quota_elapsed_pct_5h("claude", reset_at) == 100
     end
 
-    test "non-Anthropic providers get no marker, even with a reset_at present" do
+    test "providers without a fixed window get no marker, even with a reset_at present" do
       reset_at = DateTime.add(DateTime.utc_now(), 2 * 60 * 60 + 30 * 60, :second)
       assert quota_elapsed_pct_5h("codex", reset_at) == nil
       assert quota_elapsed_pct_5h("gemini_cli", reset_at) == nil
-      assert quota_elapsed_pct_5h("antigravity", reset_at) == nil
+      assert quota_elapsed_pct_5h("someday_cli", reset_at) == nil
+    end
+
+    test "antigravity gets a marker identical to claude's, same fixed 5h window" do
+      reset_at = DateTime.add(DateTime.utc_now(), 2 * 60 * 60 + 30 * 60, :second)
+      assert quota_elapsed_pct_5h("antigravity", reset_at) == 50
+
+      assert quota_elapsed_pct_5h("antigravity", reset_at) ==
+               quota_elapsed_pct_5h("claude", reset_at)
     end
   end
 
@@ -55,12 +63,21 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       assert quota_elapsed_pct_7d("claude", reset_at) == 33
     end
 
-    test "non-Anthropic providers get no marker" do
+    test "providers without a fixed window get no marker" do
       window_seconds = 7 * 24 * 60 * 60
       reset_at = DateTime.add(DateTime.utc_now(), round(window_seconds * 2 / 3), :second)
       assert quota_elapsed_pct_7d("codex", reset_at) == nil
       assert quota_elapsed_pct_7d("gemini_cli", reset_at) == nil
-      assert quota_elapsed_pct_7d("antigravity", reset_at) == nil
+      assert quota_elapsed_pct_7d("someday_cli", reset_at) == nil
+    end
+
+    test "antigravity gets a marker identical to claude's, same fixed 7d window" do
+      window_seconds = 7 * 24 * 60 * 60
+      reset_at = DateTime.add(DateTime.utc_now(), round(window_seconds * 2 / 3), :second)
+      assert quota_elapsed_pct_7d("antigravity", reset_at) == 33
+
+      assert quota_elapsed_pct_7d("antigravity", reset_at) ==
+               quota_elapsed_pct_7d("claude", reset_at)
     end
   end
 
@@ -83,11 +100,18 @@ defmodule ArbiterWeb.QuotaHelpersTest do
                "no usage data · 50% of window elapsed (2.5h into 5h)"
     end
 
-    test "non-Anthropic providers get no tooltip" do
+    test "providers without a fixed window get no tooltip" do
       reset_at = DateTime.add(DateTime.utc_now(), 2 * 60 * 60 + 30 * 60, :second)
       assert quota_tooltip_5h("codex", 0.62, reset_at) == nil
       assert quota_tooltip_5h("gemini_cli", 0.62, reset_at) == nil
-      assert quota_tooltip_5h("antigravity", 0.62, reset_at) == nil
+      assert quota_tooltip_5h("someday_cli", 0.62, reset_at) == nil
+    end
+
+    test "antigravity gets a tooltip identical to claude's" do
+      reset_at = DateTime.add(DateTime.utc_now(), 2 * 60 * 60 + 30 * 60, :second)
+
+      assert quota_tooltip_5h("antigravity", 0.62, reset_at) ==
+               "62% quota used · 50% of window elapsed (2.5h into 5h)"
     end
   end
 
@@ -147,15 +171,26 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       assert quota_color_5h("claude", nil, reset_at_after(30), nil) == "#22c55e"
     end
 
-    test "non-Anthropic providers fall back to absolute-utilization thresholds" do
+    test "providers without a fixed window fall back to absolute-utilization thresholds" do
       reset_at = reset_at_after(30)
       assert quota_color_5h("codex", 0.35, reset_at, nil) == "#22c55e"
       assert quota_color_5h("codex", 0.95, reset_at, nil) == "#ef4444"
+      assert quota_color_5h("gemini_cli", 0.35, reset_at, nil) == "#22c55e"
+      assert quota_color_5h("gemini_cli", 0.95, reset_at, nil) == "#ef4444"
+      assert quota_color_5h("someday_cli", 0.35, reset_at, nil) == "#22c55e"
+      assert quota_color_5h("someday_cli", 0.95, reset_at, nil) == "#ef4444"
     end
 
     test "nil reset_at falls back to absolute-utilization thresholds" do
       assert quota_color_5h("claude", 0.95, nil, nil) == "#ef4444"
       assert quota_color_5h("claude", 0.35, nil, nil) == "#22c55e"
+    end
+
+    test "antigravity applies the deficit-minutes pace math identically to claude" do
+      reset_at = reset_at_after(30)
+      assert quota_color_5h("antigravity", 0.35, reset_at, nil) == "#ef4444"
+      assert quota_color_5h("antigravity", 0.89, reset_at_after(294), nil) == "#22c55e"
+      assert quota_color_5h("antigravity", 0.5, reset_at_after(2), nil) == "#9ca3af"
     end
   end
 
@@ -170,6 +205,47 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       window_min = 7 * 24 * 60
       reset_at = reset_at_after(round(window_min * 0.98), window_min)
       assert quota_color_7d("claude", 0.89, reset_at, nil) == "#22c55e"
+    end
+
+    test "antigravity applies the deficit-minutes pace math identically to claude" do
+      window_min = 7 * 24 * 60
+      reset_at = reset_at_after(round(window_min * 0.1), window_min)
+      assert quota_color_7d("antigravity", 0.35, reset_at, nil) == "#ef4444"
+    end
+
+    test "providers without a fixed window fall back to absolute-utilization thresholds" do
+      reset_at = reset_at_after(30)
+      assert quota_color_7d("codex", 0.35, reset_at, nil) == "#22c55e"
+      assert quota_color_7d("codex", 0.95, reset_at, nil) == "#ef4444"
+      assert quota_color_7d("gemini_cli", 0.35, reset_at, nil) == "#22c55e"
+      assert quota_color_7d("gemini_cli", 0.95, reset_at, nil) == "#ef4444"
+    end
+  end
+
+  describe "quota_pace_state_5h/4 and quota_pace_state_7d/4 — the raw pace atom" do
+    test "returns the same atom quota_color_5h derives its color from" do
+      reset_at = reset_at_after(30)
+      assert quota_pace_state_5h("claude", 0.35, reset_at, nil) == :red
+      assert quota_color_5h("claude", 0.35, reset_at, nil) == "#ef4444"
+    end
+
+    test "returns :grey while sampling, :green under-pace, for the 7d window too" do
+      window_min = 7 * 24 * 60
+      sampling_reset_at = reset_at_after(2, window_min)
+      green_reset_at = reset_at_after(round(window_min * 0.98), window_min)
+
+      assert quota_pace_state_7d("claude", 0.5, sampling_reset_at, nil) == :grey
+      assert quota_pace_state_7d("claude", 0.89, green_reset_at, nil) == :green
+    end
+
+    test "in_overage forces :red regardless of pace" do
+      reset_at = reset_at_after(294)
+      assert quota_pace_state_5h("claude", 0.89, reset_at, "in_overage") == :red
+    end
+
+    test "antigravity gets the same pace atom as claude" do
+      reset_at = reset_at_after(30)
+      assert quota_pace_state_5h("antigravity", 0.35, reset_at, nil) == :red
     end
   end
 
@@ -195,6 +271,23 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       reset_at = reset_at_after(2)
       assert quota_pace_label_5h("claude", 0.5, reset_at, nil, :throttle) == nil
     end
+
+    test "antigravity always says \"stalls in Nm\", never overage billing, even under :continue" do
+      reset_at = reset_at_after(30)
+
+      assert quota_pace_label_5h("antigravity", 0.35, reset_at, nil, :continue) =~
+               ~r/^stalls in \d+m$/
+
+      assert quota_pace_label_5h("antigravity", 0.35, reset_at, nil, :throttle) =~
+               ~r/^stalls in \d+m$/
+    end
+
+    test "nil for providers without a fixed window, even at a pace that would be red for claude" do
+      reset_at = reset_at_after(30)
+      assert quota_pace_label_5h("codex", 0.35, reset_at, nil, :continue) == nil
+      assert quota_pace_label_5h("gemini_cli", 0.35, reset_at, nil, :continue) == nil
+      assert quota_pace_label_5h("someday_cli", 0.35, reset_at, nil, :continue) == nil
+    end
   end
 
   describe "quota_pace_ratio_5h/3 — pace ratio exposed for tooltip text" do
@@ -208,8 +301,48 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       assert quota_pace_ratio_5h("claude", 0.5, reset_at) =~ "sampling"
     end
 
-    test "nil for non-Anthropic providers" do
+    test "nil for providers without a fixed window" do
       assert quota_pace_ratio_5h("codex", 0.5, reset_at_after(30)) == nil
+      assert quota_pace_ratio_5h("gemini_cli", 0.5, reset_at_after(30)) == nil
+      assert quota_pace_ratio_5h("someday_cli", 0.5, reset_at_after(30)) == nil
+    end
+
+    test "antigravity reports the same pace ratio as claude" do
+      reset_at = reset_at_after(30)
+      assert quota_pace_ratio_5h("antigravity", 0.35, reset_at) == "3.5x pace"
+    end
+  end
+
+  describe "quota_pace_ratio_7d/3 — pace ratio exposed for tooltip text" do
+    test "nil for providers without a fixed window" do
+      reset_at = reset_at_after(30)
+      assert quota_pace_ratio_7d("codex", 0.5, reset_at) == nil
+      assert quota_pace_ratio_7d("gemini_cli", 0.5, reset_at) == nil
+    end
+
+    test "antigravity reports a pace ratio, same as claude" do
+      window_min = 7 * 24 * 60
+      reset_at = reset_at_after(round(window_min * 0.1), window_min)
+
+      assert quota_pace_ratio_7d("antigravity", 0.35, reset_at) ==
+               quota_pace_ratio_7d("claude", 0.35, reset_at)
+    end
+  end
+
+  describe "quota_pace_label_7d/5 — on_exhaustion-aware label text" do
+    test "nil for providers without a fixed window, even at a pace that would be red for claude" do
+      window_min = 7 * 24 * 60
+      reset_at = reset_at_after(round(window_min * 0.1), window_min)
+      assert quota_pace_label_7d("codex", 0.35, reset_at, nil, :continue) == nil
+      assert quota_pace_label_7d("gemini_cli", 0.35, reset_at, nil, :continue) == nil
+    end
+
+    test "antigravity always says \"stalls in Nm\", never overage billing, even under :continue" do
+      window_min = 7 * 24 * 60
+      reset_at = reset_at_after(round(window_min * 0.1), window_min)
+
+      assert quota_pace_label_7d("antigravity", 0.35, reset_at, nil, :continue) =~
+               ~r/^stalls in /
     end
   end
 
@@ -236,12 +369,20 @@ defmodule ArbiterWeb.QuotaHelpersTest do
                "45% quota used · 33% of window elapsed (2.3d into 7d)"
     end
 
-    test "non-Anthropic providers get no tooltip" do
+    test "providers without a fixed window get no tooltip" do
       window_seconds = 7 * 24 * 60 * 60
       reset_at = DateTime.add(DateTime.utc_now(), round(window_seconds * 2 / 3), :second)
       assert quota_tooltip_7d("codex", 0.45, reset_at) == nil
       assert quota_tooltip_7d("gemini_cli", 0.45, reset_at) == nil
-      assert quota_tooltip_7d("antigravity", 0.45, reset_at) == nil
+      assert quota_tooltip_7d("someday_cli", 0.45, reset_at) == nil
+    end
+
+    test "antigravity gets a tooltip identical to claude's" do
+      window_seconds = 7 * 24 * 60 * 60
+      reset_at = DateTime.add(DateTime.utc_now(), round(window_seconds * 2 / 3), :second)
+
+      assert quota_tooltip_7d("antigravity", 0.45, reset_at) ==
+               "45% quota used · 33% of window elapsed (2.3d into 7d)"
     end
   end
 end

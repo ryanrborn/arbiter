@@ -123,6 +123,13 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     |> to_string()
   end
 
+  defp reset_iso(offset_seconds) do
+    DateTime.utc_now()
+    |> DateTime.truncate(:second)
+    |> DateTime.add(offset_seconds, :second)
+    |> DateTime.to_iso8601()
+  end
+
   test "resolves an explicit ?workspace= by id", %{conn: conn} do
     other = Ash.create!(Workspace, %{name: "by-id"})
     {:ok, _} = Quota.capture(other.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.6"}])
@@ -174,6 +181,69 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
 
     resp = conn |> get("/api/quota") |> json_response(200)
     assert resp["data"]["gemini"]["plan"] == "Free"
+  end
+
+  test "surfaces the antigravity 5h + weekly split from a 4-bucket snapshot (bd-7mro0t)", %{
+    conn: conn,
+    ws: ws
+  } do
+    Ash.create!(Arbiter.Quota.GoogleQuota, %{
+      provider_account_id: account_id!(ws.id, "antigravity"),
+      provider: "antigravity",
+      plan: "Unknown",
+      used_percent: 60.0,
+      snapshot: %{
+        "provider" => "antigravity",
+        "models" => [
+          %{
+            "model_id" => "gemini_models_5h",
+            "remaining_percentage" => 75.0,
+            "reset_at" => reset_iso(3600)
+          },
+          %{
+            "model_id" => "gemini_models_weekly",
+            "remaining_percentage" => 40.0,
+            "reset_at" => reset_iso(7 * 86_400)
+          },
+          %{
+            "model_id" => "claude_and_gpt_models_5h",
+            "remaining_percentage" => 100.0,
+            "reset_at" => reset_iso(3600)
+          },
+          %{
+            "model_id" => "claude_and_gpt_models_weekly",
+            "remaining_percentage" => 100.0,
+            "reset_at" => reset_iso(7 * 86_400)
+          }
+        ]
+      },
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    antigravity = Enum.find(resp["data"]["quotas"], &(&1["provider"] == "antigravity"))
+
+    refute is_nil(antigravity["utilization_7d"])
+    refute is_nil(antigravity["reset_7d_at"])
+    assert antigravity["secondary_label"] == "weekly"
+  end
+
+  test "falls back to the collapsed antigravity shape when the snapshot has no parseable buckets",
+       %{conn: conn, ws: ws} do
+    Ash.create!(Arbiter.Quota.GoogleQuota, %{
+      provider_account_id: account_id!(ws.id, "antigravity"),
+      provider: "antigravity",
+      plan: "Unknown",
+      used_percent: 33.0,
+      snapshot: %{"provider" => "antigravity", "models" => []},
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    antigravity = Enum.find(resp["data"]["quotas"], &(&1["provider"] == "antigravity"))
+
+    assert antigravity["utilization_7d"] == nil
+    assert antigravity["secondary_label"] == nil
   end
 
   test "the quotas list carries every tracked provider", %{conn: conn, ws: ws} do

@@ -1,12 +1,27 @@
 defmodule ArbiterWeb.QuotaHelpers do
   @moduledoc false
 
-  # Fixed window durations for Anthropic's rate-limit windows (bd-d8wo5m).
+  alias Arbiter.Quota.Gate
+
   # `reset_5h_at`/`reset_7d_at` are stored as absolute timestamps with no
-  # window-duration field, so the duration is a constant here (mirrors
-  # `Arbiter.Quota.Overage.@five_hours_seconds`).
-  @five_hours_seconds 5 * 60 * 60
-  @seven_days_seconds 7 * 24 * 60 * 60
+  # window-duration field (bd-d8wo5m), so the pace math needs each window's
+  # length from somewhere. It comes from `Gate.window_seconds/2`, the same
+  # resolver the paced dispatch gate uses (bd-2daof2) — two sources of window
+  # length would let a bar read "on pace" while the gate holds.
+
+  # Providers whose quota windows are fixed-duration, so the deficit-minutes
+  # pace math and the elapsed-time hairline apply (bd-7uwovg). Every other
+  # provider falls back to the absolute-utilization thresholds / no marker:
+  #   - "codex" is excluded because its `reset_5h_at` slot is a *session*
+  #     reset, not a fixed-duration window.
+  #   - "gemini_cli" is excluded because it has no time window at all.
+  #   (both per bd-d8wo5m review round 1)
+  @fixed_window_providers ~w(claude antigravity)
+
+  # Providers with a paid-overage mode (Arbiter.Quota.default_workspace_on_exhaustion/0).
+  # Antigravity has no such billing path, so it always "stalls" rather than
+  # "starts billing overage" under `:continue`.
+  @overage_billing_providers ~w(claude)
 
   # Clamp utilization float to a 0-100 integer percentage.
   # Accepts both floats and integers (SQLite can return integers for
@@ -44,41 +59,51 @@ defmodule ArbiterWeb.QuotaHelpers do
   in `quota_deficit_thresholds/0`.
 
   Falls back to the old absolute-utilization thresholds (>=0.9 red, >=0.7
-  amber) when `provider` isn't `"claude"` or there's no `reset_at` to derive
-  a window from — the fixed 5h/7d window shape is Anthropic-specific (see
-  `quota_elapsed_pct_5h/2`).
+  amber) when `provider` isn't in `@fixed_window_providers` or there's no
+  `reset_at` to derive a window from (see `quota_elapsed_pct_5h/2`).
   """
   def quota_color_5h(provider, utilization, reset_at, overage_status),
-    do:
-      pace_state(provider, utilization, reset_at, overage_status, @five_hours_seconds)
-      |> color_hex()
+    do: quota_pace_state_5h(provider, utilization, reset_at, overage_status) |> color_hex()
 
   @doc "Same as `quota_color_5h/4`, for the 7d window."
   def quota_color_7d(provider, utilization, reset_at, overage_status),
-    do:
-      pace_state(provider, utilization, reset_at, overage_status, @seven_days_seconds)
-      |> color_hex()
+    do: quota_pace_state_7d(provider, utilization, reset_at, overage_status) |> color_hex()
+
+  @doc """
+  The raw `:red | :amber | :green | :grey` pace state that `quota_color_5h/4`
+  derives its color from (bd-gukyy1 needs the atom itself, not just the hex,
+  to decide whether red should override a provider hue).
+  """
+  def quota_pace_state_5h(provider, utilization, reset_at, overage_status),
+    do: pace_state(provider, utilization, reset_at, overage_status, window_seconds("5h"))
+
+  @doc "Same as `quota_pace_state_5h/4`, for the 7d window."
+  def quota_pace_state_7d(provider, utilization, reset_at, overage_status),
+    do: pace_state(provider, utilization, reset_at, overage_status, window_seconds("7d"))
 
   @doc """
   Pace-ratio text for the 5h bar's tooltip, e.g. `"3.5x pace"` — how many
   times faster (or slower) than the burn rate that would land exactly at
-  100% by reset. `nil` when there's no usage/reset data or the provider
-  isn't `"claude"`. Reports `"sampling"` instead of a ratio when the
-  sampling floor isn't met (too little elapsed / usage to project a burn
+  100% by reset. `nil` when there's no usage/reset data or `provider` isn't
+  in `@fixed_window_providers`. Reports `"sampling"` instead of a ratio when
+  the sampling floor isn't met (too little elapsed / usage to project a burn
   rate).
   """
   def quota_pace_ratio_5h(provider, utilization, reset_at),
-    do: pace_ratio_text(provider, utilization, reset_at, @five_hours_seconds)
+    do: pace_ratio_text(provider, utilization, reset_at, window_seconds("5h"))
 
   @doc "Same as `quota_pace_ratio_5h/3`, for the 7d window."
   def quota_pace_ratio_7d(provider, utilization, reset_at),
-    do: pace_ratio_text(provider, utilization, reset_at, @seven_days_seconds)
+    do: pace_ratio_text(provider, utilization, reset_at, window_seconds("7d"))
 
   @doc """
   Warning label for the 5h bar when the current burn pace threatens to
   exhaust the window before reset (bd-l4epbc): `"stalls in Nm"` under
-  `:throttle`, `"starts billing overage in Nm"` under `:continue` — same
-  color, materially different stakes. `nil` when the bar isn't amber/red on
+  `:throttle`, `"starts billing overage in Nm"` under `:continue` for
+  `"claude"` — same color, materially different stakes. Every other
+  fixed-window provider (e.g. `"antigravity"`) always gets "stalls in Nm",
+  since `on_exhaustion`'s paid-overage mode is Anthropic-specific and other
+  providers have no such billing path. `nil` when the bar isn't amber/red on
   pace (including while sampling), so callers should fall back to
   `quota_reset_label/1`.
   """
@@ -89,7 +114,7 @@ defmodule ArbiterWeb.QuotaHelpers do
         utilization,
         reset_at,
         overage_status,
-        @five_hours_seconds,
+        window_seconds("5h"),
         on_exhaustion
       )
 
@@ -101,7 +126,7 @@ defmodule ArbiterWeb.QuotaHelpers do
         utilization,
         reset_at,
         overage_status,
-        @seven_days_seconds,
+        window_seconds("7d"),
         on_exhaustion
       )
 
@@ -132,6 +157,8 @@ defmodule ArbiterWeb.QuotaHelpers do
     end
   end
 
+  defp window_seconds(label), do: Gate.window_seconds(label)
+
   defp color_hex(:red), do: @color_red
   defp color_hex(:amber), do: @color_amber
   defp color_hex(:green), do: @color_green
@@ -139,8 +166,8 @@ defmodule ArbiterWeb.QuotaHelpers do
 
   defp pace_state(_provider, _u, _reset_at, "in_overage", _window_seconds), do: :red
 
-  defp pace_state("claude", u, %DateTime{} = reset_at, _overage_status, window_seconds)
-       when is_number(u) do
+  defp pace_state(provider, u, %DateTime{} = reset_at, _overage_status, window_seconds)
+       when provider in @fixed_window_providers and is_number(u) do
     u |> pace(reset_at, window_seconds) |> pace_state_from_metrics(u)
   end
 
@@ -170,7 +197,8 @@ defmodule ArbiterWeb.QuotaHelpers do
     if u >= thresholds.wall_guard_used and base == :green, do: :amber, else: base
   end
 
-  defp pace_ratio_text("claude", u, %DateTime{} = reset_at, window_seconds) when is_number(u) do
+  defp pace_ratio_text(provider, u, %DateTime{} = reset_at, window_seconds)
+       when provider in @fixed_window_providers and is_number(u) do
     case pace(u, reset_at, window_seconds) do
       %{sampling?: true} -> "sampling — too little elapsed to project pace"
       %{ratio: nil} -> nil
@@ -181,22 +209,19 @@ defmodule ArbiterWeb.QuotaHelpers do
   defp pace_ratio_text(_provider, _utilization, _reset_at, _window_seconds), do: nil
 
   defp pace_label(
-         "claude",
+         provider,
          u,
          %DateTime{} = reset_at,
          overage_status,
          window_seconds,
          on_exhaustion
        )
-       when is_number(u) do
-    case pace_state("claude", u, reset_at, overage_status, window_seconds) do
+       when provider in @fixed_window_providers and is_number(u) do
+    case pace_state(provider, u, reset_at, overage_status, window_seconds) do
       state when state in [:amber, :red] ->
         case pace(u, reset_at, window_seconds) do
           %{minutes_to_exhaust: t} when is_number(t) and t >= 0 ->
-            verb =
-              if on_exhaustion == :continue, do: "starts billing overage in", else: "stalls in"
-
-            "#{verb} #{format_minutes(t)}"
+            "#{pace_label_verb(provider, on_exhaustion)} #{format_minutes(t)}"
 
           _ ->
             nil
@@ -209,6 +234,11 @@ defmodule ArbiterWeb.QuotaHelpers do
 
   defp pace_label(_provider, _u, _reset_at, _overage_status, _window_seconds, _on_exhaustion),
     do: nil
+
+  defp pace_label_verb(provider, :continue) when provider in @overage_billing_providers,
+    do: "starts billing overage in"
+
+  defp pace_label_verb(_provider, _on_exhaustion), do: "stalls in"
 
   # Core deficit-minutes pace math (bd-l4epbc):
   #
@@ -304,19 +334,116 @@ defmodule ArbiterWeb.QuotaHelpers do
     |> Enum.map_join(" ", &String.capitalize/1)
   end
 
+  # Provider identity hues for the quota-bar fill (bd-gukyy1). Only `--arb-*`
+  # custom properties, never raw hex, so the fill follows the dark-mode
+  # redefinitions in app.css. Red (`--arb-fail`) and amber (`--arb-attention`)
+  # are deliberately absent: red is the one pace state allowed to override the
+  # fill, and a provider hue must never read as that state.
+  @provider_hues %{
+    "claude" => "var(--arb-proposal)",
+    "antigravity" => "var(--arb-info)"
+  }
+
+  # An unmapped provider has no identity to show, so it gets a neutral slate
+  # rather than borrowing another provider's hue or a state colour.
+  @fallback_provider_hue "var(--arb-text-faint)"
+
+  @doc """
+  The fill hue for `provider`'s quota bars: a `var(--arb-*)` reference from
+  `@provider_hues`, or `#{@fallback_provider_hue}` for any provider not in the
+  map (including `nil`).
+  """
+  def quota_provider_hue(provider), do: Map.get(@provider_hues, provider, @fallback_provider_hue)
+
+  @doc """
+  The bar windows to render for one quota view, in order: `window` picks the
+  pace math (`"5h"` or `"7d"` duration), `label` is what the bar shows — the
+  view's own `primary_label` / `secondary_label` (Claude "5h"/"7d",
+  Antigravity "5h"/"weekly", collapsed Google "used"). A view with no
+  `secondary_label` (bd-7mro0t's collapsed fallback) yields one window, not a
+  second bar pinned at 0%.
+  """
+  def quota_windows(view) do
+    primary = %{
+      window: "5h",
+      label: Map.get(view, :primary_label) || "5h",
+      utilization: view.utilization_5h,
+      reset_at: view.reset_5h_at
+    }
+
+    case Map.get(view, :secondary_label, "7d") do
+      nil ->
+        [primary]
+
+      label ->
+        [
+          primary,
+          %{
+            window: "7d",
+            label: label,
+            utilization: view.utilization_7d,
+            reset_at: view.reset_7d_at
+          }
+        ]
+    end
+  end
+
+  # Antigravity's two bucket groups, keyed as `CloudCode` persists them
+  # (`"<group>_5h"` / `"<group>_weekly"` model ids) and labelled as the `agy`
+  # CLI names them.
+  @antigravity_groups [
+    {"gemini_models", "Gemini Models"},
+    {"claude_and_gpt_models", "Claude and GPT models"}
+  ]
+
+  @doc """
+  Antigravity's per-group bucket windows, read from the view's `models` list by
+  `model_id` via `Arbiter.Quota.CloudCode.antigravity_bucket/3` — one
+  `%{group: id, label: name, windows: [...]}` per group that has any bucket,
+  each window shaped like `quota_windows/1`'s. `[]` when the snapshot carries
+  no parseable buckets, so the caller falls back to `quota_windows/1`.
+  """
+  def quota_antigravity_groups(view) do
+    models = Map.get(view, :models) || []
+
+    for {group, label} <- @antigravity_groups,
+        windows = antigravity_group_windows(models, group),
+        windows != [] do
+      %{group: group, label: label, windows: windows}
+    end
+  end
+
+  defp antigravity_group_windows(models, group) do
+    for {window, bucket_window, label} <- [{"5h", "5h", "5h"}, {"7d", "weekly", "weekly"}],
+        %{} = reading <- [
+          Arbiter.Quota.CloudCode.antigravity_bucket(models, group, bucket_window)
+        ] do
+      %{
+        window: window,
+        label: label,
+        utilization: reading.utilization,
+        reset_at: reading.reset_at
+      }
+    end
+  end
+
   @doc """
   Fraction of the 5h window elapsed so far, as a 0-100 integer — the
   time-elapsed marker position on the 5h usage bars. `nil` when there's no
   `reset_5h_at` to derive a window from (marker isn't rendered), or when
-  `provider` isn't `"claude"` — the fixed 5h/7d window shape is Anthropic-
-  specific (Codex's `reset_5h_at` slot is a session reset, Gemini CLI's has
-  no time window at all; see bd-d8wo5m review round 1).
+  `provider` isn't in `@fixed_window_providers` (Codex's `reset_5h_at` slot
+  is a session reset, not a fixed-duration window; Gemini CLI has no time
+  window at all; see bd-d8wo5m review round 1).
   """
-  def quota_elapsed_pct_5h("claude", reset_at), do: elapsed_pct(reset_at, @five_hours_seconds)
+  def quota_elapsed_pct_5h(provider, reset_at) when provider in @fixed_window_providers,
+    do: elapsed_pct(reset_at, window_seconds("5h"))
+
   def quota_elapsed_pct_5h(_provider, _reset_at), do: nil
 
   @doc "Same as `quota_elapsed_pct_5h/2`, for the 7d window."
-  def quota_elapsed_pct_7d("claude", reset_at), do: elapsed_pct(reset_at, @seven_days_seconds)
+  def quota_elapsed_pct_7d(provider, reset_at) when provider in @fixed_window_providers,
+    do: elapsed_pct(reset_at, window_seconds("7d"))
+
   def quota_elapsed_pct_7d(_provider, _reset_at), do: nil
 
   @doc """
@@ -324,16 +451,16 @@ defmodule ArbiterWeb.QuotaHelpers do
   usage-fill and time-elapsed numbers in words, e.g.
   `"62% quota used · 50% of window elapsed (2.5h into 5h)"`. `nil` when
   there's no `reset_5h_at` to derive a window from, or when `provider` isn't
-  `"claude"`.
+  in `@fixed_window_providers`.
   """
-  def quota_tooltip_5h("claude", utilization, reset_at),
-    do: tooltip(utilization, reset_at, @five_hours_seconds)
+  def quota_tooltip_5h(provider, utilization, reset_at) when provider in @fixed_window_providers,
+    do: tooltip(utilization, reset_at, window_seconds("5h"))
 
   def quota_tooltip_5h(_provider, _utilization, _reset_at), do: nil
 
   @doc "Same as `quota_tooltip_5h/3`, for the 7d window."
-  def quota_tooltip_7d("claude", utilization, reset_at),
-    do: tooltip(utilization, reset_at, @seven_days_seconds)
+  def quota_tooltip_7d(provider, utilization, reset_at) when provider in @fixed_window_providers,
+    do: tooltip(utilization, reset_at, window_seconds("7d"))
 
   def quota_tooltip_7d(_provider, _utilization, _reset_at), do: nil
 

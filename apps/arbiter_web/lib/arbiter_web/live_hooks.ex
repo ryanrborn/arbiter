@@ -35,10 +35,14 @@ defmodule ArbiterWeb.LiveHooks do
     dispatch is fixed, remove the filter.
   - Gemini CLI: deprecated and has no reconnect path; reports "project id not
     available; reconnect" (bd-5r6cdy).
-  - Antigravity: quota is only checkable while app is actively open and recently
-    refreshed; token stales ~1h after app closes (bd-5r6cdy).
 
   Once these are fixed, remove them from @hidden_providers and this comment.
+
+  Antigravity was hidden here too (bd-5r6cdy: quota was only checkable while the
+  app was open, and its token staled ~1h after it closed). The `agy` CLI
+  `/usage` probe (`Arbiter.Quota.CloudCode`) superseded that stored-token path,
+  so it is shown again (bd-gukyy1); a reading `agy` couldn't refresh carries a
+  `message` and renders muted as stale rather than as a current figure.
 
   ## `:loopback`
 
@@ -76,7 +80,7 @@ defmodule ArbiterWeb.LiveHooks do
   require Logger
 
   # Providers hidden from the UI pending fix; see module docstring for context.
-  @hidden_providers ["codex", "gemini_cli", "antigravity"]
+  @hidden_providers ["codex", "gemini_cli"]
 
   @coordinator_ref Message.coordinator_ref()
 

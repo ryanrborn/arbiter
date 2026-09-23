@@ -128,6 +128,12 @@ defmodule Arbiter.Quota.CloudCode do
   # carried alongside for callers that prefer a plain 0–100 figure.
   @total 1000
 
+  # Antigravity's `/usage` groups slug (see `agy_bucket_id/2`) to these
+  # prefixes: "Gemini Models" -> "gemini_models", "Claude and GPT models" ->
+  # "claude_and_gpt_models", each combined with a `_5h` / `_weekly` window
+  # suffix into the model id persisted in `GoogleQuota.snapshot["models"]`.
+  @antigravity_gemini_group "gemini_models"
+
   # loadCodeAssist metadata (9router CLIENT_METADATA): ideType ANTIGRAVITY=9,
   # pluginType GEMINI=2. Platform is a coarse enum; LINUX_AMD64=3 is a safe
   # default for the server host and is not load-bearing for quota reads.
@@ -506,25 +512,55 @@ defmodule Arbiter.Quota.CloudCode do
   topbar / `/usage` page render. Gemini has no time windows, so the
   representative used-fraction fills the primary ("5h") slot and the secondary
   ("7d") slot is left empty. Antigravity does have explicit `5h`/`weekly`
-  windows per group, but `representative/1` collapses them to a single worst
-  bucket, so this "5h" slot may actually carry a weekly reset time; the UI
-  doesn't mislabel this today because the 5h-specific helpers are gated to
-  the `"claude"` provider and `secondary_label` stays `nil` here.
+  windows, per group — this reads the `"gemini_models"` group's buckets
+  (bd-7mro0t) via `antigravity_bucket/3` (the same reader
+  `Gate.Snapshot.bucket_reading/3` uses for dispatch gating) into the
+  primary/secondary slots, falling back to `representative/1`'s single
+  collapsed figure when the stored snapshot carries no parseable buckets
+  (stale schema, a `preserve_last_good/3` write, etc).
   """
   @spec view(GoogleQuota.t()) :: map()
   def view(%GoogleQuota{} = row) do
+    models = models_from(row.snapshot)
+
     Arbiter.Quota.blank_view(row.provider)
     |> Map.merge(%{
       provider_account_id: row.provider_account_id,
-      utilization_5h: fraction(row.used_percent),
-      reset_5h_at: row.reset_at,
       captured_at: row.captured_at,
       plan: row.plan,
       message: row.message,
-      models: models_from(row.snapshot),
+      models: models
+    })
+    |> Map.merge(antigravity_view_windows(row, models))
+  end
+
+  defp antigravity_view_windows(%GoogleQuota{provider: "antigravity"} = row, models) do
+    with %{} = primary <- antigravity_bucket(models, @antigravity_gemini_group, "5h"),
+         %{} = secondary <- antigravity_bucket(models, @antigravity_gemini_group, "weekly") do
+      %{
+        utilization_5h: primary.utilization,
+        reset_5h_at: primary.reset_at,
+        utilization_7d: secondary.utilization,
+        reset_7d_at: secondary.reset_at,
+        primary_label: "5h",
+        secondary_label: "weekly"
+      }
+    else
+      _ -> collapsed_view_windows(row)
+    end
+  end
+
+  defp antigravity_view_windows(%GoogleQuota{} = row, _models), do: collapsed_view_windows(row)
+
+  defp collapsed_view_windows(%GoogleQuota{} = row) do
+    %{
+      utilization_5h: fraction(row.used_percent),
+      reset_5h_at: row.reset_at,
+      utilization_7d: nil,
+      reset_7d_at: nil,
       primary_label: "used",
       secondary_label: nil
-    })
+    }
   end
 
   defp fraction(nil), do: nil
@@ -532,6 +568,51 @@ defmodule Arbiter.Quota.CloudCode do
 
   defp models_from(%{"models" => models}) when is_list(models), do: models
   defp models_from(_), do: []
+
+  # ---- shared Antigravity bucket reader (bd-7mro0t) -----------------------
+
+  @doc """
+  Resolve one `{group, window}` Antigravity bucket — e.g. `"gemini_models"`,
+  `"5h"` — from a `models` list as stored in `GoogleQuota.snapshot["models"]`
+  (matching `model_id == "\#{group}_\#{window}"`). Returns
+  `%{utilization: float | nil, reset_at: DateTime.t() | nil}`, or `nil` when
+  no bucket for that pair exists.
+
+  The single implementation of Antigravity bucket-reading semantics — shared
+  by `view/1` (UI display, this module) and `Gate.Snapshot.bucket_reading/3`
+  (dispatch gating), which also falls back to `antigravity_bucket_reading/1`
+  directly for its worst-of-both-groups fallback when no group is known.
+  """
+  @spec antigravity_bucket([map()], String.t(), String.t()) ::
+          %{utilization: float() | nil, reset_at: DateTime.t() | nil} | nil
+  def antigravity_bucket(models, group, window) when is_list(models) do
+    models
+    |> Enum.filter(&(Map.get(&1, "model_id") == "#{group}_#{window}"))
+    |> antigravity_bucket_reading()
+  end
+
+  @doc """
+  The worst (most-used) reading among a list of Antigravity bucket maps
+  (string-keyed `"remaining_percentage"` / `"reset_at"`), or `nil` for an
+  empty list.
+  """
+  @spec antigravity_bucket_reading([map()]) ::
+          %{utilization: float() | nil, reset_at: DateTime.t() | nil} | nil
+  def antigravity_bucket_reading([]), do: nil
+
+  def antigravity_bucket_reading(buckets) when is_list(buckets) do
+    worst = Enum.max_by(buckets, &antigravity_used_percent/1)
+
+    %{
+      utilization: fraction(antigravity_used_percent(worst)),
+      reset_at: parse_datetime(worst["reset_at"])
+    }
+  end
+
+  defp antigravity_used_percent(%{"remaining_percentage" => rp}) when is_number(rp),
+    do: 100.0 - rp
+
+  defp antigravity_used_percent(_), do: 100.0
 
   # ---- normalization -----------------------------------------------------
 

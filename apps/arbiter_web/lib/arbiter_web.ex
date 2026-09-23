@@ -101,7 +101,7 @@ defmodule ArbiterWeb do
       import ArbiterWeb.CoreComponents.Markdown
       # Design-handoff core primitives (Button, Icon, KeyHint, Toggle, Panel).
       import ArbiterWeb.CoreComponents.Core
-      # Design-handoff navigation primitives (TopNav, FilterTabs,
+      # Design-handoff navigation primitives (SidebarNav, FilterTabs,
       # SegmentedControl, Pager, SeeAllLink, BackLink). filter_tabs/1,
       # pager/1, see_all_link/1, and back_link/1 are excluded: ListComponents
       # already defines all four with a different attr contract (route-fn

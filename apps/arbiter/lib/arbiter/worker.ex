@@ -2568,6 +2568,13 @@ defmodule Arbiter.Worker do
           # `arb`) reports that concretely instead of the generic
           # `:blank_notes_at_completion`.
           |> maybe_put(:denied_command, Map.get(session, :denied_command))
+          # bd-1eb6fc: task ids from an agy `manage_task status` check whose
+          # last-known result was RUNNING — read by `on_claude_done/1` to note
+          # (not block) an `arb done` that fired while one was outstanding.
+          |> Map.put(
+            :async_tasks_running,
+            Arbiter.Worker.ClaudeSession.async_tasks_running(session)
+          )
 
         new_state = %State{state | meta: meta}
 
@@ -2978,6 +2985,39 @@ defmodule Arbiter.Worker do
   defp mark_done_seen(%State{meta: meta} = state),
     do: %State{state | meta: Map.put(meta || %{}, :done_seen, true)}
 
+  # bd-1eb6fc: `arb done` fired while the worker's own last `manage_task
+  # status` check (synced into meta[:async_tasks_running] by
+  # ClaudeSession.track_async_tasks/2) still read a background task as
+  # RUNNING — e.g. a `mix test`/`mix precommit` agy backgrounded and never
+  # confirmed finished before answering. Deliberately does NOT block or fail
+  # the completion: Arbiter cannot tell a task the worker still depends on
+  # from one it correctly decided to abandon (a scratch `sleep` command, a
+  # speculative build it gave up on), and refusing completion on a false
+  # positive would strand a real, finished task. Record it on the run instead
+  # so it's visible without being silently treated as evidence the task
+  # actually finished.
+  defp note_tasks_running_at_done(%State{meta: meta, task_id: task_id} = state) do
+    case Map.get(meta || %{}, :async_tasks_running, []) do
+      [] ->
+        state
+
+      running ->
+        Logger.warning(
+          "Worker signalled `arb done` for task=#{task_id} while #{length(running)} " <>
+            "background task(s) were still RUNNING per its own last manage_task status " <>
+            "check: #{Enum.join(running, ", ")}"
+        )
+
+        %State{state | meta: Map.put(meta, :failure_summary, tasks_running_summary(running))}
+    end
+  end
+
+  defp tasks_running_summary(running) do
+    ("arb done signalled while background task(s) were still RUNNING per the worker's " <>
+       "own last status check: " <> Enum.join(running, ", "))
+    |> truncate_failure_summary()
+  end
+
   # Handle the worker's "arb done" marker. Before bd-7qq81g this closed the task
   # directly, bypassing the merger entirely — branches never reached the target
   # line. Completion now routes through the configured merger:
@@ -2996,14 +3036,17 @@ defmodule Arbiter.Worker do
   #     parseable verdict, fail the worker so the task stays :in_progress for a
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
   #     workers with no branch complete directly as before.
-  defp on_claude_done(%State{meta: meta} = state) do
+  defp on_claude_done(%State{} = state) do
+    %State{meta: meta} = state
+
     if task_type?(meta) and not review_only?(meta) do
       case notes_gate(state) do
-        :ok -> complete_now(state, :claude_done)
+        :ok -> complete_now(note_tasks_running_at_done(state), :claude_done)
         {:gate, :blank} -> handle_notes_gate(state)
       end
     else
-      on_claude_done_reviewable(state, meta)
+      state = note_tasks_running_at_done(state)
+      on_claude_done_reviewable(state, state.meta)
     end
   end
 
