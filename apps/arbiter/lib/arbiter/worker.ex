@@ -3037,15 +3037,16 @@ defmodule Arbiter.Worker do
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
   #     workers with no branch complete directly as before.
   defp on_claude_done(%State{} = state) do
-    %State{meta: meta} = state = note_tasks_running_at_done(state)
+    %State{meta: meta} = state
 
     if task_type?(meta) and not review_only?(meta) do
       case notes_gate(state) do
-        :ok -> complete_now(state, :claude_done)
+        :ok -> complete_now(note_tasks_running_at_done(state), :claude_done)
         {:gate, :blank} -> handle_notes_gate(state)
       end
     else
-      on_claude_done_reviewable(state, meta)
+      state = note_tasks_running_at_done(state)
+      on_claude_done_reviewable(state, state.meta)
     end
   end
 

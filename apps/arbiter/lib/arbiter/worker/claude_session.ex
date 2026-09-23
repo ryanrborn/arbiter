@@ -903,11 +903,12 @@ defmodule Arbiter.Worker.ClaudeSession do
   # backgrounded-and-never-polled command.
   defp track_async_tasks(%{provider: "gemini"} = session, %{
          "event" => "step_update",
-         "step_update" => %{
-           "step_type" => "tool",
-           "tool_name" => "run_command",
-           "state" => "RUNNING"
-         } = step
+         "step_update" =>
+           %{
+             "step_type" => "tool",
+             "tool_name" => "run_command",
+             "state" => "RUNNING"
+           } = step
        }) do
     output = get_in(step, ["tool_info", "output"])
 
