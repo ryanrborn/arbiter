@@ -1,6 +1,7 @@
 defmodule ArbiterWeb.QuotaHelpers do
   @moduledoc false
 
+  alias Arbiter.Quota
   alias Arbiter.Quota.Gate
 
   # `reset_5h_at`/`reset_7d_at` are stored as absolute timestamps with no
@@ -9,9 +10,10 @@ defmodule ArbiterWeb.QuotaHelpers do
   # resolver the paced dispatch gate uses (bd-2daof2) — two sources of window
   # length would let a bar read "on pace" while the gate holds.
 
-  # Providers whose quota windows are fixed-duration, so the deficit-minutes
-  # pace math and the elapsed-time hairline apply (bd-7uwovg). Every other
-  # provider falls back to the absolute-utilization thresholds / no marker:
+  # Providers whose quota windows are fixed-duration, so the burn-rate
+  # projection (pace ratio, "stalls in Nm") and the elapsed-time hairline
+  # apply (bd-7uwovg). Every other provider shows neither — its colour still
+  # comes from the gate, which falls back to its flat ceiling:
   #   - "codex" is excluded because its `reset_5h_at` slot is a *session*
   #     reset, not a fixed-duration window.
   #   - "gemini_cli" is excluded because it has no time window at all.
@@ -30,43 +32,90 @@ defmodule ArbiterWeb.QuotaHelpers do
   def quota_pct(u) when is_number(u), do: min(100, round(u * 100))
 
   @doc """
-  Quota-bar color thresholds (bd-l4epbc), overridable via
-  `config :arbiter_web, :quota_bar_colors` without a redeploy.
+  The pace of one quota bar (bd-clzkvp), read from the dispatch gate's own
+  thresholds so a bar's colour says what the scheduler will do.
+
+  `bar` carries `provider`, `window` (`"5h"` / `"7d"`, which picks the
+  primary or long window's settings), `label` (the snapshot's window label —
+  `"5h"`, `"7d"`, `"session"`, `"weekly"`, `"used"` — which
+  `Arbiter.Quota.Gate.window_seconds/2` turns into a length), `utilization`,
+  `reset_at` and `overage_status`. `gate_policy` is the view's
+  `Arbiter.Quota.gate_policy/2`; `nil` resolves the install default.
+
+  The colour follows `Arbiter.Quota.Gate.pace/6` under
+  `Gate.paced_policy/1` — the paced thresholds, whether or not the account
+  has opted into them — mapped `:ok` → `:green` (the provider hue),
+  `:approaching` → `:amber`, `:holding` → `:red`, `:sampling` → `:grey`. The
+  gate's *real* policy is evaluated too, and when it is holding this window
+  the bar is red whatever pacing says. `holding` then tells the two apart:
+
+    * `:enforcing` — the gate is holding dispatch on this window now;
+    * `:not_enforcing` — it would hold at the paced thresholds, but the
+      account is not paced (or the workspace is `:continue`), so it isn't;
+    * `nil` — not holding.
+
+  Paid overage (`overage_status == "in_overage"`) is always `:red`.
   """
-  def quota_deficit_thresholds do
-    cfg = Application.get_env(:arbiter_web, :quota_bar_colors, [])
+  def quota_pace(bar, gate_policy \\ nil, now \\ DateTime.utc_now()) do
+    %{policy: {account, _workspace} = policy, enforcing?: enforcing?} =
+      gate_policy || Quota.gate_policy(nil, nil)
+
+    kind = if bar.window == "5h", do: :primary, else: :long
+    label = Map.get(bar, :label) || bar.window
+    opts = [now: now]
+
+    paced =
+      Gate.pace(Gate.paced_policy(policy), kind, label, bar.utilization, bar.reset_at, opts)
+
+    actual = Gate.pace(policy, kind, label, bar.utilization, bar.reset_at, opts)
+    holding_now? = enforcing? and actual.verdict == :holding
+    pace = if holding_now?, do: actual, else: paced
 
     %{
-      red_minutes: Keyword.get(cfg, :deficit_red_minutes, 60),
-      amber_minutes: Keyword.get(cfg, :deficit_amber_minutes, 20),
-      sampling_floor_minutes: Keyword.get(cfg, :sampling_floor_elapsed_minutes, 15),
-      sampling_floor_used: Keyword.get(cfg, :sampling_floor_used, 0.05),
-      wall_guard_used: Keyword.get(cfg, :wall_guard_used, 0.95)
+      verdict: pace.verdict,
+      ceiling: pace.ceiling,
+      mode: pace.mode,
+      elapsed: pace.elapsed,
+      holding: holding(pace.verdict, holding_now?),
+      window_seconds: Gate.window_seconds(label, account),
+      state: pace_state(pace.verdict, Map.get(bar, :overage_status))
     }
   end
 
+  defp holding(:holding, true), do: :enforcing
+  defp holding(:holding, false), do: :not_enforcing
+  defp holding(_verdict, _holding_now?), do: nil
+
+  defp pace_state(_verdict, "in_overage"), do: :red
+  defp pace_state(:holding, _overage_status), do: :red
+  defp pace_state(:approaching, _overage_status), do: :amber
+  defp pace_state(:sampling, _overage_status), do: :grey
+  defp pace_state(:ok, _overage_status), do: :green
+
   @doc """
-  Progress-bar color for the 5h bar (bd-l4epbc). Colors on projected
-  *deficit minutes* — how long the window would run dry before reset at the
-  current burn rate — not on absolute utilization: a bare `used/elapsed`
-  ratio is alarming early in the window and meaningless late in it, but
-  minutes-until-dry degrades correctly at both ends. See module thresholds
-  in `quota_deficit_thresholds/0`.
+  Tooltip phrase for where a bar sits against the gate's ceiling, from
+  `quota_pace/3`, or `nil` when it is comfortably under it:
 
-  Falls back to the old absolute-utilization thresholds (>=0.9 red, >=0.7
-  amber) when `provider` isn't in `@fixed_window_providers` or there's no
-  `reset_at` to derive a window from (see `quota_elapsed_pct_5h/2`).
+      "holding dispatch — 40% used ≥ paced ceiling 35%"
+      "would hold — 40% used ≥ paced ceiling 35% (gate not enforcing)"
+      "approaching paced ceiling 35%"
   """
-  def quota_color_5h(provider, utilization, reset_at, overage_status),
-    do:
-      quota_pace_state_5h(provider, utilization, reset_at, overage_status)
-      |> pace_color(provider)
+  def quota_hold_text(%{holding: :enforcing} = pace, utilization),
+    do: "holding dispatch — #{used_vs_ceiling(pace, utilization)}"
 
-  @doc "Same as `quota_color_5h/4`, for the 7d window."
-  def quota_color_7d(provider, utilization, reset_at, overage_status),
-    do:
-      quota_pace_state_7d(provider, utilization, reset_at, overage_status)
-      |> pace_color(provider)
+  def quota_hold_text(%{holding: :not_enforcing} = pace, utilization),
+    do: "would hold — #{used_vs_ceiling(pace, utilization)} (gate not enforcing)"
+
+  def quota_hold_text(%{verdict: :approaching} = pace, _utilization),
+    do: "approaching #{ceiling_text(pace)}"
+
+  def quota_hold_text(_pace, _utilization), do: nil
+
+  defp used_vs_ceiling(pace, utilization),
+    do: "#{quota_pct(utilization)}% used ≥ #{ceiling_text(pace)}"
+
+  defp ceiling_text(%{mode: :paced, ceiling: c}), do: "paced ceiling #{round(c * 100)}%"
+  defp ceiling_text(%{ceiling: c}), do: "ceiling #{round(c * 100)}%"
 
   @doc """
   Text colour token for a quota bar's note/countdown, derived only from the
@@ -81,65 +130,50 @@ defmodule ArbiterWeb.QuotaHelpers do
   def quota_note_color(_state, false), do: nil
 
   @doc """
-  The raw `:red | :amber | :green | :grey` pace state that `quota_color_5h/4`
-  derives its color from (bd-gukyy1 needs the atom itself, not just the hex,
-  to decide whether red should override a provider hue).
+  Pace-ratio text for a bar's tooltip, e.g. `"3.5x pace"` — how many times
+  faster (or slower) than the burn rate that would land exactly at 100% by
+  reset. `"sampling — too little elapsed to project pace"` when `pace` (from
+  `quota_pace/3`) is `:sampling`. `nil` when there's no usage/elapsed data or
+  `bar.provider` isn't in `@fixed_window_providers`.
   """
-  def quota_pace_state_5h(provider, utilization, reset_at, overage_status),
-    do: pace_state(provider, utilization, reset_at, overage_status, window_seconds("5h"))
+  def quota_pace_ratio(%{provider: provider, utilization: u}, pace)
+      when provider in @fixed_window_providers and is_number(u) do
+    cond do
+      pace.verdict == :sampling -> "sampling — too little elapsed to project pace"
+      is_float(pace.elapsed) and pace.elapsed > 0 -> "#{format_ratio(u / pace.elapsed)}x pace"
+      true -> nil
+    end
+  end
 
-  @doc "Same as `quota_pace_state_5h/4`, for the 7d window."
-  def quota_pace_state_7d(provider, utilization, reset_at, overage_status),
-    do: pace_state(provider, utilization, reset_at, overage_status, window_seconds("7d"))
+  def quota_pace_ratio(_bar, _pace), do: nil
 
   @doc """
-  Pace-ratio text for the 5h bar's tooltip, e.g. `"3.5x pace"` — how many
-  times faster (or slower) than the burn rate that would land exactly at
-  100% by reset. `nil` when there's no usage/reset data or `provider` isn't
-  in `@fixed_window_providers`. Reports `"sampling"` instead of a ratio when
-  the sampling floor isn't met (too little elapsed / usage to project a burn
-  rate).
-  """
-  def quota_pace_ratio_5h(provider, utilization, reset_at),
-    do: pace_ratio_text(provider, utilization, reset_at, window_seconds("5h"))
-
-  @doc "Same as `quota_pace_ratio_5h/3`, for the 7d window."
-  def quota_pace_ratio_7d(provider, utilization, reset_at),
-    do: pace_ratio_text(provider, utilization, reset_at, window_seconds("7d"))
-
-  @doc """
-  Warning label for the 5h bar when the current burn pace threatens to
-  exhaust the window before reset (bd-l4epbc): `"stalls in Nm"` under
-  `:throttle`, `"starts billing overage in Nm"` under `:continue` for
-  `"claude"` — same color, materially different stakes. Every other
-  fixed-window provider (e.g. `"antigravity"`) always gets "stalls in Nm",
-  since `on_exhaustion`'s paid-overage mode is Anthropic-specific and other
-  providers have no such billing path. `nil` when the bar isn't amber/red on
-  pace (including while sampling), so callers should fall back to
+  Warning label for an amber/red bar (bd-l4epbc): how long until the window
+  runs dry at the current burn rate — `"stalls in Nm"` under `:throttle`,
+  `"starts billing overage in Nm"` under `:continue` for `"claude"`. Every
+  other fixed-window provider (e.g. `"antigravity"`) always gets "stalls in
+  Nm", since `on_exhaustion`'s paid-overage mode is Anthropic-specific. `nil`
+  when `pace.state` (from `quota_pace/3`) is green/grey, or for a provider
+  outside `@fixed_window_providers`, so callers fall back to
   `quota_reset_label/1`.
-  """
-  def quota_pace_label_5h(provider, utilization, reset_at, overage_status, on_exhaustion),
-    do:
-      pace_label(
-        provider,
-        utilization,
-        reset_at,
-        overage_status,
-        window_seconds("5h"),
-        on_exhaustion
-      )
 
-  @doc "Same as `quota_pace_label_5h/5`, for the 7d window."
-  def quota_pace_label_7d(provider, utilization, reset_at, overage_status, on_exhaustion),
-    do:
-      pace_label(
-        provider,
-        utilization,
-        reset_at,
-        overage_status,
-        window_seconds("7d"),
+  Only the text is a projection; whether it shows is the gate's call.
+  """
+  def quota_pace_label(
+        %{provider: provider, utilization: u},
+        %{state: state, elapsed: elapsed, window_seconds: seconds},
         on_exhaustion
       )
+      when provider in @fixed_window_providers and state in [:amber, :red] and is_number(u) and
+             u > 0 and is_float(elapsed) and elapsed > 0 and is_integer(seconds) do
+    # used / elapsed_min is the burn rate; what's left, at that rate.
+    elapsed_min = elapsed * seconds / 60
+    minutes_to_exhaust = max(1 - u, 0) * elapsed_min / u
+
+    "#{pace_label_verb(provider, on_exhaustion)} #{format_minutes(minutes_to_exhaust)}"
+  end
+
+  def quota_pace_label(_bar, _pace, _on_exhaustion), do: nil
 
   @doc """
   De-emphasis CSS class for a bar row that isn't the binding window per
@@ -190,122 +224,10 @@ defmodule ArbiterWeb.QuotaHelpers do
 
   defp window_seconds(label), do: Gate.window_seconds(label)
 
-  defp pace_color(:red, _provider), do: "var(--arb-fail)"
-  defp pace_color(:amber, _provider), do: "var(--arb-attention)"
-  defp pace_color(:grey, _provider), do: "var(--arb-done)"
-  defp pace_color(:green, provider), do: quota_provider_hue(provider)
-
-  defp pace_state(_provider, _u, _reset_at, "in_overage", _window_seconds), do: :red
-
-  defp pace_state(provider, u, %DateTime{} = reset_at, _overage_status, window_seconds)
-       when provider in @fixed_window_providers and is_number(u) do
-    u |> pace(reset_at, window_seconds) |> pace_state_from_metrics(u)
-  end
-
-  defp pace_state(_provider, nil, _reset_at, _overage_status, _window_seconds), do: :green
-
-  defp pace_state(_provider, u, _reset_at, _overage_status, _window_seconds) when is_number(u) do
-    cond do
-      u >= 0.9 -> :red
-      u >= 0.7 -> :amber
-      true -> :green
-    end
-  end
-
-  defp pace_state_from_metrics(%{sampling?: true}, _u), do: :grey
-
-  defp pace_state_from_metrics(%{deficit: deficit}, u) do
-    thresholds = quota_deficit_thresholds()
-
-    base =
-      cond do
-        deficit == nil -> :green
-        deficit > thresholds.red_minutes -> :red
-        deficit > thresholds.amber_minutes -> :amber
-        true -> :green
-      end
-
-    if u >= thresholds.wall_guard_used and base == :green, do: :amber, else: base
-  end
-
-  defp pace_ratio_text(provider, u, %DateTime{} = reset_at, window_seconds)
-       when provider in @fixed_window_providers and is_number(u) do
-    case pace(u, reset_at, window_seconds) do
-      %{sampling?: true} -> "sampling — too little elapsed to project pace"
-      %{ratio: nil} -> nil
-      %{ratio: ratio} -> "#{format_ratio(ratio)}x pace"
-    end
-  end
-
-  defp pace_ratio_text(_provider, _utilization, _reset_at, _window_seconds), do: nil
-
-  defp pace_label(
-         provider,
-         u,
-         %DateTime{} = reset_at,
-         overage_status,
-         window_seconds,
-         on_exhaustion
-       )
-       when provider in @fixed_window_providers and is_number(u) do
-    case pace_state(provider, u, reset_at, overage_status, window_seconds) do
-      state when state in [:amber, :red] ->
-        case pace(u, reset_at, window_seconds) do
-          %{minutes_to_exhaust: t} when is_number(t) and t >= 0 ->
-            "#{pace_label_verb(provider, on_exhaustion)} #{format_minutes(t)}"
-
-          _ ->
-            nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp pace_label(_provider, _u, _reset_at, _overage_status, _window_seconds, _on_exhaustion),
-    do: nil
-
   defp pace_label_verb(provider, :continue) when provider in @overage_billing_providers,
     do: "starts billing overage in"
 
   defp pace_label_verb(_provider, _on_exhaustion), do: "stalls in"
-
-  # Core deficit-minutes pace math (bd-l4epbc):
-  #
-  #   elapsed_min = now - window_start
-  #   burn        = used / elapsed_min
-  #   t_exhaust   = (1 - used) / burn        # minutes until the window hits zero
-  #   t_reset     = reset_at - now
-  #   deficit     = t_reset - t_exhaust      # minutes spent dry before reset
-  #
-  # Below the sampling floor (too little elapsed time or usage to project a
-  # burn rate), returns `sampling?: true` instead of guessing — a single
-  # early burst implies a nonsense burn rate.
-  defp pace(u, %DateTime{} = reset_at, window_seconds) when is_number(u) do
-    thresholds = quota_deficit_thresholds()
-    window_start = DateTime.add(reset_at, -window_seconds, :second)
-    now = DateTime.utc_now()
-    elapsed_min = DateTime.diff(now, window_start) / 60
-    window_min = window_seconds / 60
-
-    if elapsed_min < thresholds.sampling_floor_minutes or u < thresholds.sampling_floor_used do
-      %{sampling?: true, deficit: nil, ratio: nil, minutes_to_exhaust: nil}
-    else
-      burn_per_min = u / elapsed_min
-      ratio = u / (elapsed_min / window_min)
-      minutes_to_exhaust = if burn_per_min > 0, do: (1 - u) / burn_per_min, else: nil
-      t_reset_min = DateTime.diff(reset_at, now) / 60
-
-      deficit =
-        case minutes_to_exhaust do
-          nil -> nil
-          t -> t_reset_min - t
-        end
-
-      %{sampling?: false, deficit: deficit, ratio: ratio, minutes_to_exhaust: minutes_to_exhaust}
-    end
-  end
 
   defp format_ratio(ratio) do
     ratio

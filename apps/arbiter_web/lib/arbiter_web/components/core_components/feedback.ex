@@ -19,12 +19,10 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       quota_pct: 1,
       quota_elapsed_pct_5h: 2,
       quota_elapsed_pct_7d: 2,
-      quota_pace_state_5h: 4,
-      quota_pace_state_7d: 4,
-      quota_pace_label_5h: 5,
-      quota_pace_label_7d: 5,
-      quota_pace_ratio_5h: 3,
-      quota_pace_ratio_7d: 3,
+      quota_pace: 2,
+      quota_pace_label: 3,
+      quota_pace_ratio: 2,
+      quota_hold_text: 2,
       quota_tooltip_5h: 3,
       quota_tooltip_7d: 3,
       quota_provider_hue: 1,
@@ -197,9 +195,9 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   @doc """
   The rate-limit widget from the product chrome: a fill, an elapsed hairline,
   a percentage, a note. Pass the raw quota fields — `QuotaHelpers` does the
-  math (`quota_pct/1`, `quota_elapsed_pct_5h/2`, `quota_pace_state_5h/4`,
-  `quota_pace_label_5h/5`, `quota_reset_label/1`, `quota_binding_class/2`, and
-  their `_7d` twins); only the markup lives here.
+  math (`quota_pct/1`, `quota_elapsed_pct_5h/2`, `quota_pace/3`,
+  `quota_pace_label/3`, `quota_reset_label/1`, `quota_binding_class/2`, and
+  the `_7d` twins); only the markup lives here.
 
   ## Examples
 
@@ -214,6 +212,15 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   label, coloured from `quota_note_color/2`, or the word "sampling"). The
   `title` repeats utilization, elapsed window, pace and pace label in words so
   no state depends on colour alone.
+
+  **State (bd-clzkvp).** The state is the dispatch gate's own pace verdict
+  for the window (`quota_pace/3`): red is `:holding`, amber `:approaching`,
+  grey `:sampling`, green `:ok` — read at the paced thresholds even for an
+  account that has not opted into pacing. Pass the quota view's
+  `gate_policy` so the account's floors and the workspace's gate mode apply.
+  A red bar says in its `title` whether the gate is holding dispatch or only
+  *would* hold ("(gate not enforcing)"), and `data-quota-hold` carries the
+  same as `enforcing` / `not_enforcing`.
 
   `window` only picks the pace math (`"5h"` or `"7d"` duration); `label` is
   the text the bar shows, supplied by the caller from the quota view's
@@ -241,6 +248,11 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   attr :overage_status, :any, default: nil
   attr :on_exhaustion, :any, default: nil
   attr :representative_claim, :any, default: nil
+
+  attr :gate_policy, :map,
+    default: nil,
+    doc: "the quota view's `gate_policy` (`Arbiter.Quota.gate_policy/2`); nil = install default"
+
   attr :stale_message, :string, default: nil
   attr :width, :integer, default: 96
 
@@ -258,8 +270,9 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   def quota_bar(assigns) do
     pct = quota_pct(assigns.utilization)
     elapsed_pct = quota_elapsed_pct(assigns)
-    state = quota_pace_state(assigns)
-    pace_label = quota_pace_label(assigns)
+    pace = quota_pace(assigns, assigns.gate_policy)
+    state = pace.state
+    pace_label = quota_pace_label(assigns, pace, assigns.on_exhaustion)
     stale? = assigns.stale_message != nil
     binding_window = if assigns.window == "5h", do: "five_hour", else: "seven_day"
 
@@ -273,7 +286,8 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
         note: quota_note(assigns, state, pace_label, stale?),
         note_color: quota_note_color(state, stale?),
         glyph?: pace_label != nil and not stale?,
-        title: quota_title(assigns, pct, pace_label, binding_window),
+        hold: pace.holding,
+        title: quota_title(assigns, pct, pace, pace_label, binding_window),
         binding_class: quota_binding_class(assigns.representative_claim, binding_window)
       )
 
@@ -282,6 +296,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       id={@id}
       data-quota-bar={@provider || ""}
       data-quota-state={@state}
+      data-quota-hold={@hold}
       data-quota-stale={@stale?}
       title={@title}
       class={["flex flex-col gap-[3px]", @binding_class, @stale? && "opacity-60", @class]}
@@ -352,38 +367,6 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   defp quota_elapsed_pct(%{window: "7d", provider: provider, reset_at: reset_at}),
     do: quota_elapsed_pct_7d(provider, reset_at)
 
-  defp quota_pace_state(%{window: "5h"} = a),
-    do: quota_pace_state_5h(a.provider, a.utilization, a.reset_at, a.overage_status)
-
-  defp quota_pace_state(%{window: "7d"} = a),
-    do: quota_pace_state_7d(a.provider, a.utilization, a.reset_at, a.overage_status)
-
-  defp quota_pace_label(%{window: "5h"} = a),
-    do:
-      quota_pace_label_5h(
-        a.provider,
-        a.utilization,
-        a.reset_at,
-        a.overage_status,
-        a.on_exhaustion
-      )
-
-  defp quota_pace_label(%{window: "7d"} = a),
-    do:
-      quota_pace_label_7d(
-        a.provider,
-        a.utilization,
-        a.reset_at,
-        a.overage_status,
-        a.on_exhaustion
-      )
-
-  defp quota_pace_ratio(%{window: "5h"} = a),
-    do: quota_pace_ratio_5h(a.provider, a.utilization, a.reset_at)
-
-  defp quota_pace_ratio(%{window: "7d"} = a),
-    do: quota_pace_ratio_7d(a.provider, a.utilization, a.reset_at)
-
   defp quota_tooltip(%{window: "5h"} = a),
     do: quota_tooltip_5h(a.provider, a.utilization, a.reset_at)
 
@@ -401,12 +384,13 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   defp quota_note(_assigns, :grey, nil, false), do: "sampling"
   defp quota_note(assigns, _state, nil, false), do: quota_reset_label(assigns.reset_at)
 
-  defp quota_title(assigns, pct, pace_label, binding_window) do
+  defp quota_title(assigns, pct, pace, pace_label, binding_window) do
     quota_bar_title([
       assigns.stale_message && "stale reading: #{assigns.stale_message}",
       quota_binding_title(assigns.representative_claim, binding_window),
       quota_tooltip(assigns) || "#{pct}% quota used",
-      quota_pace_ratio(assigns),
+      quota_pace_ratio(assigns, pace),
+      quota_hold_text(pace, assigns.utilization),
       pace_label
     ])
   end

@@ -276,6 +276,46 @@ defmodule Arbiter.QuotaTest do
       refute id == quota_account_id!(other.id)
     end
 
+    # bd-clzkvp: the quota bars colour by the gate's own thresholds, so each
+    # view carries the `{account, workspace}` policy the gate would resolve.
+    test "each view carries the gate policy for its account and the workspace" do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+          provider: :claude,
+          slug: "paced",
+          quota_config: %{"threshold_mode" => "paced"}
+        })
+
+      ws = workspace!()
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      assert [%{gate_policy: %{policy: {view_account, view_ws}, enforcing?: true}}] =
+               Quota.list_latest_for_workspace(ws.id)
+
+      assert view_account.id == account.id
+      assert view_account.quota_config == %{"threshold_mode" => "paced"}
+      assert view_ws.id == ws.id
+    end
+
+    test "a :continue workspace's gate policy is not enforcing" do
+      ws =
+        Ash.create!(Workspace, %{
+          name: "cont",
+          config: %{"quota" => %{"on_exhaustion" => "continue"}}
+        })
+
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      assert [%{gate_policy: %{enforcing?: false}}] = Quota.list_latest_for_workspace(ws.id)
+    end
+
     # P5 acceptance 4: three workspaces on one account report one row, not
     # three (`docs/provider-account-design.md` §6).
     test "three workspaces on one account collapse to a single reported row" do
