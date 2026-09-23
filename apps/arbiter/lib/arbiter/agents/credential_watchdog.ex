@@ -146,6 +146,9 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   never touches (#1875), so it raises/restates a mailbox escalation here
   without ever closing the dispatch gate on its own. Safe to call from any
   process; returns `false` if the Watchdog is not running.
+
+  Exposed for tests and diagnostics (asserting episode state without reaching
+  into the mailbox); no production caller depends on it.
   """
   @spec escalated?(module(), GenServer.server()) :: boolean()
   def escalated?(adapter, server \\ __MODULE__) when is_atom(adapter) do
@@ -303,6 +306,15 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   @impl true
   def handle_cast({:mark_expired, adapter, reason, source}, state) do
     if already_expired?(state, adapter, source) do
+      # Still outstanding — don't touch `state.adapters`/`state.gate`, but do
+      # restate the existing escalation so a growing counter (e.g. CloudProbe's
+      # "N consecutive 401s") is visible on the one row instead of frozen at
+      # whatever N it happened to be when the episode opened (bd-6jjgk0 finding 1
+      # round 2). `credential_expired/5` already restates in place when a row is
+      # outstanding (see `restate_credential_escalation/2`), so this reuses that
+      # path rather than inserting anything new.
+      gate_closed? = Map.get(state.gate, adapter, :ok) != :ok
+      escalate_all(adapter, reason, source, gate_closed?)
       {:noreply, state}
     else
       {:noreply, record_expiry(state, adapter, reason, source)}

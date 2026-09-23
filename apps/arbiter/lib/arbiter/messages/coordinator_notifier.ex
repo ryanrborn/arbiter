@@ -351,8 +351,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       outstanding ->
         Message.clear_ids([outstanding.id])
 
-        short_name = adapter_short_name(adapter)
-        restored_subject = "#{short_name} credentials restored"
+        restored_subject = credential_restored_subject(adapter, source)
 
         body =
           "The proactive credential probe for #{inspect(adapter)} (#{source_description(source)}) " <>
@@ -1666,6 +1665,16 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp credential_expired_subject(adapter, _source),
     do: "#{adapter_short_name(adapter)} credentials expired — proactive detection"
+
+  # Mirrors `credential_expired_subject/2` — a `:usage_poll` recovery must not
+  # read as a full recovery when a `:periodic_probe`/`:worker_report` episode
+  # (and the dispatch gate it closed) is still outstanding for the same
+  # adapter (bd-6jjgk0 finding 3).
+  defp credential_restored_subject(adapter, :usage_poll),
+    do: "#{adapter_short_name(adapter)} credentials restored — usage-poll signal"
+
+  defp credential_restored_subject(adapter, _source),
+    do: "#{adapter_short_name(adapter)} credentials restored"
 
   defp source_description(:periodic_probe), do: "the Watchdog's periodic CLI probe"
   defp source_description(:usage_poll), do: "the /api/oauth/usage-family poll"

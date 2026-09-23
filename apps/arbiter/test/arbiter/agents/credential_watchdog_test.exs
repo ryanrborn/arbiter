@@ -123,6 +123,33 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       assert count_after == count_before
     end
 
+    test "restates the outstanding escalation's body when mark_expired/4 repeats with a growing counter (bd-6jjgk0 r4f1)" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-restate-ws", prefix: "cwre"})
+      pid = start_watchdog()
+
+      first_reason = %{auth_expired_reason() | summary: "2 consecutive 401s from the usage poll"}
+      second_reason = %{auth_expired_reason() | summary: "7 consecutive 401s from the usage poll"}
+
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, first_reason, pid, :usage_poll)
+      :sys.get_state(pid)
+
+      :ok =
+        CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, second_reason, pid, :usage_poll)
+
+      :sys.get_state(pid)
+
+      # Still exactly one row (no duplicate insert)...
+      assert [escalation] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "credentials expired"))
+
+      # ...but its body now shows the latest count, not the one from the first
+      # cast that opened the episode (finding 1, round 2: `already_expired?`
+      # used to drop every repeat cast silently, freezing the body forever).
+      assert escalation.body =~ "7 consecutive 401s"
+      refute escalation.body =~ "2 consecutive 401s"
+    end
+
     test "escalates to the coordinator across all active workspaces" do
       {:ok, ws1} = Ash.create(Workspace, %{name: "cw-ws1", prefix: "cw1"})
       {:ok, ws2} = Ash.create(Workspace, %{name: "cw-ws2", prefix: "cw2"})
@@ -270,9 +297,14 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, pid)
       refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
-      assert [_restored] =
+      assert [restored] =
                Message.inbox("admiral", workspace_id: ws.id)
                |> Enum.filter(&(&1.subject =~ "restored"))
+
+      # bd-6jjgk0 finding 3: the subject itself must name the usage-poll
+      # signal, not read as a full "Claude credentials restored" — a
+      # gate-source episode for the same adapter could still be outstanding.
+      assert restored.subject =~ "usage-poll signal"
     end
 
     test "a mismatched mark_recovered/3 source clears the dispatch gate but leaves the escalation open" do
