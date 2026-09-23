@@ -1063,21 +1063,31 @@ defmodule Arbiter.Quota do
   ("claude" / "gemini" / "openai"); `cost_for/2` maps quota codes onto it.
   Returns `%{}` on any error so cost is a best-effort add-on, never a failure.
 
-  "How much of this plan did I spend?" is an account question (§8), so this
-  is the sum over every workspace metered under the account. `usage_events`
-  does not carry `provider_account_id` until P9, so the account total is
-  reached through the workspace link rather than read off the ledger row —
-  `workspace_spend/1` is the per-workspace term §6's breakdown line prints.
+  "How much of this plan did I spend?" is an account question (§8), read
+  straight off `usage_events.provider_account_id` (P9) rather than summed
+  through the workspace link — `workspace_spend/1` sums *only* rows that
+  carry a `workspace_id`, so a probe/pre-flight row (`workspace_id: nil`, but
+  always a `provider_account_id` — §8's seam with bd-adyhvn) would silently
+  drop out of the total, reintroducing the exact under-reporting bias
+  bd-adyhvn measured. `workspace_spend/1` is still the per-workspace term
+  §6's breakdown line prints, since that one *is* workspace-scoped by
+  definition.
   """
   @spec provider_spend(String.t() | nil) :: %{optional(String.t()) => float()}
-  def provider_spend(account_id) do
-    account_id
-    |> Resolver.workspace_ids()
-    |> Enum.map(&workspace_spend/1)
-    |> Enum.reduce(%{}, fn spend, acc ->
-      Map.merge(acc, spend, fn _provider, a, b -> a + b end)
-    end)
+  def provider_spend(nil), do: %{}
+
+  def provider_spend(account_id) when is_binary(account_id) do
+    since = DateTime.utc_now() |> DateTime.add(-@cost_window_days * 86_400, :second)
+
+    case Arbiter.Usage.summarize(by: :provider, since: since, provider_account_id: account_id) do
+      {:ok, rows} -> Map.new(rows, &{&1.group, &1.total_cost_usd})
+      _ -> %{}
+    end
+  rescue
+    _ -> %{}
   end
+
+  def provider_spend(_), do: %{}
 
   @doc """
   Build the `t:spend_cache/0` memo for `accounts`: one `workspace_spend/1`

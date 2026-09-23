@@ -478,4 +478,57 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert out =~ "task=-"
     end
   end
+
+  describe "account dimension (P10, bd-icwk2k)" do
+    test "--by provider_account renders the account rollup" do
+      stub_get("/api/usage", %{
+        "by" => "provider_account",
+        "data" => [
+          %{"group" => "acct-1", "rows" => 12, "total_cost_usd" => 9.5}
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "provider_account"]) end)
+
+      assert code == 0
+      assert out =~ "Usage rollup by provider_account"
+      assert out =~ "acct-1"
+      assert out =~ "9.50"
+    end
+
+    test "--account is forwarded to the summarize API as a query param" do
+      stub_routes([
+        {{"get", "/api/usage"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["account"] == "personal-max"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"by" => "day", "data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+    end
+
+    test "events --account is forwarded to the API as a query param" do
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["account"] == "claude:personal-max"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Usage.run(["events", "--account", "claude:personal-max"])
+        end)
+
+      assert code == 0
+    end
+  end
 end

@@ -309,4 +309,50 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
       assert resp["data"]["claude"]["provider_account_id"] == account_id!(ws.id)
     end
   end
+
+  describe "P10: ?account= goes straight to the account (§8, bd-icwk2k)" do
+    test "?account=<slug> reports the account total + workspace breakdown with no workspace lookup",
+         %{conn: conn, ws: ws} do
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "personal-max"})
+      other = Ash.create!(Workspace, %{name: "emricare"})
+
+      for w <- [ws, other] do
+        Ash.create!(WorkspaceProviderAccount, %{
+          workspace_id: w.id,
+          provider: :claude,
+          provider_account_id: account.id
+        })
+      end
+
+      {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+      resp = conn |> get("/api/quota?account=personal-max") |> json_response(200)
+
+      assert resp["data"]["account"]["slug"] == "personal-max"
+      assert Enum.map(resp["data"]["workspaces"], & &1["name"]) == ["default", "emricare"]
+      assert resp["data"]["claude"]["provider_account_id"] == account.id
+      assert resp["data"]["workspace_id"] == nil
+    end
+
+    test "?account=<provider:slug> resolves an unambiguous account ref", %{conn: conn, ws: ws} do
+      account = Ash.create!(ProviderAccount, %{provider: :codex, slug: "work"})
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :codex,
+        provider_account_id: account.id
+      })
+
+      resp = conn |> get("/api/quota?account=codex:work") |> json_response(200)
+
+      assert resp["data"]["account"]["slug"] == "work"
+      assert resp["data"]["account"]["provider"] == "codex"
+      assert resp["data"]["claude"] == nil
+    end
+
+    test "an unknown account ref is a 404, not a crash", %{conn: conn} do
+      resp = conn |> get("/api/quota?account=no-such-account") |> json_response(404)
+      assert resp["error"]["type"] == "not_found"
+    end
+  end
 end

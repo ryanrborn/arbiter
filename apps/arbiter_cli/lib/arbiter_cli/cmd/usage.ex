@@ -10,12 +10,13 @@ defmodule ArbiterCli.Cmd.Usage do
 
   Usage:
 
-      arb usage [--by day|task|epic|workspace|repo|model|step|provider|source|session]
+      arb usage [--by day|task|epic|workspace|provider_account|repo|model|step|provider|source|session]
                 [--since YYYY-MM-DD | <iso8601>]
                 [--workspace <id>]
+                [--account <id|provider:slug|slug>]
                 [--limit N]
                 [--json]
-      arb usage events [--task <task-id>] [--workspace <id>] [--step work|review|impl]
+      arb usage events [--task <task-id>] [--workspace <id>] [--account <ref>] [--step work|review|impl]
                        [--source task|probe|preflight|coordinator_session|terminal_session|maintenance]
                        [--since ...] [--limit N] [--json]
       arb usage --session <id> [--since ...] [--limit N] [--json]
@@ -26,6 +27,19 @@ defmodule ArbiterCli.Cmd.Usage do
   Defaults to `--by day`. `--since 7d` and `--since 24h` are accepted as
   shortcuts. `events` lists raw rows newest-first (default limit 50) and is
   the drill-down path when a rollup catches your eye.
+
+  ## `--by provider_account` / `--account` (P10, `docs/provider-account-design.md` §8)
+
+  "How much of *this plan* have I spent?" is an account question, not a
+  workspace one — three workspaces can share one Claude plan. `--by
+  provider_account` rolls spend up by the provider account (`arb account
+  list` for slugs); `--account <ref>` (a UUID, a `provider:slug` ref, or a
+  bare unambiguous slug) narrows any rollup or `events` to one account.
+
+  This includes quota probe / pre-flight rows, which carry no workspace but
+  always an account — dropping them would under-report the plan's actual
+  spend (the bias bd-adyhvn measured: unmetered probes consume window
+  percentage without contributing ledger dollars).
 
   ## Not all spend belongs to a task (bd-adyhvn)
 
@@ -118,9 +132,10 @@ defmodule ArbiterCli.Cmd.Usage do
           by: :string,
           since: :string,
           workspace: :string,
+          account: :string,
           limit: :integer
         ],
-        aliases: [b: :by, s: :since, w: :workspace, l: :limit]
+        aliases: [b: :by, s: :since, w: :workspace, a: :account, l: :limit]
       )
 
     by = Keyword.get(opts, :by, @default_by)
@@ -129,6 +144,7 @@ defmodule ArbiterCli.Cmd.Usage do
       [by: by]
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:account, Keyword.get(opts, :account))
       |> maybe_put(:limit, Keyword.get(opts, :limit))
 
     case Client.get("/api/usage", params) do
@@ -146,6 +162,7 @@ defmodule ArbiterCli.Cmd.Usage do
         switches: [
           task: :string,
           workspace: :string,
+          account: :string,
           step: :string,
           source: :string,
           session: :string,
@@ -158,6 +175,7 @@ defmodule ArbiterCli.Cmd.Usage do
       []
       |> maybe_put(:task_id, Keyword.get(opts, :task))
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:account, Keyword.get(opts, :account))
       |> maybe_put(:step, Keyword.get(opts, :step))
       |> maybe_put(:source, Keyword.get(opts, :source))
       |> maybe_put(:session_id, Keyword.get(opts, :session))

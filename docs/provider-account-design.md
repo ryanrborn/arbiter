@@ -784,7 +784,7 @@ Each phase is sized to be one child ticket.
 | **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` | P5 | **P1** | D3 |
 | **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in (**shipped**, bd-1k6pgv) | P7 | P2 | D3 |
 | **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill | bd-adyhvn, P2 | P2 | D2 |
-| **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces | P9, P5 | P3 | D2 |
+| **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces (**shipped**, bd-icwk2k) | P9, P5 | P3 | D2 |
 | **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |
 

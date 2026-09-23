@@ -576,4 +576,55 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "auth expired"
     end
   end
+
+  describe "--account (P10, bd-icwk2k)" do
+    test "goes straight to the account, with the total + workspace breakdown" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 4.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 6.0}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "Anthropic quota (account personal-max"
+      assert out =~ "2 workspaces: default, emricare"
+      refute out =~ "via workspace"
+    end
+
+    test "--account is forwarded to the API as a query param, taking priority over --workspace" do
+      stub_routes([
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["account"] == "personal-max"
+           refute Map.has_key?(conn.query_params, "workspace")
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"data" => %{"workspace_id" => nil, "claude" => nil}})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Quota.run(["--account", "personal-max", "--workspace", "emricare"])
+        end)
+
+      assert code == 0
+    end
+  end
 end

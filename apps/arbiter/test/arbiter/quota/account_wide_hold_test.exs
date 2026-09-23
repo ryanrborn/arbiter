@@ -65,12 +65,19 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
     })
   end
 
-  defp usage_event!(ws_id, cost, provider \\ "claude") do
+  # P10 (bd-icwk2k): `usage_events.provider_account_id` is a real column
+  # since P9, populated at write time by `Arbiter.Worker`'s own
+  # `AccountResolver.account_id(workspace_id, provider)` call — this mirrors
+  # that so these fixtures land exactly where the production write path
+  # would put them, rather than relying on `Usage.summarize/1` to infer it
+  # from the workspace join at read time (the pre-P9 approximation).
+  defp usage_event!(ws_id, cost, provider \\ "claude", account_id \\ nil) do
     Ash.create!(Event, %{
       workspace_id: ws_id,
       task_id: "bd-p7-#{System.unique_integer([:positive])}",
       step: :work,
       provider: provider,
+      provider_account_id: account_id,
       cost_usd: cost,
       occurred_at: DateTime.utc_now()
     })
@@ -243,8 +250,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(a, account)
       link!(b, account)
 
-      usage_event!(a.id, 1.25)
-      usage_event!(b.id, 2.75)
+      usage_event!(a.id, 1.25, "claude", account.id)
+      usage_event!(b.id, 2.75, "claude", account.id)
 
       assert_in_delta Overage.windowed_spend(account, nil), 4.0, 0.0001
       assert_in_delta Overage.windowed_spend(account.id, nil), 4.0, 0.0001
@@ -258,8 +265,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(mine, account)
       link!(theirs, other)
 
-      usage_event!(mine.id, 1.0)
-      usage_event!(theirs.id, 9.0)
+      usage_event!(mine.id, 1.0, "claude", account.id)
+      usage_event!(theirs.id, 9.0, "claude", other.id)
 
       assert_in_delta Overage.windowed_spend(account, nil), 1.0, 0.0001
     end
@@ -276,8 +283,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(ws, claude)
       link_codex!(ws, codex)
 
-      usage_event!(ws.id, 100.0, "claude")
-      usage_event!(ws.id, 7.0, "openai")
+      usage_event!(ws.id, 100.0, "claude", claude.id)
+      usage_event!(ws.id, 7.0, "openai", codex.id)
 
       assert_in_delta Overage.windowed_spend(codex, nil), 7.0, 0.0001
       assert_in_delta Overage.windowed_spend(claude, nil), 100.0, 0.0001
@@ -297,8 +304,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(a, account)
       link!(b, account)
 
-      usage_event!(a.id, 1.0)
-      usage_event!(b.id, 2.0)
+      usage_event!(a.id, 1.0, "claude", account.id)
+      usage_event!(b.id, 2.0, "claude", account.id)
 
       assert {:ok, rows} = Usage.summarize(by: :provider_account)
       row = Enum.find(rows, &(&1.group == account.id))
@@ -314,8 +321,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(mine, account)
       link!(theirs, other)
 
-      usage_event!(mine.id, 1.0)
-      usage_event!(theirs.id, 9.0)
+      usage_event!(mine.id, 1.0, "claude", account.id)
+      usage_event!(theirs.id, 9.0, "claude", other.id)
 
       assert {:ok, rows} = Usage.summarize(by: :provider_account, provider_account_id: account.id)
       assert [%{group: group, rows: 1}] = rows
@@ -329,8 +336,8 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       link!(ws, claude)
       link_codex!(ws, codex)
 
-      usage_event!(ws.id, 100.0, "claude")
-      usage_event!(ws.id, 7.0, "openai")
+      usage_event!(ws.id, 100.0, "claude", claude.id)
+      usage_event!(ws.id, 7.0, "openai", codex.id)
 
       assert {:ok, [%{group: group, rows: 1, total_cost_usd: cost}]} =
                Usage.summarize(by: :provider_account, provider_account_id: codex.id)
@@ -339,22 +346,20 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       assert_in_delta cost, 7.0, 0.0001
     end
 
-    test "a row with no recorded provider falls back to the workspace's default provider" do
-      # `usage_events.provider` is nullable, and pre-P7 `windowed_spend/2`
-      # counted every row the workspace had regardless of provider. Dropping
-      # such a row from the account rollup would silently under-report
-      # overage and suppress the alert, so it is attributed to the account
-      # the workspace actually dispatches on — the same provider the gate
-      # reads the snapshot for.
+    test "a probe row with no workspace_id still lands in its account's group (§8)" do
+      # §8's seam with bd-adyhvn: a probe/pre-flight row has no workspace but
+      # always has an account, because it is issued *as* a credential.
+      # `usage_events.provider_account_id` (P9) is what makes this possible —
+      # there is no workspace to join through at all.
       account = account!()
-      ws = workspace!()
-      link!(ws, account)
 
       Ash.create!(Event, %{
-        workspace_id: ws.id,
-        task_id: "bd-p7-noprov",
-        step: :work,
-        provider: nil,
+        workspace_id: nil,
+        task_id: nil,
+        source: :preflight,
+        step: :other,
+        provider: "claude",
+        provider_account_id: account.id,
         cost_usd: 3.0,
         occurred_at: DateTime.utc_now()
       })
@@ -366,7 +371,7 @@ defmodule Arbiter.Quota.AccountWideHoldTest do
       assert_in_delta Overage.windowed_spend(account, nil), 3.0, 0.0001
     end
 
-    test "a row whose workspace has no account lands in the (none) sentinel" do
+    test "a row with no provider_account_id lands in the (none) sentinel" do
       usage_event!(workspace!().id, 1.0)
 
       assert {:ok, rows} = Usage.summarize(by: :provider_account)
