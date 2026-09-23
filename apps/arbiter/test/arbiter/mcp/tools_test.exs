@@ -3390,6 +3390,50 @@ defmodule Arbiter.MCP.ToolsTest do
       assert entry.difficulty_at_dispatch == 3
     end
 
+    # bd-b7e33c post-merge finding (2026-09-22): only `provider` was surfaced
+    # here; `session_id` and `resumed_from_run_id` were silently dropped, the
+    # same gap the REST `/api/workers/history` endpoint had — which is what
+    # made the 04:26Z production verification misread a captured agy
+    # conversation id as NULL. Surface both so resume continuity is directly
+    # observable through this tool too.
+    test "surfaces session_id and resumed_from_run_id", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "session fields target", workspace_id: ctx.ws.id})
+
+      {:ok, prior} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          provider: "gemini",
+          session_id: "25df47b0-054e-434e-84c1-6876fd9f77de",
+          started_at: DateTime.add(DateTime.utc_now(), -600, :second)
+        })
+
+      {:ok, resumed} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          provider: "gemini",
+          session_id: "89a2b784-6bd5-46e6-a971-2178ca58cdcd",
+          resumed_from_run_id: prior.id,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, %{runs: [resumed_entry, prior_entry]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert prior_entry.id == prior.id
+      assert prior_entry.session_id == "25df47b0-054e-434e-84c1-6876fd9f77de"
+      assert prior_entry.resumed_from_run_id == nil
+
+      assert resumed_entry.id == resumed.id
+      assert resumed_entry.session_id == "89a2b784-6bd5-46e6-a971-2178ca58cdcd"
+      assert resumed_entry.resumed_from_run_id == prior.id
+    end
+
     test "honors a bounded limit", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "many runs", workspace_id: ctx.ws.id})
 
