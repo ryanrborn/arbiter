@@ -1009,13 +1009,41 @@ defmodule Arbiter.Quota do
   `list_latest/2` for a caller that holds a workspace: resolves every
   provider account the workspace is linked to, then reads by account. The
   shape the dashboard and `GET /api/quota` still speak.
+
+  Each view also carries `gate_policy` — `gate_policy/2` for its account and
+  this workspace — so the quota bars can colour by the gate's own thresholds
+  (bd-clzkvp). It holds structs, so `serialize_view/1` leaves it out.
   """
   @spec list_latest_for_workspace(String.t() | nil, keyword()) :: [map()]
   def list_latest_for_workspace(workspace_id, opts \\ []) do
-    workspace_id
-    |> account_ids()
-    |> list_latest(opts)
-    |> Enum.map(&Map.put(&1, :workspace_id, workspace_id))
+    case workspace_id |> account_ids() |> list_latest(opts) do
+      [] ->
+        []
+
+      views ->
+        workspace = workspace_id && safe_workspace(workspace_id)
+
+        Enum.map(views, fn view ->
+          view
+          |> Map.put(:workspace_id, workspace_id)
+          |> Map.put(:gate_policy, gate_policy(view.provider_account_id, workspace))
+        end)
+    end
+  end
+
+  @doc """
+  The policy `Arbiter.Quota.Gate` resolves for dispatch on `account_id` from
+  `workspace` (bd-clzkvp): `policy` is the `{account, workspace}` pair the
+  gate's thresholds compose over, and `enforcing?` is `false` when the
+  workspace's gate is `:continue` — it dispatches past the cap, so no
+  threshold ever holds it.
+  """
+  @spec gate_policy(String.t() | nil, Workspace.t() | nil) :: %{
+          policy: {ProviderAccount.t() | nil, Workspace.t() | nil},
+          enforcing?: boolean()
+        }
+  def gate_policy(account_id, workspace) do
+    %{policy: {Resolver.get(account_id), workspace}, enforcing?: not continue_mode?(workspace)}
   end
 
   defp normalize_account_ids(accounts) when is_map(accounts) and not is_struct(accounts),

@@ -871,6 +871,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                     overage_status={hd(@quotas).overage_status}
                     representative_claim={hd(@quotas).representative_claim}
                     stale_message={hd(@quotas).message}
+                    gate_policy={Map.get(hd(@quotas), :gate_policy)}
                     width={140}
                   />
                 </div>

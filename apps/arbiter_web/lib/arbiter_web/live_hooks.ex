@@ -269,11 +269,21 @@ defmodule ArbiterWeb.LiveHooks do
   # Live broadcast views don't carry `cost_usd` (it's a read-path add-on from the
   # usage ledger, not part of the per-provider fetch), so a naive replace would
   # blank the figure on every tick. Keep the last known cost when the incoming
-  # update omits it (bd-ajh7bd).
-  defp preserve_cost(existing, %{cost_usd: nil} = incoming),
-    do: %{incoming | cost_usd: Map.get(existing, :cost_usd)}
+  # update omits it (bd-ajh7bd). Same for `gate_policy` (bd-clzkvp), which
+  # `list_latest_for_workspace/2` adds: without it the bars would fall back to
+  # the install-default thresholds on the first tick.
+  defp preserve_cost(existing, incoming) do
+    incoming
+    |> keep_existing(existing, :cost_usd)
+    |> keep_existing(existing, :gate_policy)
+  end
 
-  defp preserve_cost(_existing, incoming), do: incoming
+  defp keep_existing(incoming, existing, key) do
+    case Map.get(incoming, key) do
+      nil -> Map.put(incoming, key, Map.get(existing, key))
+      _ -> incoming
+    end
+  end
 
   # Filter out providers marked as hidden from the UI.
   defp filter_hidden_providers(quotas) do
