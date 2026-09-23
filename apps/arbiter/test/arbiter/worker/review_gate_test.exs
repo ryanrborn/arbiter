@@ -59,6 +59,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @reject_twice Path.expand("../../fixtures/review_reject_twice.sh", __DIR__)
   @revise_slow_then_fast Path.expand("../../fixtures/revise_slow_then_fast.sh", __DIR__)
+  @reject_slow_then_approve_fast Path.expand(
+                                    "../../fixtures/review_reject_slow_then_approve_fast.sh",
+                                    __DIR__
+                                  )
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
@@ -3642,6 +3646,80 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl2")),
              "expected a distinct implementer run row for round 2 — it must not have been " <>
                "killed by round 1's stale timer"
+
+      require Ash.Query
+
+      rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        |> Ash.read!()
+
+      # No round anywhere recorded a timed-out verdict — the only source of
+      # `:timed_out` in this gate's vocabulary is the very bug under test.
+      refute Enum.any?(rounds, &(&1.verdict == :timed_out))
+    end
+
+    # bd-28u8v4: the reviewer-side sibling of the collision above. Round 1's
+    # reviewer (`attempt` 1) sleeps close to the per-pass timeout before
+    # REQUEST_CHANGES; the implementer commits immediately; round 2's
+    # reviewer is launched as `attempt` 1 again (bd-bgeo6i resets `attempt`
+    # per round) and is still running when round 1's reviewer timer fires.
+    # With the bug, that stale timer's `{:timeout, attempt}` matches round
+    # 2's reviewer and either retries or escalates it as timed-out; fixed,
+    # the gate ignores it because the timer is tagged with round 1, not
+    # round 2, and round 2's reviewer is left to approve normally.
+    test "a round-1 reviewer's timer does not time out a round-2 reviewer at the same attempt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            # pass 1 (round-1 reviewer) sleeps 1.9s and rejects; every later
+            # pass (round-2 reviewer) sleeps 1.0s and approves — both well
+            # under the 2.5s per-pass timeout on their own, but round 1's
+            # stale timer (armed at reviewer-1-start + 2.5s) lands mid-flight
+            # through round 2's reviewer run.
+            review_command: [@reject_slow_then_approve_fast, "19", "10"],
+            revise_command: [@revise_commit],
+            review_timeout_ms: 2_500
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Round 1 rejects (slowly) → implementer revises (fast) → round 2
+      # approves (surviving the stale round-1 reviewer timer) → merge. No
+      # timeout escalation or spurious timeout-retry run anywhere in between.
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+      assert merge_commit_count(repo) == 1
+      refute Worker.state(pid).meta[:failure_reason]
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#r2")),
+             "expected a distinct round-2 reviewer run row — it must not have been " <>
+               "killed by round 1's stale timer"
+
+      refute Enum.any?(runs, &String.contains?(&1.task_id, "#r2#t")),
+             "round 1's stale timer must not have triggered a spurious round-2 " <>
+               "reviewer timeout-retry run"
 
       require Ash.Query
 
