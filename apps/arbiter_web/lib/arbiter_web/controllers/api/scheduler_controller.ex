@@ -6,19 +6,24 @@ defmodule ArbiterWeb.Api.SchedulerController do
 
     * `POST /api/scheduler/pause` — pause the autopilot
     * `POST /api/scheduler/resume` — resume the autopilot
-    * `GET /api/scheduler/status` — get current pause state
+    * `GET /api/scheduler/status` — get the drain state (`Arbiter.Board.Drain`)
+
+  Every route answers with the same body — `Arbiter.Board.Drain.to_json/1`,
+  shared with the `scheduler_status` MCP tool so the two cannot disagree.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Board.Autopilot
+  alias Arbiter.Board.Drain
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @doc """
   Pause the board autopilot.
 
-  Returns `{"paused": true, "changed_at": iso8601, "changed_by": "api"}` on success.
+  Returns the `status/2` body on success — `"paused": true`, `"changed_by":
+  "api"`, and the drain state (a pause usually lands in `draining`).
   """
   def pause(conn, _params) do
     case Autopilot.pause(Autopilot, "api") do
@@ -39,7 +44,8 @@ defmodule ArbiterWeb.Api.SchedulerController do
   @doc """
   Resume the board autopilot.
 
-  Returns `{"paused": false, "changed_at": iso8601, "changed_by": "api"}` on success.
+  Returns the `status/2` body on success — `"paused": false`, `"changed_by":
+  "api"`, and the drain state.
   """
   def resume(conn, _params) do
     case Autopilot.resume(Autopilot, "api") do
@@ -58,9 +64,11 @@ defmodule ArbiterWeb.Api.SchedulerController do
   end
 
   @doc """
-  Get the current pause state of the board autopilot.
+  Get the scheduler's drain state.
 
-  Returns `{"paused": true|false, "changed_at": iso8601|null, "changed_by": string|null}`.
+  Returns `{"state": "running"|"draining"|"quiescent", "safe_to_restart":
+  bool, "in_flight": [...], "parked": [...], "paused": bool, "changed_at":
+  iso8601|null, "changed_by": string|null, "checked_at": iso8601}`.
   """
   def status(conn, _params) do
     json(conn, status_json())
@@ -72,13 +80,5 @@ defmodule ArbiterWeb.Api.SchedulerController do
       {:error, {:invalid_request, "status check failed: process error #{inspect(reason)}"}}
   end
 
-  defp status_json do
-    status = Autopilot.status()
-
-    %{
-      paused: status.paused?,
-      changed_at: status.changed_at,
-      changed_by: status.changed_by
-    }
-  end
+  defp status_json, do: Drain.status() |> Drain.to_json()
 end

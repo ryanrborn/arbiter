@@ -333,6 +333,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     gate: :has_open_engagement?
 
   alias Arbiter.Agents
+  alias Arbiter.Board.Drain
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Mergers.NetDiff
@@ -1464,7 +1465,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       review_record_id: engagement.id
     }
 
-    case Arbiter.Workflow.run(CodeReview, state) do
+    case run_tracked(:patrol_rereview, engagement, CodeReview, state) do
       {:ok, final} ->
         posted = Map.get(final, :findings) || []
         # bd-3948ey: CodeReview's :verdict step may have skipped posting (this
@@ -1522,7 +1523,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       review_record_id: engagement.id
     }
 
-    case Arbiter.Workflow.run(CodeReview, state) do
+    case run_tracked(:patrol_rereview, engagement, CodeReview, state) do
       {:ok, final} ->
         findings = Map.get(final, :findings) || []
         proposed = Map.get(final, :proposed_comments) || []
@@ -1617,6 +1618,15 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp flag_new_commits(engagement, head, _workspace) do
     advance_cursor(engagement, head)
     {:flagged, engagement.id}
+  end
+
+  # bd-9fgg04: a re-review or reply runs the agent CLI inside this patrol
+  # process, not under the worker supervisor — track it so a drain report
+  # counts it for as long as it runs.
+  defp run_tracked(kind, %Issue{} = engagement, workflow, state) do
+    Drain.track(kind, %{task_id: engagement.id, detail: engagement.source_pr}, fn ->
+      Arbiter.Workflow.run(workflow, state)
+    end)
   end
 
   # A check runner that runs the real CodeReview checks and then drops any finding
@@ -2135,7 +2145,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       adapter_opts: %{}
     }
 
-    case Arbiter.Workflow.run(ReviewReply, state) do
+    case run_tracked(:review_reply, engagement, ReviewReply, state) do
       {:ok, final} ->
         settle_if_conceded(engagement, thread, Map.get(final, :reply_body), pr, workspace)
 

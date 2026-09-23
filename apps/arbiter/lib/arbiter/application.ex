@@ -64,6 +64,10 @@ defmodule Arbiter.Application do
       Arbiter.Agents.AuthHold,
       Arbiter.Agents.CredentialWatchdog,
       {Registry, keys: :unique, name: Arbiter.Worker.Registry},
+      # bd-9fgg04: live agent work that runs outside Arbiter.Worker.Supervisor
+      # (a dispatch still provisioning, a PR review/reply shelling out to the
+      # agent CLI) registers here for its duration — see Arbiter.Board.Drain.
+      {Registry, keys: :unique, name: Arbiter.Board.Drain.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
       {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},

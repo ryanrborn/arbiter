@@ -653,4 +653,52 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert ws["rig_standing_orders"] == %{"client" => ["Link the Figma design."]}
     end
   end
+
+  # bd-9fgg04: a paused scheduler still draining must not read as idle.
+  describe "scheduler section" do
+    defp stub_with_scheduler(scheduler_resp) do
+      stub_routes([
+        {{"get", "/api/scheduler/status"}, scheduler_resp},
+        {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},
+        {{"get", "/api/messages"}, {%{"data" => []}, 200}}
+      ])
+    end
+
+    @draining %{
+      "state" => "draining",
+      "paused" => true,
+      "safe_to_restart" => false,
+      "in_flight" => [%{"kind" => "fix_pass", "task_id" => "bd-77j2if", "status" => "running"}]
+    }
+
+    test "shows the drain state and what is still in flight" do
+      stub_with_scheduler({@draining, 200})
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+
+      assert out =~ "== Scheduler =="
+      assert out =~ "paused, draining"
+      assert out =~ "NOT safe to restart"
+      assert out =~ "fix_pass"
+      assert out =~ "bd-77j2if"
+    end
+
+    test "--json carries the drain state under scheduler" do
+      stub_with_scheduler({@draining, 200})
+
+      {out, _err, 0} = capture(fn -> Prime.run(["--json"]) end)
+
+      assert %{"scheduler" => %{"state" => "draining", "in_flight" => [_]}} =
+               Jason.decode!(String.trim(out))
+    end
+
+    test "an unreachable scheduler status is marked unavailable, not omitted" do
+      stub_with_scheduler({%{"error" => %{"message" => "nope"}}, 500})
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+
+      assert out =~ "== Scheduler =="
+      assert out =~ "unavailable"
+    end
+  end
 end

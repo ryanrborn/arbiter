@@ -82,7 +82,43 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
       conn = get(conn, "/api/scheduler/status")
 
-      assert %{"paused" => false} = json_response(conn, 200)
+      assert %{"paused" => false, "state" => "running", "safe_to_restart" => false} =
+               json_response(conn, 200)
+    end
+
+    # bd-9fgg04: paused is not idle — live work keeps it draining.
+    test "a paused scheduler with live work is draining, and lists it", %{conn: conn} do
+      :ok = Autopilot.pause()
+      test_pid = self()
+
+      runner =
+        spawn_link(fn ->
+          Arbiter.Board.Drain.track(:review_reply, %{task_id: "bd-sched-api"}, fn ->
+            send(test_pid, :running)
+
+            receive do
+              :release -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :running
+
+      conn = get(conn, "/api/scheduler/status")
+
+      assert %{
+               "paused" => true,
+               "state" => "draining",
+               "safe_to_restart" => false,
+               "in_flight" => in_flight
+             } = json_response(conn, 200)
+
+      assert Enum.any?(
+               in_flight,
+               &match?(%{"kind" => "review_reply", "task_id" => "bd-sched-api"}, &1)
+             )
+
+      send(runner, :release)
     end
   end
 end
