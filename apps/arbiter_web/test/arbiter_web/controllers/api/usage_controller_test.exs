@@ -291,6 +291,114 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
     end
   end
 
+  # Provider accounts P10 (bd-icwk2k, `docs/provider-account-design.md` §8):
+  # `by=provider_account` and `?account=` read `usage_events.provider_account_id`
+  # directly (P9), so probe/pre-flight rows (no `workspace_id`) are included.
+  describe "account dimension (P10, bd-icwk2k)" do
+    defp account!(provider \\ :claude) do
+      n = System.unique_integer([:positive])
+
+      Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+        provider: provider,
+        slug: "usage-ctrl-#{n}",
+        label: "acct #{n}"
+      })
+    end
+
+    test "by=provider_account groups rows, including probe rows with no workspace", %{
+      conn: conn
+    } do
+      account = account!()
+
+      _ =
+        insert_event!(%{
+          task_id: "bd-acct1",
+          source: :task,
+          cost_usd: 1.0,
+          provider_account_id: account.id
+        })
+
+      _ =
+        insert_event!(%{
+          task_id: nil,
+          source: :preflight,
+          workspace_id: nil,
+          cost_usd: 0.5,
+          provider_account_id: account.id
+        })
+
+      conn = get(conn, ~p"/api/usage", %{by: "provider_account"})
+      body = json_response(conn, 200)
+      data = Map.new(body["data"], &{&1["group"], &1})
+
+      assert data[account.id]["rows"] == 2
+      assert_in_delta data[account.id]["total_cost_usd"], 1.5, 0.001
+    end
+
+    test "?account=<slug> narrows a rollup to one account", %{conn: conn} do
+      mine = account!()
+      theirs = account!()
+
+      _ = insert_event!(%{task_id: "bd-acct2", cost_usd: 1.0, provider_account_id: mine.id})
+      _ = insert_event!(%{task_id: "bd-acct3", cost_usd: 9.0, provider_account_id: theirs.id})
+
+      conn = get(conn, ~p"/api/usage", %{by: "task", account: mine.slug})
+      groups = json_response(conn, 200)["data"] |> Enum.map(& &1["group"])
+
+      assert groups == ["bd-acct2"]
+    end
+
+    test "?account=<slug> narrows the raw event list too", %{conn: conn} do
+      mine = account!()
+      theirs = account!()
+
+      _ = insert_event!(%{task_id: "bd-acct4", cost_usd: 1.0, provider_account_id: mine.id})
+      _ = insert_event!(%{task_id: "bd-acct5", cost_usd: 9.0, provider_account_id: theirs.id})
+
+      conn = get(conn, ~p"/api/usage/events", %{account: mine.slug})
+      data = json_response(conn, 200)["data"]
+
+      assert [event] = data
+      assert event["task_id"] == "bd-acct4"
+    end
+
+    test "an unknown account ref is a 400, not a crash", %{conn: conn} do
+      conn = get(conn, ~p"/api/usage", %{by: "task", account: "no-such-account"})
+      assert json_response(conn, 400)
+    end
+
+    test "by=account is accepted as an alias for by=provider_account, including probe rows", %{
+      conn: conn
+    } do
+      account = account!()
+
+      _ =
+        insert_event!(%{
+          task_id: "bd-acct6",
+          source: :task,
+          cost_usd: 1.0,
+          provider_account_id: account.id
+        })
+
+      _ =
+        insert_event!(%{
+          task_id: nil,
+          source: :preflight,
+          workspace_id: nil,
+          cost_usd: 0.5,
+          provider_account_id: account.id
+        })
+
+      conn = get(conn, ~p"/api/usage", %{by: "account"})
+      body = json_response(conn, 200)
+      data = Map.new(body["data"], &{&1["group"], &1})
+
+      assert body["by"] == "provider_account"
+      assert data[account.id]["rows"] == 2
+      assert_in_delta data[account.id]["total_cost_usd"], 1.5, 0.001
+    end
+  end
+
   # bd-3j4ch4: the mis-rating report backing `arb usage --calibration`.
   describe "GET /api/usage/calibration" do
     test "reports per-tier rates and the flagged tasks", %{conn: conn} do

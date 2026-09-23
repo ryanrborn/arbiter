@@ -50,8 +50,10 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   # own write as well as on a parent update: the `{:workspace_updated, _}` a
   # write sends up is a second round trip, and until it lands the operator
   # would be looking at the previous tracker type's fields.
-  defp load_derived(%{assigns: %{workspace: ws}} = socket) do
-    assign(socket, :tracker_type_preview, cfg(ws, ["tracker", "type"], "none"))
+  defp load_derived(%{assigns: %{workspace: ws, agent_types: agent_types}} = socket) do
+    socket
+    |> assign(:tracker_type_preview, cfg(ws, ["tracker", "type"], "none"))
+    |> assign(:account_labels, account_labels(ws, agent_types))
   end
 
   @impl true
@@ -331,6 +333,22 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
     end
   end
 
+  # P10 (`docs/provider-account-design.md` §8, bd-icwk2k): "which account is
+  # this workspace's Claude on?" has nowhere to answer that question until
+  # now — `%{"claude" => "personal-max", ...}`, one entry per provider this
+  # workspace is actually linked to. A read-only lookup off the
+  # `workspace_provider_accounts` join, so — like `Usage`/`Quota`'s own
+  # account reads — it needs no `Accounts.enabled?/0` gate: that flag guards
+  # the *credential* read path, not whether a link can be shown.
+  defp account_labels(%Workspace{id: ws_id}, agent_types) do
+    for provider <- agent_types,
+        account = Arbiter.Accounts.Resolver.account(ws_id, provider),
+        not is_nil(account),
+        into: %{} do
+      {provider, account.slug}
+    end
+  end
+
   # Collapse a checkbox selection back to the config shape: a single
   # provider saves as a scalar string (matching existing single-provider
   # workspaces), multiple providers save as a pool list. An empty selection
@@ -363,6 +381,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   attr :selected, :list, required: true
   attr :available, :list, required: true
   attr :target, :any, required: true
+  attr :account_labels, :map, default: %{}
 
   defp agent_type_editor(assigns) do
     ~H"""
@@ -375,6 +394,13 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
           >
             <span class="w-4 text-[var(--text-label)]">{idx + 1}</span>
             <span class="flex-1 text-[var(--arb-text-body)]">{type}</span>
+            <span
+              :if={Map.get(@account_labels, type)}
+              class="text-[9.5px] text-[var(--text-label)]"
+              title={"Provider account this workspace's #{type} is metered under"}
+            >
+              account: {Map.get(@account_labels, type)}
+            </span>
             <button
               type="button"
               phx-target={@target}
@@ -464,6 +490,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
               consequence="agent.type — dispatch takes the first type in this list that is installed and under quota"
               selected={agent_type_list(@workspace, "agent")}
               available={@agent_types -- agent_type_list(@workspace, "agent")}
+              account_labels={@account_labels}
             />
             <.agent_type_editor
               role="review_agent"

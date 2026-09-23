@@ -33,7 +33,7 @@ defmodule ArbiterWeb.UsageLive do
   require Ash.Query
 
   @ranges ~w(7d 30d all)
-  @tabs ~w(by_task by_model by_repo)
+  @tabs ~w(by_task by_model by_repo by_account)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -63,6 +63,7 @@ defmodule ArbiterWeb.UsageLive do
     task_rollup = summarize!(by: :task, since: since)
     model_rollup = summarize!(by: :model, since: since)
     repo_rollup = summarize!(by: :repo, since: since)
+    account_rollup = summarize!(by: :provider_account, since: since)
     work_sessions = load_work_sessions(since)
     titles = load_titles(task_rollup)
 
@@ -89,6 +90,7 @@ defmodule ArbiterWeb.UsageLive do
       bar_rows(model_rollup, grand_cost, &model_hue/2, &ModelDisplay.short/1)
     )
     |> assign(:repo_bars, bar_rows(repo_rollup, grand_cost, &repo_hue/2, &to_string/1))
+    |> assign(:account_bars, bar_rows(account_rollup, grand_cost, &repo_hue/2, &account_label/1))
     |> assign_overage()
   end
 
@@ -276,6 +278,18 @@ defmodule ArbiterWeb.UsageLive do
   defp repo_hue(_repo, 1), do: "var(--arb-info)"
   defp repo_hue(_repo, _index), do: "var(--arb-done)"
 
+  # `Usage.summarize(by: :provider_account)`'s group is an account id (or the
+  # `"(none)"` sentinel) — resolve it to the slug an operator recognizes,
+  # falling back to the raw id for an account that has since been deleted.
+  defp account_label("(none)"), do: "(none)"
+
+  defp account_label(account_id) do
+    case Arbiter.Accounts.Resolver.get(account_id) do
+      %{slug: slug} -> slug
+      nil -> account_id
+    end
+  end
+
   defp sum_cost(rollup),
     do: Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
 
@@ -344,7 +358,8 @@ defmodule ArbiterWeb.UsageLive do
               tabs={[
                 %{label: "By task", value: "by_task"},
                 %{label: "By model", value: "by_model"},
-                %{label: "By repo", value: "by_repo"}
+                %{label: "By repo", value: "by_repo"},
+                %{label: "By account", value: "by_account"}
               ]}
               active={@tab}
               event="tab"
@@ -411,6 +426,19 @@ defmodule ArbiterWeb.UsageLive do
                 hue={bar.hue}
               />
               <Feedback.empty_state :if={@repo_bars == []} icon={nil}>
+                No usage events yet.
+              </Feedback.empty_state>
+            </div>
+
+            <div :if={@tab == "by_account"} class="flex flex-col gap-[10px]">
+              <.usage_bar
+                :for={bar <- @account_bars}
+                label={bar.label}
+                value={bar.value}
+                pct={bar.pct}
+                hue={bar.hue}
+              />
+              <Feedback.empty_state :if={@account_bars == []} icon={nil}>
                 No usage events yet.
               </Feedback.empty_state>
             </div>
@@ -566,6 +594,7 @@ defmodule ArbiterWeb.UsageLive do
   defp tab_meta("by_task"), do: "by task"
   defp tab_meta("by_model"), do: "by model"
   defp tab_meta("by_repo"), do: "by repo"
+  defp tab_meta("by_account"), do: "by account"
 
   defp bucket_pct(_count, 0), do: 0
   defp bucket_pct(count, total), do: round(count / total * 100)
