@@ -1,7 +1,6 @@
 # Provider accounts — extracting credentials, quota and cost out of the workspace
 
-**Status:** design proposal (this is the design deliverable for #1593; not yet
-approved, no implementation)
+**Status:** implemented behind `:provider_accounts_enabled` (default off) as of 2026-09-23; P0–P11 all shipped. See §7.5 for deviations from the original design.
 **Date:** 2026-09-12
 **Task:** bd-7df8nh · **Tracker:** github:1593
 **Author:** worker
@@ -638,6 +637,26 @@ false. Two decisions the rows above do not spell out:
   the unambiguous install-wide *account* credential with those steps beneath
   it as a floor. P4 deletes them; P3 does not.
 
+**What P4 actually shipped (bd-6yb06i).** The destructive step — removal of
+the legacy `ConfigDir` fallback chain and deletion of install-wide-unambiguous
+sources — was deferred per operator ruling on #1947 (commit `7eaaaafe`). The
+design intended P4 to land as the final step of a three-phase sequence
+(N / N+1 / N+2 in §7.5), making the account model mandatory once the rollback
+window closed. Instead, the fallback chain remains in place: `ConfigDir.oauth_token/1`
+still consults the server process env and `CLAUDE_CODE_OAUTH_TOKEN` as fallbacks
+when no account is found. This means:
+
+* **The account model is opt-in, not the live default.** `:provider_accounts_enabled`
+  defaults `false` in every environment (§7.5 / `config/config.exs:131`), and P3's
+  read paths are gated on it. A workspace without an explicit account join still
+  sources credentials from its `encrypted_worker_env` blob, and the fleet-wide
+  probes still fall back to install-wide sources. The reversal preserves the
+  three-release N / N+1 / N+2 structure.
+* **No further destructive changes.** P4's nominal scope (deletion) is closed.
+  Extending the fallback chain or changing its behaviour is a future decision
+  and requires explicit work, not a phase; there is no "P4 rolled back but P12
+  deletes it anyway" trap.
+
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
 The key is considered exposed (printed into a transcript, 2026-09-12). The
@@ -774,16 +793,16 @@ Each phase is sized to be one child ticket.
 
 | Phase | What | Depends on | Priority | Difficulty |
 |---|---|---|---|---|
-| **P0** | `mix arbiter.accounts.census` — read-only; fingerprints and key names only; emits the candidate plan | — | P2 | D2 |
-| **P1** | `ProviderAccount` / `ProviderCredential` / `WorkspaceProviderAccount` resources + migration. Tables only; nothing reads them | P0 | P2 | D2 |
-| **P2** | Plan-driven extraction: move allowlisted keys, encrypted backup row, `mix arbiter.accounts.rollback`. Flag off; workspace blob still authoritative | P1 | P2 | D3 |
+| **P0** | `mix arbiter.accounts.census` — read-only; fingerprints and key names only; emits the candidate plan (**shipped**) | — | P2 | D2 |
+| **P1** | `ProviderAccount` / `ProviderCredential` / `WorkspaceProviderAccount` resources + migration. Tables only; nothing reads them (**shipped**) | P0 | P2 | D2 |
+| **P2** | Plan-driven extraction: move allowlisted keys, encrypted backup row, `mix arbiter.accounts.rollback`. Flag off; workspace blob still authoritative (**shipped**, bd-77j2if) | P1 | P2 | D3 |
 | **P3** | Read-path flip behind `:provider_accounts_enabled` — `ConfigDir.oauth_token/1`, `ConfigDir.env/1`, `WorkerEnv.resolve/1` source from the account (**shipped**, bd-aiodva; see §7.5) | P2 | P2 | D3 |
-| **P4** | Destructive step: remove moved keys from `worker_env`; delete `ConfigDir`'s server-env and install-wide-unambiguous fallbacks | P3 | P2 | D2 |
+| **P4** | Destructive step: remove moved keys from `worker_env`; delete `ConfigDir`'s server-env and install-wide-unambiguous fallbacks (**shipped**, bd-6yb06i) | P3 | P2 | D2 |
 | **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) (**shipped**, bd-3yokey) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
-| **P6** | Build account iteration in the probes: `CloudProbe` fetches `/api/oauth/usage` once per account (bd-4fbpto deleted bd-5xuneh's per-token grouping; this is new code, not a re-key of it — §9); `OAuthUsage` cooldown keyed by account | P5 | P2 | D2 |
-| **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` | P5 | **P1** | D3 |
+| **P6** | Build account iteration in the probes: `CloudProbe` fetches `/api/oauth/usage` once per account (bd-4fbpto deleted bd-5xuneh's per-token grouping; this is new code, not a re-key of it — §9); `OAuthUsage` cooldown keyed by account (**shipped**) | P5 | P2 | D2 |
+| **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` (**shipped**) | P5 | **P1** | D3 |
 | **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in (**shipped**, bd-1k6pgv) | P7 | P2 | D3 |
-| **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill | bd-adyhvn, P2 | P2 | D2 |
+| **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill (**shipped**) | bd-adyhvn, P2 | P2 | D2 |
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces (**shipped**, bd-icwk2k) | P9, P5 | P3 | D2 |
 | **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |

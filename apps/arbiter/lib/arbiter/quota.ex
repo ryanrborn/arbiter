@@ -384,10 +384,8 @@ defmodule Arbiter.Quota do
   shape (string-friendly, ISO-8601 timestamps), or `nil` when none exists.
 
   `:workspace_id` names the workspace whose gate config annotates the
-  `gating_*` fields. Thresholds are still workspace-scoped until P7, so a
-  caller that came in through `arb quota --workspace X` passes X here and
-  gets the same answer it did before the re-key; with none given the
-  account's alphabetically-first workspace stands in.
+  `gating_*` fields (for backward compatibility with `arb quota --workspace`).
+  When none is given, the account's alphabetically-first workspace stands in.
 
   `:spend_cache` optionally supplies a `spend_cache/1` memo so a caller that
   also lists the other providers pays for the ledger scan once — see

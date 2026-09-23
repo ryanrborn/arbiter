@@ -21,7 +21,7 @@ defmodule Arbiter.Quota.CloudProbe do
   quota tables, could never show them, and there was no history to audit. This
   GenServer closes that gap.
 
-  ## What a refresh does per workspace
+  ## Refresh strategy
 
     * `Arbiter.Quota.Codex.fetch/2` — one GET to OpenAI's usage endpoint using
       the `codex` CLI's stored token; upserts `CodexQuota` + broadcasts.

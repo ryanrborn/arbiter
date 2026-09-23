@@ -119,15 +119,15 @@ config :arbiter_web, :quota_bar_colors,
 # `quota_get` tool is invoked. Enabled by default; `config/test.exs` turns it
 # off so the quota surface stays a pure DB read under test.
 # Provider accounts (docs/provider-account-design.md §7.5, bd-77j2if). The
-# read-flip switch for phase P3: when true, `ConfigDir.oauth_token/1` and
-# `WorkerEnv.resolve/1` will source provider credentials from
+# read-flip switch for phase P3 (bd-aiodva) onward: when true, `ConfigDir.oauth_token/1`
+# `ConfigDir.env/1` and `WorkerEnv.resolve/1` source provider credentials from
 # `provider_accounts` / `provider_credentials` instead of the workspace's
 # `worker_env` blob.
 #
-# It is false here and **nothing reads it yet**. P2 (this release) is the
-# additive half of the three-release plan: it populates the new tables and
-# writes an encrypted backup row, but every existing read path still comes off
-# `workspaces.encrypted_worker_env`. Rolling P2 back is "drop the new tables".
+# It is false here by default. P3+ read from accounts when this flag is true;
+# the fallback chain (§7.5) handles flag-off for legacy deployments.
+# P2 (bd-77j2if) was the additive setup: it populates the new tables and writes
+# an encrypted backup row. Rolling P2 back is "drop the new tables".
 config :arbiter, :provider_accounts_enabled, false
 
 config :arbiter, :cloud_code_quota, enabled: true

@@ -116,7 +116,8 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
       {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
 
       assert html =~ "Max concurrent workers"
-      assert html =~ "lowest of this, the system cap and quota headroom"
+      assert html =~ "lowest of this, the account ceiling"
+      assert html =~ "the system cap and quota headroom"
     end
 
     test "auto-dispatch describes the scheduler, not manual dispatch", %{conn: conn} do
