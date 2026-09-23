@@ -200,7 +200,10 @@ defmodule ArbiterWeb.QuotaTopbarTest do
   defp bars(doc, scope), do: doc |> LazyHTML.query("#{scope} [data-quota-bar]") |> Enum.count()
 
   defp labels(doc, scope),
-    do: doc |> LazyHTML.query("#{scope} [data-quota-label]") |> Enum.map(&LazyHTML.text/1)
+    do:
+      doc
+      |> LazyHTML.query("#{scope} [data-quota-label]")
+      |> Enum.map(&String.trim(LazyHTML.text(&1)))
 
   defp pcts(doc, scope),
     do:

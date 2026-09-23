@@ -214,10 +214,14 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
 
     test "the window label is caller-supplied, the window only picks the pace math" do
       doc = bar(%{provider: "antigravity", window: "7d", label: "weekly", utilization: 0.1})
-      assert doc |> LazyHTML.query("[data-quota-label]") |> LazyHTML.text() == "weekly"
+
+      assert doc |> LazyHTML.query("[data-quota-label]") |> LazyHTML.text() |> String.trim() ==
+               "weekly"
 
       doc = bar(%{provider: "claude", window: "7d", utilization: 0.1})
-      assert doc |> LazyHTML.query("[data-quota-label]") |> LazyHTML.text() == "7d"
+
+      assert doc |> LazyHTML.query("[data-quota-label]") |> LazyHTML.text() |> String.trim() ==
+               "7d"
     end
 
     test "a stale reading is muted, says so, and carries the message in its title" do
