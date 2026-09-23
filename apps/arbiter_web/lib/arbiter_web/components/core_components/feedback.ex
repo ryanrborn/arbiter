@@ -19,8 +19,6 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       quota_pct: 1,
       quota_elapsed_pct_5h: 2,
       quota_elapsed_pct_7d: 2,
-      quota_color_5h: 4,
-      quota_color_7d: 4,
       quota_pace_state_5h: 4,
       quota_pace_state_7d: 4,
       quota_pace_label_5h: 5,
@@ -32,6 +30,8 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       quota_provider_hue: 1,
       quota_reset_label: 1,
       quota_binding_class: 2,
+      quota_binding_title: 2,
+      quota_note_color: 2,
       quota_bar_title: 1
     ]
 
@@ -211,7 +211,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   override is a `:red` pace state — which includes `overage_status ==
   "in_overage"` — painting it `--arb-fail`. Amber and the grey sampling state
   never touch the fill; they live in the note (a warning glyph plus the pace
-  label, coloured from `quota_color_5h/4`, or the word "sampling"). The
+  label, coloured from `quota_note_color/2`, or the word "sampling"). The
   `title` repeats utilization, elapsed window, pace and pace label in words so
   no state depends on colour alone.
 
@@ -261,7 +261,6 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
     state = quota_pace_state(assigns)
     pace_label = quota_pace_label(assigns)
     stale? = assigns.stale_message != nil
-    over = elapsed_pct != nil and pct > elapsed_pct
     binding_window = if assigns.window == "5h", do: "five_hour", else: "seven_day"
 
     assigns =
@@ -272,9 +271,9 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
         stale?: stale?,
         fill: quota_fill(assigns.provider, state, stale?),
         note: quota_note(assigns, state, pace_label, stale?),
-        note_color: pace_label && !stale? && quota_color(assigns),
-        title: quota_title(assigns, pct, pace_label),
-        over: over,
+        note_color: quota_note_color(state, stale?),
+        glyph?: pace_label != nil and not stale?,
+        title: quota_title(assigns, pct, pace_label, binding_window),
         binding_class: quota_binding_class(assigns.representative_claim, binding_window)
       )
 
@@ -331,12 +330,11 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
           style={@note_color && "color: #{@note_color};"}
           class={[
             "inline-flex items-center gap-[3px] whitespace-nowrap text-[9.5px] font-[family-name:var(--font-mono)]",
-            !@note_color && @over && !@stale? && "text-[var(--arb-attention)]",
-            !@note_color && !(@over && !@stale?) && "text-[var(--text-label)]"
+            !@note_color && "text-[var(--text-label)]"
           ]}
         >
           <.icon
-            :if={@note_color}
+            :if={@glyph?}
             name="hero-exclamation-triangle"
             size={10}
             class="flex-none"
@@ -359,12 +357,6 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
 
   defp quota_pace_state(%{window: "7d"} = a),
     do: quota_pace_state_7d(a.provider, a.utilization, a.reset_at, a.overage_status)
-
-  defp quota_color(%{window: "5h"} = a),
-    do: quota_color_5h(a.provider, a.utilization, a.reset_at, a.overage_status)
-
-  defp quota_color(%{window: "7d"} = a),
-    do: quota_color_7d(a.provider, a.utilization, a.reset_at, a.overage_status)
 
   defp quota_pace_label(%{window: "5h"} = a),
     do:
@@ -409,9 +401,10 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   defp quota_note(_assigns, :grey, nil, false), do: "sampling"
   defp quota_note(assigns, _state, nil, false), do: quota_reset_label(assigns.reset_at)
 
-  defp quota_title(assigns, pct, pace_label) do
+  defp quota_title(assigns, pct, pace_label, binding_window) do
     quota_bar_title([
       assigns.stale_message && "stale reading: #{assigns.stale_message}",
+      quota_binding_title(assigns.representative_claim, binding_window),
       quota_tooltip(assigns) || "#{pct}% quota used",
       quota_pace_ratio(assigns),
       pace_label

@@ -63,7 +63,7 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
       assert html =~ "—"
     end
 
-    test "de-emphasizes a non-binding window via quota_binding_class/2" do
+    test "de-emphasizes a non-binding window via quota_binding_class/2 and carries explanatory title" do
       html =
         render_component(&quota_bar/1, %{
           window: "7d",
@@ -73,9 +73,23 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
         })
 
       assert html =~ "opacity-50"
+      assert html =~ "not the binding window — Anthropic is currently limiting on 5h"
     end
 
-    test "the binding window is not de-emphasized" do
+    test "dimmed 5h bar explains that 7d is binding" do
+      html =
+        render_component(&quota_bar/1, %{
+          window: "5h",
+          utilization: 0.1,
+          reset_at: nil,
+          representative_claim: "seven_day"
+        })
+
+      assert html =~ "opacity-50"
+      assert html =~ "not the binding window — Anthropic is currently limiting on 7d"
+    end
+
+    test "the binding window is not de-emphasized and carries no non-binding explanation" do
       html =
         render_component(&quota_bar/1, %{
           window: "5h",
@@ -85,6 +99,7 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
         })
 
       refute html =~ "opacity-50"
+      refute html =~ "not the binding window"
     end
   end
 
@@ -190,6 +205,72 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
       assert LazyHTML.text(note(doc)) =~ "sampling"
       assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 0
       assert fill(doc) =~ ArbiterWeb.QuotaHelpers.quota_provider_hue("claude")
+    end
+
+    test "sampling at 8% used / 3% elapsed has grey state and neutral note, never amber or red" do
+      # 5h = 300m. 3% elapsed = 9m elapsed, so 291m remaining.
+      # Utilization is 8% (0.08). 8% used > 3% elapsed, but elapsed is below the
+      # 15-minute sampling floor, so state is :grey. The note must remain neutral.
+      reset_at = reset_in(291)
+
+      assert ArbiterWeb.QuotaHelpers.quota_pace_state_5h("antigravity", 0.08, reset_at, nil) ==
+               :grey
+
+      doc = bar(%{provider: "antigravity", utilization: 0.08, reset_at: reset_at})
+
+      html =
+        render_component(&quota_bar/1, %{
+          provider: "antigravity",
+          window: "5h",
+          utilization: 0.08,
+          reset_at: reset_at
+        })
+
+      assert doc
+             |> LazyHTML.query("[data-quota-bar]")
+             |> LazyHTML.attribute("data-quota-state")
+             |> hd() == "grey"
+
+      assert LazyHTML.text(note(doc)) =~ "sampling"
+      assert note(doc) |> LazyHTML.attribute("class") |> hd() =~ "text-[var(--text-label)]"
+      refute note(doc) |> LazyHTML.attribute("class") |> hd() =~ "text-[var(--arb-attention)]"
+      refute note(doc) |> LazyHTML.attribute("class") |> hd() =~ "text-[var(--arb-fail)]"
+      refute (note(doc) |> LazyHTML.attribute("style") |> hd() || "") =~ "color:"
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 0
+      refute html =~ "var(--arb-attention)"
+      refute html =~ "var(--arb-fail)"
+    end
+
+    test "no raw hex colours appear in rendered HTML" do
+      reset_at = reset_in(150)
+
+      for u <- [0.08, 0.2, 0.6, 0.8, 0.95] do
+        html =
+          render_component(&quota_bar/1, %{
+            provider: "claude",
+            window: "5h",
+            utilization: u,
+            reset_at: reset_at,
+            on_exhaustion: :throttle
+          })
+
+        refute html =~ "#ef4444"
+        refute html =~ "#f59e0b"
+        refute html =~ "#22c55e"
+        refute html =~ "#9ca3af"
+      end
+    end
+
+    test "red bar without pace label has red countdown note" do
+      doc = bar(%{provider: "codex", utilization: 0.95})
+
+      assert doc
+             |> LazyHTML.query("[data-quota-bar]")
+             |> LazyHTML.attribute("data-quota-state")
+             |> hd() == "red"
+
+      assert note(doc) |> LazyHTML.attribute("style") |> hd() =~ "color: var(--arb-fail);"
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 0
     end
 
     test "quiet: with no pace label the note is quota_reset_label/1" do
