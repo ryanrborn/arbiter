@@ -192,6 +192,70 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       assert_in_delta view.utilization_5h, 0.75, 0.0001
       assert %DateTime{} = view.reset_5h_at
       assert view.utilization_7d == nil
+      assert view.reset_7d_at == nil
+      assert view.primary_label == "used"
+      assert view.secondary_label == nil
+    end
+
+    test "splits an antigravity row's 5h + weekly windows from the gemini_models group" do
+      ws = workspace!()
+
+      body =
+        agy_usage_body([
+          %{
+            "name" => "Gemini Models",
+            "buckets" => [
+              %{"window" => "5h", "remaining_fraction" => 0.75, "reset_time" => "1782250684"},
+              %{"window" => "weekly", "remaining_fraction" => 0.4, "reset_time" => "1782250684"}
+            ]
+          },
+          %{
+            "name" => "Claude and GPT models",
+            "buckets" => [
+              %{"window" => "5h", "remaining_fraction" => 1.0, "reset_time" => "1782250684"},
+              %{"window" => "weekly", "remaining_fraction" => 1.0, "reset_time" => "1782250684"}
+            ]
+          }
+        ])
+
+      assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:ok, body}))
+
+      view =
+        quota_account_id!(ws.id, "antigravity")
+        |> CloudCode.latest("antigravity")
+        |> CloudCode.view()
+
+      assert view.provider == "antigravity"
+      assert_in_delta view.utilization_5h, 0.25, 0.0001
+      assert %DateTime{} = view.reset_5h_at
+      assert_in_delta view.utilization_7d, 0.60, 0.0001
+      assert %DateTime{} = view.reset_7d_at
+      assert view.primary_label == "5h"
+      assert view.secondary_label == "weekly"
+      assert length(view.models) == 4
+    end
+
+    test "falls back to the collapsed shape when the antigravity snapshot has no parseable buckets" do
+      ws = workspace!()
+
+      row =
+        Ash.create!(Arbiter.Quota.GoogleQuota, %{
+          provider_account_id: quota_account_id!(ws.id, "antigravity"),
+          provider: "antigravity",
+          used_percent: 42.0,
+          reset_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.add(3600),
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second),
+          snapshot: %{"provider" => "antigravity", "models" => []}
+        })
+
+      view = CloudCode.view(row)
+
+      assert_in_delta view.utilization_5h, 0.42, 0.0001
+      assert view.reset_5h_at == row.reset_at
+      assert view.utilization_7d == nil
+      assert view.reset_7d_at == nil
+      assert view.primary_label == "used"
+      assert view.secondary_label == nil
     end
   end
 end
