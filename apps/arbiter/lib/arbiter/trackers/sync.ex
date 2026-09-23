@@ -96,13 +96,64 @@ defmodule Arbiter.Trackers.Sync do
   end
 
   defp do_lifecycle(issue, event, opts) do
-    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+    if event == :pr_opened and already_announced?(issue, opts) do
+      :ok
+    else
+      Trackers.prepare(issue, load_workspace(issue.workspace_id))
 
-    transition_event(issue, event)
+      transition_event(issue, event)
 
-    if event == :pr_opened, do: attach_pr_artifacts(issue, opts)
+      if event == :pr_opened do
+        attach_pr_artifacts(issue, opts)
+        record_pr_announced(issue, opts)
+      end
 
-    :ok
+      :ok
+    end
+  end
+
+  # bd-bqlwjo: `:pr_opened` fires on every worker run that finishes with a PR
+  # ref, not just the run that opened it — a ReviewGate implementation round,
+  # a `worker_resume`, or any later run that simply re-resolves the same
+  # already-open PR all take this path with an unchanged `pr_url`. Without this
+  # guard the ticket gets one "opened a pull request" comment (and one
+  # re-attempted status transition) per such run. `pr_opened_notified_ref` is a
+  # durable column on the task (not an ETS/process cache), so the guard
+  # survives a server restart, and it is cleared by `reopen` alongside `pr_ref`
+  # so a genuinely new PR after `task_reopen` still gets its own comment.
+  defp already_announced?(issue, opts) do
+    case Keyword.get(opts, :pr_url) do
+      url when is_binary(url) and url != "" -> url == issue.pr_opened_notified_ref
+      _ -> false
+    end
+  end
+
+  # Record the announced PR ref AFTER attempting the transition + comment/link,
+  # regardless of their individual outcomes — mirrors the existing "try once,
+  # never retry the comment on this same call" posture documented above for
+  # `add_comment/2`: a wire failure here already escalates loudly, and a next
+  # run for the *same* PR re-attempting is exactly the duplicate-comment bug
+  # this guard exists to close. A different PR (new `pr_url`) is unaffected —
+  # it is not yet the recorded ref, so it announces normally.
+  defp record_pr_announced(issue, opts) do
+    case Keyword.get(opts, :pr_url) do
+      url when is_binary(url) and url != "" ->
+        case Ash.update(issue, %{pr_opened_notified_ref: url}, action: :update) do
+          {:ok, _updated} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Trackers.Sync: failed to record pr_opened_notified_ref for task=#{issue.id}: " <>
+                inspect(reason)
+            )
+
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
   end
 
   @doc """

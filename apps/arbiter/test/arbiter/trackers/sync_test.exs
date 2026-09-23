@@ -204,6 +204,87 @@ defmodule Arbiter.Trackers.SyncTest do
       assert escalation.body =~ "QA Testing Notes"
       assert escalation.body =~ "Deployment Notes"
     end
+
+    test "does not re-post the comment or re-attempt the transition for a PR already announced (bd-bqlwjo)" do
+      test_pid = self()
+      ws = jira_workspace(%{"pr_opened" => "In Code Review"})
+
+      issue =
+        jira_issue(ws, %{
+          qa_notes: "Verify voice ID matches on re-enrollment.",
+          deployment_notes: "None."
+        })
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "51",
+                  "name" => "Pull request created",
+                  "to" => %{"name" => "In Code Review"}
+                }
+              ]
+            })
+
+          conn.method == "PUT" and String.ends_with?(path, "/issue/#{@ref}") ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            send(test_pid, :transition)
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/comment") ->
+            send(test_pid, :comment)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "1"})
+
+          conn.method == "POST" and String.ends_with?(path, "/remotelink") ->
+            send(test_pid, :remotelink)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 10_001})
+        end
+      end)
+
+      url = "https://github.com/acme/voice-id-core/pull/3606"
+
+      # First run: opens the PR — transitions, comments, links.
+      assert :ok = Sync.lifecycle(issue, :pr_opened, pr_url: url, pr_title: "PR #3606")
+      assert_receive :transition
+      assert_receive :comment
+      assert_receive :remotelink
+
+      # bd-bqlwjo: simulate the guard surviving a server restart by re-fetching
+      # the task fresh from the DB rather than reusing the in-memory struct.
+      reloaded = Ash.get!(Issue, issue.id)
+      assert reloaded.pr_opened_notified_ref == url
+
+      # A ReviewGate implementation round, and then a `worker_resume` — both
+      # land on the same already-open PR. Neither should hit the wire at all.
+      assert :ok = Sync.lifecycle(reloaded, :pr_opened, pr_url: url, pr_title: "PR #3606")
+      assert :ok = Sync.lifecycle(reloaded, :pr_opened, pr_url: url, pr_title: "PR #3606")
+      refute_receive :transition, 50
+      refute_receive :comment, 50
+      refute_receive :remotelink, 50
+
+      # A new, different PR on the same task (e.g. after `task_reopen`) still
+      # gets its own comment.
+      other_url = "https://github.com/acme/voice-id-core/pull/3700"
+      reloaded = Ash.get!(Issue, issue.id)
+
+      assert :ok = Sync.lifecycle(reloaded, :pr_opened, pr_url: other_url, pr_title: "PR #3700")
+      assert_receive :transition
+      assert_receive :comment
+      assert_receive :remotelink
+
+      final = Ash.get!(Issue, issue.id)
+      assert final.pr_opened_notified_ref == other_url
+
+      assert escalations_for(ws.id) == []
+    end
   end
 
   describe "lifecycle/3 :approved_unmerged" do
