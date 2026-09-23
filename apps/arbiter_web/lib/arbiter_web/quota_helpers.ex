@@ -29,11 +29,6 @@ defmodule ArbiterWeb.QuotaHelpers do
   def quota_pct(nil), do: 0
   def quota_pct(u) when is_number(u), do: min(100, round(u * 100))
 
-  @color_red "#ef4444"
-  @color_amber "#f59e0b"
-  @color_green "#22c55e"
-  @color_grey "#9ca3af"
-
   @doc """
   Quota-bar color thresholds (bd-l4epbc), overridable via
   `config :arbiter_web, :quota_bar_colors` without a redeploy.
@@ -63,11 +58,27 @@ defmodule ArbiterWeb.QuotaHelpers do
   `reset_at` to derive a window from (see `quota_elapsed_pct_5h/2`).
   """
   def quota_color_5h(provider, utilization, reset_at, overage_status),
-    do: quota_pace_state_5h(provider, utilization, reset_at, overage_status) |> color_hex()
+    do:
+      quota_pace_state_5h(provider, utilization, reset_at, overage_status)
+      |> pace_color(provider)
 
   @doc "Same as `quota_color_5h/4`, for the 7d window."
   def quota_color_7d(provider, utilization, reset_at, overage_status),
-    do: quota_pace_state_7d(provider, utilization, reset_at, overage_status) |> color_hex()
+    do:
+      quota_pace_state_7d(provider, utilization, reset_at, overage_status)
+      |> pace_color(provider)
+
+  @doc """
+  Text colour token for a quota bar's note/countdown, derived only from the
+  bar's pace `state` (`:red | :amber | :green | :grey`):
+    - `:red` -> `"var(--arb-fail)"`
+    - `:amber` -> `"var(--arb-attention)"`
+    - `:green`, `:grey`, or stale -> `nil` (neutral)
+  """
+  def quota_note_color(_state, true), do: nil
+  def quota_note_color(:red, false), do: "var(--arb-fail)"
+  def quota_note_color(:amber, false), do: "var(--arb-attention)"
+  def quota_note_color(_state, false), do: nil
 
   @doc """
   The raw `:red | :amber | :green | :grey` pace state that `quota_color_5h/4`
@@ -146,6 +157,26 @@ defmodule ArbiterWeb.QuotaHelpers do
   def quota_binding_class(_representative_claim, _window), do: "opacity-50"
 
   @doc """
+  Tooltip explanation for a dimmed bar row that isn't the binding window per
+  `representative_claim` (`"five_hour"` / `"seven_day"`).
+  `nil` when this row IS the binding window, or when `representative_claim`
+  is unknown.
+  """
+  def quota_binding_title(nil, _window), do: nil
+
+  def quota_binding_title(representative_claim, window) when representative_claim == window,
+    do: nil
+
+  def quota_binding_title("five_hour", _window),
+    do: "not the binding window — Anthropic is currently limiting on 5h"
+
+  def quota_binding_title("seven_day", _window),
+    do: "not the binding window — Anthropic is currently limiting on 7d"
+
+  def quota_binding_title(claim, _window) when is_binary(claim),
+    do: "not the binding window — Anthropic is currently limiting on #{claim}"
+
+  @doc """
   Combine a list of tooltip fragments (some possibly `nil`) into a single
   `" · "`-joined title string, or `nil` if every fragment was `nil` — so a
   `title` attribute is omitted rather than rendered empty.
@@ -159,10 +190,10 @@ defmodule ArbiterWeb.QuotaHelpers do
 
   defp window_seconds(label), do: Gate.window_seconds(label)
 
-  defp color_hex(:red), do: @color_red
-  defp color_hex(:amber), do: @color_amber
-  defp color_hex(:green), do: @color_green
-  defp color_hex(:grey), do: @color_grey
+  defp pace_color(:red, _provider), do: "var(--arb-fail)"
+  defp pace_color(:amber, _provider), do: "var(--arb-attention)"
+  defp pace_color(:grey, _provider), do: "var(--arb-done)"
+  defp pace_color(:green, provider), do: quota_provider_hue(provider)
 
   defp pace_state(_provider, _u, _reset_at, "in_overage", _window_seconds), do: :red
 

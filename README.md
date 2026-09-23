@@ -549,6 +549,14 @@ Architecture and design decision records live in [`docs/`](docs/):
 - [Worker Security Policy](docs/worker-security.md) — Execution sandbox and security isolation for agent workers.
 - [Remote Access](docs/remote-access.md) — Connecting to dashboard and sessions over SSH tunnels.
 
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local
+development commands and contribution guidelines. Before a pull request can be
+merged, it must be signed off under the [Contributor License Agreement
+(CLA.md)](CLA.md). Found a security issue? See [`SECURITY.md`](SECURITY.md)
+for how to report it privately.
+
 ## License
 
 Arbiter is licensed under the [Apache License, Version 2.0](LICENSE). Third-party

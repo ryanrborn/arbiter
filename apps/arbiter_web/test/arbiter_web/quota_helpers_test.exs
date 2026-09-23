@@ -126,71 +126,71 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       # 35% used at 10% elapsed (30min into 300) — on this pace the window
       # dries out ~56min from now, ~214min before the 270min-away reset.
       reset_at = reset_at_after(30)
-      assert quota_color_5h("claude", 0.35, reset_at, nil) == "#ef4444"
+      assert quota_color_5h("claude", 0.35, reset_at, nil) == "var(--arb-fail)"
     end
 
     test "under-pace near reset renders green (the 21:45Z/0.89 false-alarm case)" do
       # 89% used at 98% elapsed (294min into 300) — coasts to reset with
       # minutes to spare, never runs dry.
       reset_at = reset_at_after(294)
-      assert quota_color_5h("claude", 0.89, reset_at, nil) == "#22c55e"
+      assert quota_color_5h("claude", 0.89, reset_at, nil) == "var(--arb-proposal)"
     end
 
     test "early-window high pace renders grey, not red — the sampling floor" do
       # Only 2 minutes elapsed: far below the 15-minute sampling floor, so a
       # single burst can't yet be projected as a burn rate.
       reset_at = reset_at_after(2)
-      assert quota_color_5h("claude", 0.5, reset_at, nil) == "#9ca3af"
+      assert quota_color_5h("claude", 0.5, reset_at, nil) == "var(--arb-done)"
     end
 
     test "low utilization renders grey regardless of elapsed time — the usage floor" do
       reset_at = reset_at_after(200)
-      assert quota_color_5h("claude", 0.02, reset_at, nil) == "#9ca3af"
+      assert quota_color_5h("claude", 0.02, reset_at, nil) == "var(--arb-done)"
     end
 
     test "used = 0.99 on-pace renders amber, not green — the wall guard" do
       # 99% used at 99% elapsed: deficit computes to ~0 (on pace), but the
       # wall guard forbids green once utilization crosses 0.95.
       reset_at = reset_at_after(297)
-      assert quota_color_5h("claude", 0.99, reset_at, nil) == "#f59e0b"
+      assert quota_color_5h("claude", 0.99, reset_at, nil) == "var(--arb-attention)"
     end
 
     test "20 < deficit <= 60 minutes renders amber" do
       # 23% used at 20% elapsed (60min into 300) — dries out ~201min from
       # now, ~39min before the 240min-away reset: squarely in the amber band.
       reset_at = reset_at_after(60)
-      assert quota_color_5h("claude", 0.23, reset_at, nil) == "#f59e0b"
+      assert quota_color_5h("claude", 0.23, reset_at, nil) == "var(--arb-attention)"
     end
 
     test "in_overage forces solid red regardless of pace" do
       reset_at = reset_at_after(294)
-      assert quota_color_5h("claude", 0.89, reset_at, "in_overage") == "#ef4444"
+      assert quota_color_5h("claude", 0.89, reset_at, "in_overage") == "var(--arb-fail)"
     end
 
     test "nil utilization renders green (no usage data, distinct from sampling)" do
-      assert quota_color_5h("claude", nil, reset_at_after(30), nil) == "#22c55e"
+      assert quota_color_5h("claude", nil, reset_at_after(30), nil) == "var(--arb-proposal)"
     end
 
     test "providers without a fixed window fall back to absolute-utilization thresholds" do
       reset_at = reset_at_after(30)
-      assert quota_color_5h("codex", 0.35, reset_at, nil) == "#22c55e"
-      assert quota_color_5h("codex", 0.95, reset_at, nil) == "#ef4444"
-      assert quota_color_5h("gemini_cli", 0.35, reset_at, nil) == "#22c55e"
-      assert quota_color_5h("gemini_cli", 0.95, reset_at, nil) == "#ef4444"
-      assert quota_color_5h("someday_cli", 0.35, reset_at, nil) == "#22c55e"
-      assert quota_color_5h("someday_cli", 0.95, reset_at, nil) == "#ef4444"
+      assert quota_color_5h("codex", 0.35, reset_at, nil) == "var(--arb-text-faint)"
+      assert quota_color_5h("codex", 0.95, reset_at, nil) == "var(--arb-fail)"
+      assert quota_color_5h("gemini_cli", 0.35, reset_at, nil) == "var(--arb-text-faint)"
+      assert quota_color_5h("gemini_cli", 0.95, reset_at, nil) == "var(--arb-fail)"
+      assert quota_color_5h("someday_cli", 0.35, reset_at, nil) == "var(--arb-text-faint)"
+      assert quota_color_5h("someday_cli", 0.95, reset_at, nil) == "var(--arb-fail)"
     end
 
     test "nil reset_at falls back to absolute-utilization thresholds" do
-      assert quota_color_5h("claude", 0.95, nil, nil) == "#ef4444"
-      assert quota_color_5h("claude", 0.35, nil, nil) == "#22c55e"
+      assert quota_color_5h("claude", 0.95, nil, nil) == "var(--arb-fail)"
+      assert quota_color_5h("claude", 0.35, nil, nil) == "var(--arb-proposal)"
     end
 
     test "antigravity applies the deficit-minutes pace math identically to claude" do
       reset_at = reset_at_after(30)
-      assert quota_color_5h("antigravity", 0.35, reset_at, nil) == "#ef4444"
-      assert quota_color_5h("antigravity", 0.89, reset_at_after(294), nil) == "#22c55e"
-      assert quota_color_5h("antigravity", 0.5, reset_at_after(2), nil) == "#9ca3af"
+      assert quota_color_5h("antigravity", 0.35, reset_at, nil) == "var(--arb-fail)"
+      assert quota_color_5h("antigravity", 0.89, reset_at_after(294), nil) == "var(--arb-info)"
+      assert quota_color_5h("antigravity", 0.5, reset_at_after(2), nil) == "var(--arb-done)"
     end
   end
 
@@ -198,27 +198,27 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     test "over-pace mid-window renders red" do
       window_min = 7 * 24 * 60
       reset_at = reset_at_after(round(window_min * 0.1), window_min)
-      assert quota_color_7d("claude", 0.35, reset_at, nil) == "#ef4444"
+      assert quota_color_7d("claude", 0.35, reset_at, nil) == "var(--arb-fail)"
     end
 
     test "under-pace near reset renders green" do
       window_min = 7 * 24 * 60
       reset_at = reset_at_after(round(window_min * 0.98), window_min)
-      assert quota_color_7d("claude", 0.89, reset_at, nil) == "#22c55e"
+      assert quota_color_7d("claude", 0.89, reset_at, nil) == "var(--arb-proposal)"
     end
 
     test "antigravity applies the deficit-minutes pace math identically to claude" do
       window_min = 7 * 24 * 60
       reset_at = reset_at_after(round(window_min * 0.1), window_min)
-      assert quota_color_7d("antigravity", 0.35, reset_at, nil) == "#ef4444"
+      assert quota_color_7d("antigravity", 0.35, reset_at, nil) == "var(--arb-fail)"
     end
 
     test "providers without a fixed window fall back to absolute-utilization thresholds" do
       reset_at = reset_at_after(30)
-      assert quota_color_7d("codex", 0.35, reset_at, nil) == "#22c55e"
-      assert quota_color_7d("codex", 0.95, reset_at, nil) == "#ef4444"
-      assert quota_color_7d("gemini_cli", 0.35, reset_at, nil) == "#22c55e"
-      assert quota_color_7d("gemini_cli", 0.95, reset_at, nil) == "#ef4444"
+      assert quota_color_7d("codex", 0.35, reset_at, nil) == "var(--arb-text-faint)"
+      assert quota_color_7d("codex", 0.95, reset_at, nil) == "var(--arb-fail)"
+      assert quota_color_7d("gemini_cli", 0.35, reset_at, nil) == "var(--arb-text-faint)"
+      assert quota_color_7d("gemini_cli", 0.95, reset_at, nil) == "var(--arb-fail)"
     end
   end
 
@@ -226,7 +226,7 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     test "returns the same atom quota_color_5h derives its color from" do
       reset_at = reset_at_after(30)
       assert quota_pace_state_5h("claude", 0.35, reset_at, nil) == :red
-      assert quota_color_5h("claude", 0.35, reset_at, nil) == "#ef4444"
+      assert quota_color_5h("claude", 0.35, reset_at, nil) == "var(--arb-fail)"
     end
 
     test "returns :grey while sampling, :green under-pace, for the 7d window too" do
@@ -357,6 +357,47 @@ defmodule ArbiterWeb.QuotaHelpersTest do
 
     test "no emphasis class when representative_claim is unknown" do
       assert quota_binding_class(nil, "five_hour") == nil
+    end
+  end
+
+  describe "quota_binding_title/2 — explain the non-binding window" do
+    test "no explanation title when this window is the binding one" do
+      assert quota_binding_title("five_hour", "five_hour") == nil
+      assert quota_binding_title("seven_day", "seven_day") == nil
+    end
+
+    test "explanation title names it as not the binding window and names the binding window" do
+      assert quota_binding_title("seven_day", "five_hour") ==
+               "not the binding window — Anthropic is currently limiting on 7d"
+
+      assert quota_binding_title("five_hour", "seven_day") ==
+               "not the binding window — Anthropic is currently limiting on 5h"
+    end
+
+    test "no explanation title when representative_claim is unknown" do
+      assert quota_binding_title(nil, "five_hour") == nil
+    end
+  end
+
+  describe "quota_note_color/2 — note/countdown colour derived from pace state" do
+    test "amber pace state maps to --arb-attention" do
+      assert quota_note_color(:amber, false) == "var(--arb-attention)"
+    end
+
+    test "red pace state maps to --arb-fail" do
+      assert quota_note_color(:red, false) == "var(--arb-fail)"
+    end
+
+    test "grey/sampling and green pace states map to nil (neutral)" do
+      assert quota_note_color(:grey, false) == nil
+      assert quota_note_color(:green, false) == nil
+    end
+
+    test "stale reading maps to nil (neutral)" do
+      assert quota_note_color(:red, true) == nil
+      assert quota_note_color(:amber, true) == nil
+      assert quota_note_color(:grey, true) == nil
+      assert quota_note_color(:green, true) == nil
     end
   end
 
