@@ -568,7 +568,8 @@ defmodule Arbiter.Quota.CloudProbeTest do
       assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
     end
 
-    test "the streak keeps re-arming past the threshold after a spurious recovery clears the mark (regression)",
+    test "a source-mismatched recovery no longer spuriously clears the usage-poll mark (bd-6jjgk0), " <>
+           "and the streak keeps re-arming it regardless",
          context do
       Req.Test.set_req_test_to_shared(context)
       _ws = workspace_with_token!("solo", "401-token")
@@ -595,11 +596,15 @@ defmodule Arbiter.Quota.CloudProbeTest do
       assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
 
       # Simulate the watchdog's own CLI probe reporting a spurious recovery
-      # (exactly what happened for 15h straight in the original incident) —
-      # this must not permanently blind the 401 streak to further outage.
+      # (exactly what happened for 15h straight in the original incident,
+      # repeatedly, since it reads a completely different credential cache
+      # from this poll — #1875). Unlike before bd-6jjgk0, a default-source
+      # (`:worker_report`/periodic-probe-shaped) recovery must NOT clear a
+      # mark this `:usage_poll` streak raised — the mark stays up, and so
+      # does the mailbox escalation for it.
       :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, watchdog)
       _ = :sys.get_state(watchdog)
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
 
       ExUnit.CaptureLog.capture_log(fn ->
         CloudProbe.probe(pid)
@@ -607,6 +612,16 @@ defmodule Arbiter.Quota.CloudProbeTest do
       end)
 
       assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      # Only this same `:usage_poll` signal succeeding again clears it.
+      stub_ok()
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 0 end)
+      end)
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
     end
 
     # Regression for the HIGH finding on bd-3j92yv: pre-P6 there was one

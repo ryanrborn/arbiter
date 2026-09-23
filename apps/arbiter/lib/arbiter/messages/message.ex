@@ -244,7 +244,7 @@ defmodule Arbiter.Messages.Message do
       require_atomic? false
 
       change after_action(fn _changeset, message, _context ->
-               Arbiter.Messages.Message.broadcast_new(message)
+               Arbiter.Messages.Message.broadcast_updated(message)
                {:ok, message}
              end)
     end
@@ -472,6 +472,31 @@ defmodule Arbiter.Messages.Message do
   end
 
   def broadcast_new(_message), do: :ok
+
+  @doc """
+  Broadcast `{:new_message, message}` on the message's workspace topic, same
+  as `broadcast_new/1`, but WITHOUT the `Arbiter.Events` `"inbox"` event.
+
+  Used by the `:restate` action (bd-6jjgk0): a restate rewrites an existing
+  outstanding escalation's body in place rather than inserting a new row, so
+  any LiveView inbox panel still needs to refresh — but a coordinator
+  subscribed to `Arbiter.Events` for the `"inbox"` event should NOT be woken
+  on every restate. That event means "a message arrived"; restating the same
+  row every failing poll cycle is exactly the spam this dedupe exists to
+  stop, so waking event-stream watchers on each restate would silently
+  reintroduce it one layer up. Silent-on-failure, mirroring `broadcast_new/1`.
+  """
+  def broadcast_updated(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:new_message, message})
+    :ok
+  rescue
+    e ->
+      require Logger
+      Logger.debug("Messages.Message.broadcast_updated/1 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  def broadcast_updated(_message), do: :ok
 
   @doc """
   Broadcast `{:message_read, message}` on the message's workspace topic.

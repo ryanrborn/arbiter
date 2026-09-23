@@ -194,6 +194,100 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
     end
   end
 
+  # bd-6jjgk0: the reported flap — CloudProbe's `/api/oauth/usage` poll marks
+  # an adapter expired (`:usage_poll`), the Watchdog's own periodic CLI probe
+  # then passes on a completely separate, still-valid credential, and used to
+  # clear the escalation and post "restored" anyway — only for the next
+  # usage-poll cycle to open a fresh one. That turned one outage into a
+  # "restored"/"expired" pair every ~5 minutes.
+  describe "source-scoped recovery: a recovering signal only clears its own source (bd-6jjgk0)" do
+    test "a passing periodic CLI probe does not clear a :usage_poll-raised escalation" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-flap-ws", prefix: "cwf"})
+
+      # FakeAdapterA exports no auth_probe_argv/1, so Preflight.check/2 answers
+      # :skipped — treated as a healthy probe without spawning a real CLI.
+      pid =
+        start_watchdog(
+          adapters: [FakeAdapterA],
+          enabled: true,
+          interval_ms: 60_000,
+          recovery_interval_ms: 60_000
+        )
+
+      :ok = CredentialWatchdog.mark_expired(FakeAdapterA, auth_expired_reason(), pid, :usage_poll)
+      :sys.get_state(pid)
+
+      assert [_escalation] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "credentials expired"))
+
+      send(pid, :check)
+      _ = :sys.get_state(pid)
+
+      assert CredentialWatchdog.expired?(FakeAdapterA, pid),
+             "a :periodic_probe success must not clear a :usage_poll-raised expiry"
+
+      assert Message.inbox("admiral", workspace_id: ws.id)
+             |> Enum.filter(&(&1.subject =~ "restored")) == [],
+             "no spurious \"restored\" message for a source that never recovered"
+
+      # The original escalation is still the single outstanding row — no
+      # duplicate/second "expired" message was raised either.
+      assert [_still_one] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "credentials expired"))
+    end
+
+    test "recovering via the same source that raised the expiry clears it" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-flap-match-ws", prefix: "cwm"})
+      pid = start_watchdog()
+
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          auth_expired_reason(),
+          pid,
+          :usage_poll
+        )
+
+      :sys.get_state(pid)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid, :usage_poll)
+      :sys.get_state(pid)
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      assert [_restored] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "restored"))
+    end
+
+    test "a mismatched mark_recovered/3 source leaves the escalation open" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-flap-mismatch-ws", prefix: "cwx"})
+      pid = start_watchdog()
+
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          auth_expired_reason(),
+          pid,
+          :usage_poll
+        )
+
+      :sys.get_state(pid)
+
+      # Default source is :worker_report — mismatched against :usage_poll.
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid)
+      :sys.get_state(pid)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      assert Message.inbox("admiral", workspace_id: ws.id)
+             |> Enum.filter(&(&1.subject =~ "restored")) == []
+    end
+  end
+
   describe "periodic probe (handle_info :check)" do
     setup do
       {:ok, ws} = Ash.create(Workspace, %{name: "cw-probe-ws", prefix: "cwp"})

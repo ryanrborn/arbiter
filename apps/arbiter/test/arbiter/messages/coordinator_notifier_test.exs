@@ -1020,7 +1020,8 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  CoordinatorNotifier.credential_expired(
                    %{workspace_id: ws},
                    Arbiter.Agents.Claude,
-                   oauth_401_reason(n)
+                   oauth_401_reason(n),
+                   :usage_poll
                  )
       end
 
@@ -1035,7 +1036,8 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                CoordinatorNotifier.credential_expired(
                  %{workspace_id: ws},
                  Arbiter.Agents.Claude,
-                 oauth_401_reason(2)
+                 oauth_401_reason(2),
+                 :usage_poll
                )
 
       assert [msg] = Message.inbox("admiral", workspace_id: ws)
@@ -1045,7 +1047,8 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                CoordinatorNotifier.credential_expired(
                  %{workspace_id: ws},
                  Arbiter.Agents.Claude,
-                 oauth_401_reason(3)
+                 oauth_401_reason(3),
+                 :usage_poll
                )
 
       assert [updated] = Message.outstanding("admiral", workspace_id: ws)
@@ -1061,32 +1064,74 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                CoordinatorNotifier.credential_expired(
                  %{workspace_id: ws},
                  Arbiter.Agents.Claude,
-                 oauth_401_reason(2)
+                 oauth_401_reason(2),
+                 :usage_poll
                )
 
       assert :ok =
                CoordinatorNotifier.credential_expired(
                  %{workspace_id: ws},
                  Arbiter.Agents.Codex,
-                 oauth_401_reason(2)
+                 oauth_401_reason(2),
+                 :usage_poll
                )
 
       assert [_a, _b] = Message.inbox("admiral", workspace_id: ws)
     end
 
-    test "the oauth-usage-poll signal names the probe's own credential instead of claiming dispatch is suspended" do
+    test "a different failure kind (source) for the same adapter is not deduped into the same row" do
+      ws = uniq("ws")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 reason,
+                 :periodic_probe
+               )
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 oauth_401_reason(2),
+                 :usage_poll
+               )
+
+      assert [_a, _b] = Message.inbox("admiral", workspace_id: ws)
+    end
+
+    test "the oauth-usage-poll signal (source: :usage_poll) names the probe's own credential without dropping the suspended claim" do
       ws = uniq("ws")
 
       assert :ok =
                CoordinatorNotifier.credential_expired(
                  %{workspace_id: ws},
                  Arbiter.Agents.Claude,
-                 oauth_401_reason(2)
+                 oauth_401_reason(2),
+                 :usage_poll
                )
 
       assert [escalation] = Message.inbox("admiral", workspace_id: ws)
-      refute escalation.body =~ "new worker dispatches for this adapter are suspended"
+      assert escalation.body =~ "new worker dispatches for this adapter are suspended"
       assert escalation.body =~ "probe's own cached OAuth token"
+    end
+
+    test "a :periodic_probe or :worker_report source (the default) does not add the usage-poll caveat" do
+      ws = uniq("ws")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 reason
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.body =~ "new worker dispatches for this adapter are suspended"
+      refute escalation.body =~ "probe's own cached OAuth token"
     end
   end
 
