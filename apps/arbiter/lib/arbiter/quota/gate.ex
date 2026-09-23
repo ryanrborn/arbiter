@@ -5,9 +5,9 @@ defmodule Arbiter.Quota.Gate do
   The gate is the single choke point the fleet dispatcher
   (`Arbiter.Worker.Dispatch.dispatch/2`) consults before mutating any task
   state, so a near-cap decision covers every dispatch path at once. It reads the
-  latest quota snapshot for the workspace **and the provider this dispatch will
-  actually run on** (bd-2mpo3f) and decides what to do when that provider nears
-  / crosses its primary window cap:
+  latest quota snapshot for the account whose credential this dispatch will
+  authenticate with, **and the provider this dispatch will actually run on** (bd-2mpo3f)
+  and decides what to do when that provider nears / crosses its primary window cap:
 
     * `:allow` — dispatch proceeds normally (there is headroom, or we are
       failing open because no snapshot exists).
