@@ -506,25 +506,38 @@ defmodule Arbiter.Quota.CloudProbe do
       signal: nil
     }
 
-    CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, reason, state.credential_watchdog)
+    CredentialWatchdog.mark_expired(
+      Arbiter.Agents.Claude,
+      reason,
+      state.credential_watchdog,
+      :usage_poll
+    )
   end
 
-  # A qualifying success is a recovery signal when this probe's own streak
-  # had started (bd-1pmf9h / bd-1fpjgx), and also whenever the provider's
-  # `AuthHold` is open (bd-21bmdh): a hold opened by N consecutive *worker*
-  # auth deaths marked the watchdog without this probe ever seeing a failure,
-  # so the streak alone would never clear it. `AuthHold.held/2` fails open, so
-  # an unreadable hold never turns every success into a recovery call. Both
-  # casts are idempotent; the direct `recovered/2` also covers a hold whose
-  # watchdog mark was already cleared some other way.
+  # A qualifying success clears this probe's own `:usage_poll`-tagged watchdog
+  # expiry when its streak had started (bd-1pmf9h / bd-1fpjgx) — tagged so it
+  # can only clear an expiry this same signal raised, not one a periodic CLI
+  # probe raised (bd-6jjgk0). Independently, whenever the provider's
+  # `AuthHold` is open (bd-21bmdh) — opened by N consecutive *worker* auth
+  # deaths, a signal this probe never saw, via `AuthHold.open/5`'s
+  # `mark_expired(..., :worker_report)` — this success also clears that
+  # `:worker_report`-tagged watchdog expiry directly (`AuthHold.recovered/2`
+  # itself only moves the hold to probation; it does not touch the watchdog)
+  # and puts the hold on probation. `AuthHold.held/2` fails open, so an
+  # unreadable hold never turns every success into a recovery call. All three
+  # casts are idempotent and a source mismatch is a harmless no-op.
   defp note_recovered(%State{} = state, adapter, streak) do
     hold_open? = AuthHold.held(adapter, state.auth_hold) != nil
 
-    if streak > 0 or hold_open? do
-      CredentialWatchdog.mark_recovered(adapter, state.credential_watchdog)
+    if streak > 0 do
+      CredentialWatchdog.mark_recovered(adapter, state.credential_watchdog, :usage_poll)
     end
 
-    if hold_open?, do: AuthHold.recovered(adapter, state.auth_hold)
+    if hold_open? do
+      CredentialWatchdog.mark_recovered(adapter, state.credential_watchdog, :worker_report)
+      AuthHold.recovered(adapter, state.auth_hold)
+    end
+
     :ok
   end
 
@@ -568,7 +581,12 @@ defmodule Arbiter.Quota.CloudProbe do
       signal: nil
     }
 
-    CredentialWatchdog.mark_expired(Arbiter.Agents.Codex, reason, state.credential_watchdog)
+    CredentialWatchdog.mark_expired(
+      Arbiter.Agents.Codex,
+      reason,
+      state.credential_watchdog,
+      :usage_poll
+    )
   end
 
   # ---- Gemini/Antigravity credential-expiry signal (bd-1fpjgx) -----------
@@ -615,7 +633,12 @@ defmodule Arbiter.Quota.CloudProbe do
       signal: nil
     }
 
-    CredentialWatchdog.mark_expired(Arbiter.Agents.Gemini, reason, state.credential_watchdog)
+    CredentialWatchdog.mark_expired(
+      Arbiter.Agents.Gemini,
+      reason,
+      state.credential_watchdog,
+      :usage_poll
+    )
   end
 
   defp safe_escalate(fun) do
