@@ -334,6 +334,99 @@ defmodule ArbiterWeb.QuotaHelpers do
     |> Enum.map_join(" ", &String.capitalize/1)
   end
 
+  # Provider identity hues for the quota-bar fill (bd-gukyy1). Only `--arb-*`
+  # custom properties, never raw hex, so the fill follows the dark-mode
+  # redefinitions in app.css. Red (`--arb-fail`) and amber (`--arb-attention`)
+  # are deliberately absent: red is the one pace state allowed to override the
+  # fill, and a provider hue must never read as that state.
+  @provider_hues %{
+    "claude" => "var(--arb-proposal)",
+    "antigravity" => "var(--arb-info)"
+  }
+
+  # An unmapped provider has no identity to show, so it gets a neutral slate
+  # rather than borrowing another provider's hue or a state colour.
+  @fallback_provider_hue "var(--arb-text-faint)"
+
+  @doc """
+  The fill hue for `provider`'s quota bars: a `var(--arb-*)` reference from
+  `@provider_hues`, or `#{@fallback_provider_hue}` for any provider not in the
+  map (including `nil`).
+  """
+  def quota_provider_hue(provider), do: Map.get(@provider_hues, provider, @fallback_provider_hue)
+
+  @doc """
+  The bar windows to render for one quota view, in order: `window` picks the
+  pace math (`"5h"` or `"7d"` duration), `label` is what the bar shows — the
+  view's own `primary_label` / `secondary_label` (Claude "5h"/"7d",
+  Antigravity "5h"/"weekly", collapsed Google "used"). A view with no
+  `secondary_label` (bd-7mro0t's collapsed fallback) yields one window, not a
+  second bar pinned at 0%.
+  """
+  def quota_windows(view) do
+    primary = %{
+      window: "5h",
+      label: Map.get(view, :primary_label) || "5h",
+      utilization: view.utilization_5h,
+      reset_at: view.reset_5h_at
+    }
+
+    case Map.get(view, :secondary_label, "7d") do
+      nil ->
+        [primary]
+
+      label ->
+        [
+          primary,
+          %{
+            window: "7d",
+            label: label,
+            utilization: view.utilization_7d,
+            reset_at: view.reset_7d_at
+          }
+        ]
+    end
+  end
+
+  # Antigravity's two bucket groups, keyed as `CloudCode` persists them
+  # (`"<group>_5h"` / `"<group>_weekly"` model ids) and labelled as the `agy`
+  # CLI names them.
+  @antigravity_groups [
+    {"gemini_models", "Gemini Models"},
+    {"claude_and_gpt_models", "Claude and GPT models"}
+  ]
+
+  @doc """
+  Antigravity's per-group bucket windows, read from the view's `models` list by
+  `model_id` via `Arbiter.Quota.CloudCode.antigravity_bucket/3` — one
+  `%{group: id, label: name, windows: [...]}` per group that has any bucket,
+  each window shaped like `quota_windows/1`'s. `[]` when the snapshot carries
+  no parseable buckets, so the caller falls back to `quota_windows/1`.
+  """
+  def quota_antigravity_groups(view) do
+    models = Map.get(view, :models) || []
+
+    for {group, label} <- @antigravity_groups,
+        windows = antigravity_group_windows(models, group),
+        windows != [] do
+      %{group: group, label: label, windows: windows}
+    end
+  end
+
+  defp antigravity_group_windows(models, group) do
+    for {window, bucket_window, label} <- [{"5h", "5h", "5h"}, {"7d", "weekly", "weekly"}],
+        %{} = reading <- [
+          Arbiter.Quota.CloudCode.antigravity_bucket(models, group, bucket_window)
+        ] do
+      %{
+        window: window,
+        label: label,
+        utilization: reading.utilization,
+        reset_at: reading.reset_at
+      }
+    end
+  end
+
   @doc """
   Fraction of the 5h window elapsed so far, as a 0-100 integer — the
   time-elapsed marker position on the 5h usage bars. `nil` when there's no
