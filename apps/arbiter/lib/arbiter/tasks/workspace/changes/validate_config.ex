@@ -610,8 +610,14 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   #   * weekly_threshold a number in (0, 1] — the 7d/weekly window ceiling
   #   * weekly_warning_policy ∈ {"ignore","hold"} — what a 7d `allowed_warning`
   #     does (default "ignore"; see Arbiter.Quota.Gate.weekly_warning_policy/1)
+  #   * threshold_mode ∈ {"flat","paced"} (bd-2daof2; default "flat")
+  #   * paced_floor / weekly_paced_floor numbers in (0, 1] — the paced-mode
+  #     head start on the 5h/session and 7d/weekly windows
+  # `window_seconds` is deliberately not a workspace key: window length belongs
+  # to the provider account (see Arbiter.Quota.Gate.window_seconds/2).
   @valid_quota_modes ~w[throttle continue]
   @valid_weekly_warning_policies ~w[ignore hold]
+  @valid_threshold_modes ~w[flat paced]
 
   @doc "Valid `quota.on_exhaustion` value strings."
   @spec valid_quota_modes() :: [String.t()]
@@ -647,6 +653,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> then(fn cs -> validate_fraction(cs, quota, "throttle_threshold") end)
     |> then(fn cs -> validate_fraction(cs, quota, "weekly_threshold") end)
     |> then(fn cs -> validate_weekly_warning_policy(cs, quota) end)
+    |> then(fn cs -> validate_threshold_mode(cs, quota) end)
+    |> then(fn cs -> validate_fraction(cs, quota, "paced_floor") end)
+    |> then(fn cs -> validate_fraction(cs, quota, "weekly_paced_floor") end)
   end
 
   defp validate_quota(changeset, _) do
@@ -655,7 +664,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   # A 0..1 utilization ceiling that may arrive as a number or its JSON string
   # form (the workspace config form posts strings). Shared by the 5h
-  # `throttle_threshold` and the 7d `weekly_threshold`.
+  # `throttle_threshold`, the 7d `weekly_threshold` and the paced-mode floors.
   defp validate_fraction(changeset, block, key) do
     case Map.get(block, key) do
       nil -> changeset
@@ -688,6 +697,24 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           message:
             "quota.weekly_warning_policy must be one of " <>
               "#{Enum.join(@valid_weekly_warning_policies, ", ")}; got: #{inspect(other)}"
+        )
+    end
+  end
+
+  defp validate_threshold_mode(changeset, quota) do
+    case Map.get(quota, "threshold_mode") do
+      nil ->
+        changeset
+
+      m when m in @valid_threshold_modes ->
+        changeset
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "quota.threshold_mode must be one of " <>
+              "#{Enum.join(@valid_threshold_modes, ", ")}; got: #{inspect(other)}"
         )
     end
   end

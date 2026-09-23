@@ -1,12 +1,13 @@
 defmodule ArbiterWeb.QuotaHelpers do
   @moduledoc false
 
-  # Fixed window durations for Anthropic's rate-limit windows (bd-d8wo5m).
+  alias Arbiter.Quota.Gate
+
   # `reset_5h_at`/`reset_7d_at` are stored as absolute timestamps with no
-  # window-duration field, so the duration is a constant here (mirrors
-  # `Arbiter.Quota.Overage.@five_hours_seconds`).
-  @five_hours_seconds 5 * 60 * 60
-  @seven_days_seconds 7 * 24 * 60 * 60
+  # window-duration field (bd-d8wo5m), so the pace math needs each window's
+  # length from somewhere. It comes from `Gate.window_seconds/2`, the same
+  # resolver the paced dispatch gate uses (bd-2daof2) — two sources of window
+  # length would let a bar read "on pace" while the gate holds.
 
   # Providers whose quota windows are fixed-duration, so the deficit-minutes
   # pace math and the elapsed-time hairline apply (bd-7uwovg). Every other
@@ -74,11 +75,11 @@ defmodule ArbiterWeb.QuotaHelpers do
   to decide whether red should override a provider hue).
   """
   def quota_pace_state_5h(provider, utilization, reset_at, overage_status),
-    do: pace_state(provider, utilization, reset_at, overage_status, @five_hours_seconds)
+    do: pace_state(provider, utilization, reset_at, overage_status, window_seconds("5h"))
 
   @doc "Same as `quota_pace_state_5h/4`, for the 7d window."
   def quota_pace_state_7d(provider, utilization, reset_at, overage_status),
-    do: pace_state(provider, utilization, reset_at, overage_status, @seven_days_seconds)
+    do: pace_state(provider, utilization, reset_at, overage_status, window_seconds("7d"))
 
   @doc """
   Pace-ratio text for the 5h bar's tooltip, e.g. `"3.5x pace"` — how many
@@ -89,11 +90,11 @@ defmodule ArbiterWeb.QuotaHelpers do
   rate).
   """
   def quota_pace_ratio_5h(provider, utilization, reset_at),
-    do: pace_ratio_text(provider, utilization, reset_at, @five_hours_seconds)
+    do: pace_ratio_text(provider, utilization, reset_at, window_seconds("5h"))
 
   @doc "Same as `quota_pace_ratio_5h/3`, for the 7d window."
   def quota_pace_ratio_7d(provider, utilization, reset_at),
-    do: pace_ratio_text(provider, utilization, reset_at, @seven_days_seconds)
+    do: pace_ratio_text(provider, utilization, reset_at, window_seconds("7d"))
 
   @doc """
   Warning label for the 5h bar when the current burn pace threatens to
@@ -113,7 +114,7 @@ defmodule ArbiterWeb.QuotaHelpers do
         utilization,
         reset_at,
         overage_status,
-        @five_hours_seconds,
+        window_seconds("5h"),
         on_exhaustion
       )
 
@@ -125,7 +126,7 @@ defmodule ArbiterWeb.QuotaHelpers do
         utilization,
         reset_at,
         overage_status,
-        @seven_days_seconds,
+        window_seconds("7d"),
         on_exhaustion
       )
 
@@ -155,6 +156,8 @@ defmodule ArbiterWeb.QuotaHelpers do
       list -> Enum.join(list, " · ")
     end
   end
+
+  defp window_seconds(label), do: Gate.window_seconds(label)
 
   defp color_hex(:red), do: @color_red
   defp color_hex(:amber), do: @color_amber
@@ -433,13 +436,13 @@ defmodule ArbiterWeb.QuotaHelpers do
   window at all; see bd-d8wo5m review round 1).
   """
   def quota_elapsed_pct_5h(provider, reset_at) when provider in @fixed_window_providers,
-    do: elapsed_pct(reset_at, @five_hours_seconds)
+    do: elapsed_pct(reset_at, window_seconds("5h"))
 
   def quota_elapsed_pct_5h(_provider, _reset_at), do: nil
 
   @doc "Same as `quota_elapsed_pct_5h/2`, for the 7d window."
   def quota_elapsed_pct_7d(provider, reset_at) when provider in @fixed_window_providers,
-    do: elapsed_pct(reset_at, @seven_days_seconds)
+    do: elapsed_pct(reset_at, window_seconds("7d"))
 
   def quota_elapsed_pct_7d(_provider, _reset_at), do: nil
 
@@ -451,13 +454,13 @@ defmodule ArbiterWeb.QuotaHelpers do
   in `@fixed_window_providers`.
   """
   def quota_tooltip_5h(provider, utilization, reset_at) when provider in @fixed_window_providers,
-    do: tooltip(utilization, reset_at, @five_hours_seconds)
+    do: tooltip(utilization, reset_at, window_seconds("5h"))
 
   def quota_tooltip_5h(_provider, _utilization, _reset_at), do: nil
 
   @doc "Same as `quota_tooltip_5h/3`, for the 7d window."
   def quota_tooltip_7d(provider, utilization, reset_at) when provider in @fixed_window_providers,
-    do: tooltip(utilization, reset_at, @seven_days_seconds)
+    do: tooltip(utilization, reset_at, window_seconds("7d"))
 
   def quota_tooltip_7d(_provider, _utilization, _reset_at), do: nil
 
