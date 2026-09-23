@@ -1,0 +1,53 @@
+name: CLA Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+# pull_request_target runs with write-scoped repository credentials against
+# the base branch's workflow file, not the PR's. It must never check out,
+# build, or execute the PR head's code — this workflow only reads PR/comment
+# metadata and posts a status check + comment.
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla-secret-check:
+    runs-on: ubuntu-latest
+    outputs:
+      pat_present: ${{ steps.check.outputs.pat_present }}
+    steps:
+      - id: check
+        env:
+          CLA_ASSISTANT_PAT: ${{ secrets.CLA_ASSISTANT_PAT }}
+        run: |
+          if [ -n "$CLA_ASSISTANT_PAT" ]; then
+            echo "pat_present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pat_present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  cla:
+    needs: cla-secret-check
+    # Degrade cleanly: until the repo owner completes the one-time cla-assistant
+    # setup (PAT stored as CLA_ASSISTANT_PAT + a signature-store repo), skip
+    # with a neutral outcome instead of leaving PRs blocked on a red check.
+    if: needs.cla-secret-check.outputs.pat_present == 'true' && (github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA' || github.event_name == 'pull_request_target')
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant"
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_ASSISTANT_PAT }}
+        with:
+          path-to-signatures: "signatures/version1/cla.json"
+          path-to-document: "https://github.com/${{ github.repository }}/blob/main/CLA.md"
+          branch: "cla-signatures"
+          allowlist: bot*
+          custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
