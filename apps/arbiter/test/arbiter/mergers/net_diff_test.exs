@@ -132,7 +132,10 @@ defmodule Arbiter.Mergers.NetDiffTest do
     end
 
     test ":error when the worktree path does not exist" do
-      assert NetDiff.local_diff_blank?("/nonexistent/path/#{System.unique_integer([:positive])}", "HEAD..HEAD") ==
+      assert NetDiff.local_diff_blank?(
+               "/nonexistent/path/#{System.unique_integer([:positive])}",
+               "HEAD..HEAD"
+             ) ==
                :error
     end
   end
