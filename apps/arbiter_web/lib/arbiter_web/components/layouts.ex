@@ -136,12 +136,14 @@ defmodule ArbiterWeb.Layouts do
         <div
           :if={@quotas != []}
           id="quota-topbar"
-          class="max-lg:hidden flex flex-col justify-center gap-[3px]"
+          class="max-lg:hidden grid grid-cols-[auto_auto_auto] items-center gap-x-3 gap-y-[3px]"
         >
+          <%!-- A subgrid row, so each window column lines up across
+                providers however wide one row's label or note is. --%>
           <div
             :for={quota <- @quotas}
             id={"quota-topbar-#{quota.provider}"}
-            class="flex items-center gap-3"
+            class="col-span-3 grid grid-cols-subgrid items-center"
           >
             <span class="flex-none min-w-[72px] text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
               {quota_provider_label(quota.provider)}
@@ -158,6 +160,7 @@ defmodule ArbiterWeb.Layouts do
               overage_status={quota.overage_status}
               representative_claim={quota.representative_claim}
               stale_message={quota.message}
+              label_width={34}
               on_exhaustion={@quota_on_exhaustion}
             />
           </div>

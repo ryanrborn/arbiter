@@ -243,6 +243,11 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   attr :representative_claim, :any, default: nil
   attr :stale_message, :string, default: nil
   attr :width, :integer, default: 96
+
+  attr :label_width, :integer,
+    default: nil,
+    doc: "fixed px width for the window label, so stacked bars with different labels line up"
+
   attr :class, :any, default: nil
 
   attr :show_label, :boolean,
@@ -288,10 +293,14 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       >
         {@provider}
       </span>
-      <div class="flex items-center gap-[7px]">
+      <%!-- Wraps only when its container constrains it (the narrow /usage
+            panel), and then the note drops below as one unit rather than
+            breaking word by word. --%>
+      <div class="flex flex-wrap items-center gap-x-[7px] gap-y-[2px]">
         <span
           data-quota-label
           class="flex-none min-w-[14px] text-[9.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+          style={@label_width && "width: #{@label_width}px;"}
         >
           {@label || @window}
         </span>
@@ -321,7 +330,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
           data-quota-note
           style={@note_color && "color: #{@note_color};"}
           class={[
-            "inline-flex items-center gap-[3px] text-[9.5px] font-[family-name:var(--font-mono)]",
+            "inline-flex items-center gap-[3px] whitespace-nowrap text-[9.5px] font-[family-name:var(--font-mono)]",
             !@note_color && @over && !@stale? && "text-[var(--arb-attention)]",
             !@note_color && !(@over && !@stale?) && "text-[var(--text-label)]"
           ]}

@@ -523,7 +523,8 @@ defmodule ArbiterWeb.UsageLive do
       overage_status={@quota.overage_status}
       representative_claim={@quota.representative_claim}
       stale_message={@quota.message}
-      width={170}
+      label_width={34}
+      width={150}
     />
     """
   end
