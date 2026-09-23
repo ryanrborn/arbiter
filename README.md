@@ -412,7 +412,7 @@ arb account create claude my_account
 arb account attach <workspace> claude my_account
 
 # Install or rotate the credential
-arb account rotate <workspace> claude --token <your-long-ttl-token>
+arb account rotate claude:my_account --kind oauth_token --env-var CLAUDE_CODE_OAUTH_TOKEN --secret <your-long-ttl-token>
 ```
 
 This path is particularly useful if you have **multiple Claude credentials**
