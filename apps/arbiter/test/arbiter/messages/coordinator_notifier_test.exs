@@ -1102,7 +1102,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       assert [_a, _b] = Message.inbox("admiral", workspace_id: ws)
     end
 
-    test "the oauth-usage-poll signal (source: :usage_poll) names the probe's own credential without dropping the suspended claim" do
+    test "the oauth-usage-poll signal (source: :usage_poll) with the gate actually open does not claim dispatches are suspended, but names the probe's own credential" do
       ws = uniq("ws")
 
       assert :ok =
@@ -1110,7 +1110,26 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  %{workspace_id: ws},
                  Arbiter.Agents.Claude,
                  oauth_401_reason(2),
-                 :usage_poll
+                 :usage_poll,
+                 false
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      refute escalation.body =~ "new worker dispatches for this adapter are suspended"
+      assert escalation.body =~ "NOT suspended"
+      assert escalation.body =~ "probe's own cached OAuth token"
+    end
+
+    test "the oauth-usage-poll signal with the gate actually closed does claim suspension and still names the probe's credential" do
+      ws = uniq("ws")
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 oauth_401_reason(2),
+                 :usage_poll,
+                 true
                )
 
       assert [escalation] = Message.inbox("admiral", workspace_id: ws)

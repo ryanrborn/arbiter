@@ -201,7 +201,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
   # usage-poll cycle to open a fresh one. That turned one outage into a
   # "restored"/"expired" pair every ~5 minutes.
   describe "source-scoped recovery: a recovering signal only clears its own source (bd-6jjgk0)" do
-    test "a passing periodic CLI probe does not clear a :usage_poll-raised escalation" do
+    test "a passing periodic CLI probe reopens the dispatch gate without clearing a :usage_poll-raised escalation" do
       {:ok, ws} = Ash.create(Workspace, %{name: "cw-flap-ws", prefix: "cwf"})
 
       # FakeAdapterA exports no auth_probe_argv/1, so Preflight.check/2 answers
@@ -221,11 +221,19 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
                Message.inbox("admiral", workspace_id: ws.id)
                |> Enum.filter(&(&1.subject =~ "credentials expired"))
 
+      # `:usage_poll` reads a credential the worker CLI never touches (#1875),
+      # so it must never close the dispatch gate on its own (bd-6jjgk0
+      # finding 1) — only assert it here to prove the *escalation*, not the
+      # gate, is what raised.
+      refute CredentialWatchdog.expired?(FakeAdapterA, pid),
+             "a :usage_poll-raised expiry must never close the dispatch gate by itself"
+
       send(pid, :check)
       _ = :sys.get_state(pid)
 
-      assert CredentialWatchdog.expired?(FakeAdapterA, pid),
-             "a :periodic_probe success must not clear a :usage_poll-raised expiry"
+      refute CredentialWatchdog.expired?(FakeAdapterA, pid),
+             "a :periodic_probe success reopens the dispatch gate regardless of what raised " <>
+               "the outstanding escalation — workers read a different, healthy credential"
 
       assert Message.inbox("admiral", workspace_id: ws.id)
              |> Enum.filter(&(&1.subject =~ "restored")) == [],
@@ -251,11 +259,15 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
         )
 
       :sys.get_state(pid)
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+      # A :usage_poll expiry never closes the dispatch gate on its own
+      # (bd-6jjgk0 finding 1) — assert the escalation, not the gate, here.
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
       :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid, :usage_poll)
       :sys.get_state(pid)
 
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, pid)
       refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
       assert [_restored] =
@@ -263,7 +275,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
                |> Enum.filter(&(&1.subject =~ "restored"))
     end
 
-    test "a mismatched mark_recovered/3 source leaves the escalation open" do
+    test "a mismatched mark_recovered/3 source clears the dispatch gate but leaves the escalation open" do
       {:ok, ws} = Ash.create(Workspace, %{name: "cw-flap-mismatch-ws", prefix: "cwx"})
       pid = start_watchdog()
 
@@ -276,12 +288,17 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
         )
 
       :sys.get_state(pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
-      # Default source is :worker_report — mismatched against :usage_poll.
+      # Default source is :worker_report — mismatched against :usage_poll, so
+      # the escalation (raised by :usage_poll) stays open. :worker_report is
+      # still a gate source, so if the gate had been closed by some other
+      # gate-source expiry it would reopen here — it is already open in this
+      # scenario since :usage_poll never closed it (bd-6jjgk0 finding 1).
       :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid)
       :sys.get_state(pid)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
       assert Message.inbox("admiral", workspace_id: ws.id)
              |> Enum.filter(&(&1.subject =~ "restored")) == []

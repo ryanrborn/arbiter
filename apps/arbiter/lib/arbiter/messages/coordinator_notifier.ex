@@ -268,24 +268,47 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   `:usage_poll` (`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage`-family poll,
   a separately cached credential, #1875). It keys both the dedupe subject
   (so a `:usage_poll` episode and a `:periodic_probe` episode for the same
-  adapter never collide into one row) and the dispatch-gate note text below,
+  adapter never collide into one row) and the source-description text below,
   in place of inferring either from `reason.summary`.
+
+  `gate_closed?` (default `true`, for callers that don't gate dispatch on
+  anything and are only ever `:worker_report`/`:periodic_probe`) is the
+  adapter's *actual* dispatch-gate state at the moment this call is made —
+  `Arbiter.Agents.CredentialWatchdog.expired?/1` right after this same expiry
+  was recorded. It, not `source`, decides whether the body claims dispatches
+  are suspended (bd-6jjgk0 finding 1): a `:usage_poll` expiry never closes the
+  gate on its own (#1875 — that probe reads a token the worker CLI doesn't),
+  so its escalation says so and names the probe's own credential as the one
+  that failed, without claiming dispatch is blocked unless some other,
+  gate-closing expiry also happens to be outstanding for the same adapter.
   """
   @spec credential_expired(%{workspace_id: String.t()}, module(), StopReason.t(), atom()) :: :ok
   def credential_expired(snapshot, adapter, reason),
-    do: credential_expired(snapshot, adapter, reason, :worker_report)
+    do: credential_expired(snapshot, adapter, reason, :worker_report, true)
+
+  @spec credential_expired(
+          %{workspace_id: String.t()},
+          module(),
+          StopReason.t(),
+          atom(),
+          boolean()
+        ) :: :ok
+  def credential_expired(snapshot, adapter, reason, source),
+    do: credential_expired(snapshot, adapter, reason, source, true)
 
   def credential_expired(
         %{workspace_id: ws_id} = snapshot,
         adapter,
         %StopReason{} = reason,
-        source
+        source,
+        gate_closed?
       )
-      when is_binary(ws_id) and is_atom(adapter) and is_atom(source) do
+      when is_binary(ws_id) and is_atom(adapter) and is_atom(source) and is_boolean(gate_closed?) do
     snapshot_with_adapter =
       snapshot
       |> Map.put(:adapter, adapter)
       |> Map.put(:source, source)
+      |> Map.put(:gate_closed?, gate_closed?)
 
     {subject, body} = escalation_payload(:credential_expired, snapshot_with_adapter, reason)
 
@@ -295,7 +318,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     end
   end
 
-  def credential_expired(_snapshot, _adapter, _reason, _source), do: :ok
+  def credential_expired(_snapshot, _adapter, _reason, _source, _gate_closed?), do: :ok
 
   @doc """
   Clear an outstanding proactive-credential-expiry escalation once the probe
@@ -1534,6 +1557,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp escalation_payload(:credential_expired, snapshot, %StopReason{} = reason) do
     adapter = Map.get(snapshot, :adapter)
     source = Map.get(snapshot, :source, :worker_report)
+    gate_closed? = Map.get(snapshot, :gate_closed?, true)
     adapter_label = if adapter, do: inspect(adapter), else: "agent"
     subject = credential_expired_subject(adapter, source)
 
@@ -1542,7 +1566,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         "Proactive credential probe: #{adapter_label} failed authentication (#{source_description(source)}).",
         reason.summary,
         reason.remediation && "Remediation: #{reason.remediation}",
-        dispatch_gate_note(source)
+        dispatch_gate_note(source, gate_closed?)
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
@@ -1609,26 +1633,41 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp source_description(:usage_poll), do: "the /api/oauth/usage-family poll"
   defp source_description(_worker_report), do: "N consecutive worker auth deaths"
 
-  # `Arbiter.Agents.CredentialWatchdog.expired?/1` gates
-  # `Arbiter.Worker.Dispatch` for **any** outstanding source, `:usage_poll`
-  # included — so whenever this escalation fires, the dispatch gate for this
-  # adapter really is closed right now (this is the same `mark_expired` call
-  # that just closed it, or restates while it is still open). The note below
-  # is therefore always accurate; `source` only decides whether to also name
-  # the probe's own credential as the one that failed (bd-6jjgk0), rather
-  # than inferring that from `reason.summary` text.
-  defp dispatch_gate_note(:usage_poll) do
+  # `gate_closed?` is the adapter's actual `CredentialWatchdog.expired?/1`
+  # state at the moment this escalation was raised/restated, not inferred
+  # from `source` — since `:usage_poll` (bd-6jjgk0 finding 1) no longer
+  # closes the dispatch gate on its own (`CredentialWatchdog.gate_source?/1`),
+  # it usually arrives here `false` for that source, and the note says so
+  # instead of falsely claiming dispatch is suspended while workers keep
+  # running fine on their own, self-refreshed session (#1875). It can still
+  # be `true` for `:usage_poll` if a *different*, gate-closing expiry (the
+  # periodic CLI probe, or N worker deaths) happens to be outstanding for the
+  # same adapter at the same time — in that case the note says the gate is
+  # closed but still names the probe's own credential as a distinct failure.
+  defp dispatch_gate_note(:usage_poll, true) do
     "Note: new worker dispatches for this adapter are suspended until credentials are " <>
-      "restored. This failure was detected via the probe's own cached OAuth token (the " <>
+      "restored — a separate, gate-closing expiry is also outstanding for this adapter. " <>
+      "This escalation itself was detected via the probe's own cached OAuth token (the " <>
       "/api/oauth/usage-family poll), a separate cache from what worker dispatches read — " <>
       "the worker CLI self-refreshes its own session on each run (#1875). If " <>
       "re-authenticating the operator's CLI doesn't clear this specific escalation, the " <>
       "probe's cached token needs its own refresh."
   end
 
-  defp dispatch_gate_note(_source),
+  defp dispatch_gate_note(:usage_poll, false) do
+    "Note: new worker dispatches for this adapter are NOT suspended by this escalation. " <>
+      "This failure was detected via the probe's own cached OAuth token (the " <>
+      "/api/oauth/usage-family poll), a separate cache from what worker dispatches read — " <>
+      "the worker CLI self-refreshes its own session on each run and has kept dispatching " <>
+      "fine (#1875). Re-authenticating the operator's CLI is still the fix; the probe's own " <>
+      "cached token needs its own refresh to clear this specific escalation."
+  end
+
+  defp dispatch_gate_note(_source, true),
     do:
       "Note: new worker dispatches for this adapter are suspended until credentials are restored."
+
+  defp dispatch_gate_note(_source, false), do: nil
 
   # Categories whose remediation is nothing but "re-dispatch (the task)" —
   # `:exited_without_done` ("Review the transcript, then re-dispatch"),

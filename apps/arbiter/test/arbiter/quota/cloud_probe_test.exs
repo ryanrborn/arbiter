@@ -474,7 +474,8 @@ defmodule Arbiter.Quota.CloudProbeTest do
       end)
     end
 
-    test "two consecutive 401s trip the watchdog's expired flag for Claude", context do
+    test "two consecutive 401s raise the watchdog's escalation for Claude (not the dispatch gate)",
+         context do
       Req.Test.set_req_test_to_shared(context)
       _ws = workspace_with_token!("solo", "401-token")
       watchdog = start_watchdog()
@@ -488,7 +489,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
           credential_watchdog: watchdog
         )
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       stub_status(401)
 
@@ -497,14 +498,14 @@ defmodule Arbiter.Quota.CloudProbeTest do
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
       end)
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       ExUnit.CaptureLog.capture_log(fn ->
         CloudProbe.probe(pid)
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
       end)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
     end
 
     test "a rate-limited/backoff tick between two 401s does not reset the streak", context do
@@ -538,7 +539,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       end)
 
       assert CloudProbe.state(pid).oauth_consecutive_401s == 1
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       # The 429 above put the client on a cooldown, so the *next* tick should
       # hit the client-side `{:backoff, 429}` skip rather than the network at
@@ -555,7 +556,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       end)
 
       assert CloudProbe.state(pid).oauth_consecutive_401s == 1
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       Arbiter.Quota.OAuthUsage.reset_cooldown!("401-token")
       stub_status(401)
@@ -565,7 +566,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
       end)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
     end
 
     test "a source-mismatched recovery no longer spuriously clears the usage-poll mark (bd-6jjgk0), " <>
@@ -593,7 +594,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
       end)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       # Simulate the watchdog's own CLI probe reporting a spurious recovery
       # (exactly what happened for 15h straight in the original incident,
@@ -604,14 +605,14 @@ defmodule Arbiter.Quota.CloudProbeTest do
       # does the mailbox escalation for it.
       :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, watchdog)
       _ = :sys.get_state(watchdog)
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       ExUnit.CaptureLog.capture_log(fn ->
         CloudProbe.probe(pid)
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 3 end)
       end)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       # Only this same `:usage_poll` signal succeeding again clears it.
       stub_ok()
@@ -621,7 +622,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 0 end)
       end)
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
     end
 
     # Regression for the HIGH finding on bd-3j92yv: pre-P6 there was one
@@ -701,21 +702,21 @@ defmodule Arbiter.Quota.CloudProbeTest do
           credential_watchdog: watchdog
         )
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       ExUnit.CaptureLog.capture_log(fn ->
         CloudProbe.probe(pid)
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
       end)
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       ExUnit.CaptureLog.capture_log(fn ->
         CloudProbe.probe(pid)
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
       end)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
 
       # The healthy sibling account kept polling successfully the whole time.
       assert Arbiter.Quota.serialize(account_ok.id).oauth_utilization_5h == 0.01
@@ -753,7 +754,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
         wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
       end)
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
     end
   end
 
@@ -773,7 +774,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
 
     defp codex_ok_result, do: %{codex: %{plan: "plus"}, message: nil, auth_expired: false}
 
-    test "two consecutive 401s trip the watchdog's expired flag for Codex" do
+    test "two consecutive 401s raise the watchdog's escalation for Codex (not the dispatch gate)" do
       watchdog = start_watchdog()
 
       pid =
@@ -784,17 +785,17 @@ defmodule Arbiter.Quota.CloudProbeTest do
           credential_watchdog: watchdog
         )
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog)
 
       CloudProbe.probe(pid)
       send(pid, {:codex_refresh_result, codex_401_result()})
       wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog)
 
       CloudProbe.probe(pid)
       send(pid, {:codex_refresh_result, codex_401_result()})
       wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 2 end)
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog)
     end
 
     # Host-global credentials: several workspaces' independent fetches this
@@ -816,7 +817,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
       Process.sleep(50)
       assert CloudProbe.state(pid).codex_consecutive_401s == 1
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog)
     end
 
     test "a success resets the codex 401 streak" do
@@ -841,7 +842,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       CloudProbe.probe(pid)
       send(pid, {:codex_refresh_result, codex_401_result()})
       wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog)
     end
 
     test "a genuine recovery after expiry calls mark_recovered" do
@@ -861,11 +862,11 @@ defmodule Arbiter.Quota.CloudProbeTest do
       CloudProbe.probe(pid)
       send(pid, {:codex_refresh_result, codex_401_result()})
       wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 2 end)
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog)
 
       CloudProbe.probe(pid)
       send(pid, {:codex_refresh_result, codex_ok_result()})
-      wait_until(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog) == false end)
+      wait_until(fn -> CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog) == false end)
     end
 
     # Proves `default_refresh/2` really sends `{:codex_refresh_result, _}` off
@@ -911,7 +912,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       CloudProbe.probe(pid)
       wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 2 end)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Codex, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Codex, watchdog)
     end
   end
 
@@ -946,7 +947,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
         auth_expired: false
       }
 
-    test "two consecutive auth failures trip the watchdog's expired flag for Gemini" do
+    test "two consecutive auth failures raise the watchdog's escalation for Gemini (not the dispatch gate)" do
       watchdog = start_watchdog()
 
       pid =
@@ -957,17 +958,17 @@ defmodule Arbiter.Quota.CloudProbeTest do
           credential_watchdog: watchdog
         )
 
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog)
 
       CloudProbe.probe(pid)
       send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
       wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog)
 
       CloudProbe.probe(pid)
       send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
       wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 2 end)
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog)
     end
 
     test "a healthy row resets the streak" do
@@ -992,7 +993,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       CloudProbe.probe(pid)
       send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
       wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1 end)
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog)
     end
 
     test "a genuine recovery after expiry calls mark_recovered for Gemini" do
@@ -1012,13 +1013,13 @@ defmodule Arbiter.Quota.CloudProbeTest do
       CloudProbe.probe(pid)
       send(pid, {:antigravity_refresh_result, antigravity_auth_expired_result()})
       wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 2 end)
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog)
 
       CloudProbe.probe(pid)
       send(pid, {:antigravity_refresh_result, antigravity_healthy_result()})
 
       wait_until(fn ->
-        CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog) == false
+        CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog) == false
       end)
     end
 
@@ -1044,7 +1045,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       Process.sleep(50)
 
       assert CloudProbe.state(pid).antigravity_consecutive_auth_failures == 1
-      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog)
     end
 
     # Proves `default_refresh/2` really sends `{:antigravity_refresh_result,
@@ -1070,7 +1071,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       CloudProbe.probe(pid)
       wait_until(fn -> CloudProbe.state(pid).antigravity_consecutive_auth_failures == 2 end)
 
-      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Gemini, watchdog)
     end
   end
 
