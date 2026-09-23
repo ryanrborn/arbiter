@@ -33,6 +33,7 @@ defmodule Arbiter.Board.AutopilotConfigTest do
     defaults = [
       name: nil,
       interval_ms: :never,
+      topics: [],
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 
@@ -90,6 +91,44 @@ defmodule Arbiter.Board.AutopilotConfigTest do
         assert {:ok, "bd-1"} = Autopilot.tick(pid)
       after
         # Restore the original config
+        if saved_config == :not_set do
+          Application.delete_env(:arbiter, :board_autopilot)
+        else
+          Application.put_env(:arbiter, :board_autopilot, saved_config)
+        end
+      end
+    end
+
+    test "with no :board_autopilot config, the fallback tick defaults to 60 seconds" do
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+
+      try do
+        Application.delete_env(:arbiter, :board_autopilot)
+
+        {:ok, pid} =
+          Autopilot.start_link(name: nil, paused: true, snapshot: fn _ -> board(nil) end)
+
+        assert %{interval_ms: 60_000} = :sys.get_state(pid)
+      after
+        if saved_config == :not_set do
+          Application.delete_env(:arbiter, :board_autopilot)
+        else
+          Application.put_env(:arbiter, :board_autopilot, saved_config)
+        end
+      end
+    end
+
+    test "interval_ms in config overrides the 60s default" do
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+
+      try do
+        Application.put_env(:arbiter, :board_autopilot, enabled: true, interval_ms: 30_000)
+
+        {:ok, pid} =
+          Autopilot.start_link(name: nil, paused: true, snapshot: fn _ -> board(nil) end)
+
+        assert %{interval_ms: 30_000} = :sys.get_state(pid)
+      after
         if saved_config == :not_set do
           Application.delete_env(:arbiter, :board_autopilot)
         else

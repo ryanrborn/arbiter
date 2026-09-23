@@ -40,7 +40,13 @@ defmodule Arbiter.Board.DrainTest do
   end
 
   defp start_autopilot!(opts) do
-    defaults = [name: nil, interval_ms: :never, snapshot: fn o -> board(o[:paused]) end]
+    defaults = [
+      name: nil,
+      interval_ms: :never,
+      topics: [],
+      snapshot: fn o -> board(o[:paused]) end
+    ]
+
     {:ok, pid} = Autopilot.start_link(Keyword.merge(defaults, opts))
 
     on_exit(fn ->

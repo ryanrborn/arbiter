@@ -109,14 +109,69 @@ defmodule Arbiter.Board.Autopilot do
   carries its own separate dedupe for the escalation itself, so this hold is
   about not re-attempting, not (only) about not re-paging.
 
-  This hold only covers Autopilot's own 15s tick. It is **not** what drove the
-  bd-7qbavq incident this bug tracks: that card's retries carried
+  This hold only covers Autopilot's own periodic tick. It is **not** what
+  drove the bd-7qbavq incident this bug tracks: that card's retries carried
   `skip_quota_gate: true` (a flag only `Arbiter.Workflows.DispatchQueue`'s
   drain sets — see `DispatchQueue`'s moduledoc), landed on 5-minute
   boundaries matching `Arbiter.Quota.CloudProbe`'s broadcast
   interval, and produced only one run row, all of which rule out this
-  15s-tick path. `DispatchQueue` carries the equivalent hold for the path
+  tick path. `DispatchQueue` carries the equivalent hold for the path
   that actually produced the flood; see its `retry_not_before` handling.
+
+  ## Reactive triggers, not just a tick (bd-axgpec)
+
+  A 15s tick made a closed task or a freed slot wait up to 15s for the next
+  pass; slowing the fallback tick to 60s (configurable, `interval_ms` in
+  `config :arbiter, :board_autopilot`) makes that wait too long to accept
+  without a reactive path alongside it. So this process also subscribes to
+  the PubSub topics that mean "the plan may now be stale":
+
+    * `"tasks"` — `Arbiter.Tasks.Issue.broadcast_lifecycle/2`'s
+      `{:task_lifecycle, event, issue}`, which covers a close, a promote to
+      Ready, and a `depends_on`/`blocks`/`conflicts_with` edge add or remove
+      (`Arbiter.Tasks.Dependencies` broadcasts on the same topic for both
+      endpoints). `ready_order` is a `BoardLive` assign only — nothing
+      persists or broadcasts it server-side, so a reorder neither triggers a
+      pass nor changes what Autopilot would plan.
+    * `"events"` (`Arbiter.Events`'s global topic) — `{:event, %{topic:
+      "worker_done" | "worker_failed"}}`, meaning a slot just freed.
+
+  Each trigger debounces (`debounce_ms`, default 300ms) rather than running
+  immediately, so a burst — several tasks closing at once — yields one pass.
+  A trigger that lands while a dispatch Task is already in flight does not
+  queue a timer; it sets a flag instead, and that one deferred pass runs the
+  moment the in-flight dispatch reports back, whatever the current debounce
+  state is.
+
+  A successful dispatch schedules an immediate follow-up pass of its own —
+  no debounce — so several Ready cards with free slots behind them drain at
+  dispatch speed rather than one per tick, matching the one-card-per-pass
+  design above. A pass that finds nothing to promote (`:idle`, `:paused`,
+  `:busy`, `:held`, or a dispatch failure with no trigger pending) does not
+  reschedule itself — only an external trigger, or a dispatch that actually
+  succeeded, ever schedules the next one. Without that asymmetry a quiet
+  board with nothing to do would still tick itself forever at debounce
+  speed.
+
+  This is a real, accepted behaviour change from the pre-bd-axgpec, tick-only
+  scheduler: with dead credentials and several Ready tasks behind free slots,
+  a burst of successful-looking dispatches (a dispatch call "succeeds" in the
+  sense of starting a worker; the worker then dies on its own auth check) can
+  now happen back-to-back, up to `slots_free` deep, before `AuthHold` opens
+  and the board-level hold takes over — instead of one attempt per 15s/60s
+  tick. The number of such attempts stays bounded by the number of free
+  slots, not unbounded, and `AuthHold`/`promote_or_hold/2` still cuts it off
+  as soon as the threshold trips; only the attempts *before* that point land
+  closer together. Suites that assert an exact tick-by-tick attempt count or
+  outcome sequence against dead credentials should start Autopilot with
+  `follow_up: false` (see `start_link/1`) to opt back into one pass per
+  `tick/2` call, matching that pre-existing assumption.
+
+  Quota holds lifting and a `retry_not_before` expiring are not PubSub
+  events — nothing broadcasts when a clock crosses a deadline — so those
+  stay on the fallback tick, which is why 60s is a compromise and not a
+  formality: a hold that clears right after a pass can wait up to a minute
+  before the tick notices. `promote_or_hold/2`'s hold logic is unchanged.
   """
 
   use GenServer
@@ -128,7 +183,11 @@ defmodule Arbiter.Board.Autopilot do
   require Logger
 
   @topic "board"
-  @default_interval_ms 15_000
+  @tasks_topic "tasks"
+  @events_topic "events"
+  @worker_slot_events ~w(worker_done worker_failed)
+  @default_interval_ms 60_000
+  @default_debounce_ms 300
 
   # Dispatch error shapes that are deterministic — retrying can never change
   # the outcome, so these escalate on the first failure rather than waiting
@@ -157,6 +216,15 @@ defmodule Arbiter.Board.Autopilot do
   def topic, do: @topic
 
   @doc """
+  The PubSub topics a normally-started instance subscribes to for reactive
+  triggers: `Arbiter.Tasks.Issue.broadcast_lifecycle/2`'s `"tasks"` and
+  `Arbiter.Events`'s global `"events"` topic. Exposed so a test can assert
+  against the real value instead of hardcoding a copy that could drift.
+  """
+  @spec default_topics() :: [String.t()]
+  def default_topics, do: [@tasks_topic, @events_topic]
+
+  @doc """
   Start the autopilot.
 
   Options:
@@ -164,7 +232,21 @@ defmodule Arbiter.Board.Autopilot do
     * `:name` — registered name; defaults to this module. Pass `nil` for an
       anonymous instance (tests).
     * `:paused` — initial pause state; defaults to the app env.
-    * `:interval_ms` — tick period, or `:never` to only tick when asked.
+    * `:interval_ms` — fallback tick period, or `:never` to only run a pass
+      when asked (a `tick/2` call or a reactive trigger).
+    * `:debounce_ms` — how long a reactive trigger waits before running a
+      pass, coalescing a burst into one; defaults to the app env (300ms).
+    * `:topics` — PubSub topics to subscribe to for reactive triggers;
+      defaults to `["tasks", "events"]`. Tests can pass `[]` (no reactive
+      triggers, drive with `send/2` or `tick/2` instead) or private topic
+      names to exercise the real `Phoenix.PubSub.subscribe/2` path without
+      picking up unrelated broadcasts from other tests.
+    * `:follow_up` — whether a successful dispatch schedules an immediate
+      follow-up pass (see "Reactive triggers" above); defaults to `true`.
+      A suite that drives a fixed-count `tick/2` loop and asserts on exact
+      dispatch-attempt counts or exact tick-by-tick outcomes should pass
+      `false`, so each `tick/2` call runs exactly one pass — matching the
+      pre-bd-axgpec behaviour it is asserting against.
     * `:snapshot` / `:dispatch` — seams for tests; default to
       `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/1`.
     * `:escalate` — seam for tests; defaults to `default_escalate/3`, which
@@ -245,6 +327,7 @@ defmodule Arbiter.Board.Autopilot do
   @impl true
   def init(opts) do
     interval = Keyword.get(opts, :interval_ms, configured_interval_ms())
+    debounce = Keyword.get(opts, :debounce_ms, configured_debounce_ms())
 
     {paused?, changed_at, changed_by} =
       case Keyword.fetch(opts, :paused) do
@@ -252,17 +335,28 @@ defmodule Arbiter.Board.Autopilot do
         :error -> initial_paused_state()
       end
 
+    topics = Keyword.get(opts, :topics, default_topics())
+    Enum.each(topics, &Phoenix.PubSub.subscribe(Arbiter.PubSub, &1))
+
     state = %{
       paused?: paused?,
       paused_changed_at: changed_at,
       paused_changed_by: changed_by,
       interval_ms: interval,
+      debounce_ms: debounce,
+      follow_up?: Keyword.get(opts, :follow_up, true),
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
       # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
       dispatching: nil,
+      # A reactive trigger's debounce timer, once scheduled — cleared when it
+      # fires or when a dispatch completion runs a pass immediately instead.
+      plan_timer: nil,
+      # Set when a reactive trigger lands while a dispatch is in flight, so
+      # the pass it asked for still runs once that dispatch reports back.
+      replan_after_dispatch: false,
       # Per-card dispatch failure tracking:
       # id => %{count:, shape:, escalated?:, retry_not_before:}.
       # See "A dispatch that keeps failing gets escalated" above, and
@@ -276,7 +370,7 @@ defmodule Arbiter.Board.Autopilot do
 
   @impl true
   def handle_call(:tick, from, state) do
-    case promote(state) do
+    case run_pass(state) do
       # The dispatch is running in a task now; the caller is answered when it
       # reports back, and this process goes on serving everyone else.
       {:started, state} -> {:noreply, park(state, from)}
@@ -316,9 +410,31 @@ defmodule Arbiter.Board.Autopilot do
 
   @impl true
   def handle_info(:tick, state) do
-    {_outcome, state} = promote(state)
+    {_outcome, state} = run_pass(state)
     schedule(state.interval_ms)
     {:noreply, state}
+  end
+
+  # A reactive trigger's debounce elapsed (or a dispatch completion asked for
+  # an immediate pass by sending this with no timer behind it). Either way,
+  # this is the one place a reactively-requested pass actually runs.
+  def handle_info(:run_plan, state) do
+    {_outcome, state} = run_pass(%{state | plan_timer: nil})
+    {:noreply, state}
+  end
+
+  # A task closed, was promoted to Ready, or gained/lost a dependency edge —
+  # `Arbiter.Tasks.Issue.broadcast_lifecycle/2` and `Arbiter.Tasks.Dependencies`
+  # both broadcast here for all of these. (`ready_order` is a LiveView-only
+  # assign — nothing broadcasts it, so it is not covered.)
+  def handle_info({:task_lifecycle, _event, _issue}, state) do
+    {:noreply, request_plan(state)}
+  end
+
+  # A worker finished or failed — `Arbiter.Events.broadcast/3`'s global fan-out,
+  # meaning a slot may have just freed.
+  def handle_info({:event, %{topic: topic}}, state) when topic in @worker_slot_events do
+    {:noreply, request_plan(state)}
   end
 
   # The dispatch task's result. Everything the old synchronous path did on the
@@ -329,7 +445,8 @@ defmodule Arbiter.Board.Autopilot do
     Process.demonitor(ref, [:flush])
     {outcome, state} = finish_dispatch(state, in_flight.id, result)
     reply_all(in_flight.waiters, outcome)
-    {:noreply, %{state | dispatching: nil}}
+    state = %{state | dispatching: nil}
+    {:noreply, after_dispatch(state, outcome)}
   end
 
   # The task died without reporting — it is `async_nolink`, so this is the
@@ -343,10 +460,71 @@ defmodule Arbiter.Board.Autopilot do
 
     state = record_failure(state, in_flight.id, {:exit, reason})
     reply_all(in_flight.waiters, {:error, {:exit, reason}})
-    {:noreply, %{state | dispatching: nil}}
+    state = %{state | dispatching: nil}
+    {:noreply, after_dispatch(state, {:error, {:exit, reason}})}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # ---- reactive triggers -----------------------------------------------
+
+  # Coalesce a burst of triggers into one debounced pass. Paused: do nothing,
+  # not even schedule — a resume with nothing pending is right, since a pass
+  # runs on the next real trigger or the fallback tick anyway. Busy: don't
+  # start a timer, just make sure the in-flight dispatch's completion runs
+  # one more pass once it reports back.
+  defp request_plan(%{paused?: true} = state), do: state
+
+  defp request_plan(%{dispatching: dispatching} = state) when not is_nil(dispatching),
+    do: %{state | replan_after_dispatch: true}
+
+  defp request_plan(%{plan_timer: nil} = state) do
+    timer = Process.send_after(self(), :run_plan, state.debounce_ms)
+    %{state | plan_timer: timer}
+  end
+
+  # A debounce timer is already pending; this trigger is already covered by
+  # the pass it will run.
+  defp request_plan(state), do: state
+
+  # `promote/1` already refuses to start a second dispatch while one is in
+  # flight and reports `{:busy, id}` instead — a pass run via a reactive
+  # trigger or the fallback tick can land in exactly that window. Treat it
+  # the same as a trigger that arrived while busy: queue one re-plan for when
+  # the in-flight dispatch completes.
+  defp run_pass(state) do
+    case promote(state) do
+      {{:busy, _} = outcome, state} -> {outcome, %{state | replan_after_dispatch: true}}
+      {outcome, state} -> {outcome, state}
+    end
+  end
+
+  # After a successful dispatch, schedule an immediate follow-up pass (no
+  # debounce) so a burst of Ready cards with free slots behind them drains at
+  # dispatch speed rather than one per tick. Otherwise, only run one if a
+  # trigger landed while this dispatch was in flight — a pass that dispatched
+  # nothing must never reschedule itself, or a quiet board would tick itself
+  # forever at debounce speed.
+  defp after_dispatch(%{follow_up?: true} = state, {:ok, _}),
+    do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
+
+  defp after_dispatch(%{replan_after_dispatch: true} = state, _outcome),
+    do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
+
+  defp after_dispatch(state, _outcome), do: state
+
+  defp trigger_immediate_pass(state) do
+    state = cancel_plan_timer(state)
+    send(self(), :run_plan)
+    state
+  end
+
+  defp cancel_plan_timer(%{plan_timer: nil} = state), do: state
+
+  defp cancel_plan_timer(%{plan_timer: timer} = state) do
+    Process.cancel_timer(timer)
+    %{state | plan_timer: nil}
+  end
 
   # ---- one cycle -----------------------------------------------------------
 
@@ -565,6 +743,12 @@ defmodule Arbiter.Board.Autopilot do
     :arbiter
     |> Application.get_env(:board_autopilot, [])
     |> Keyword.get(:interval_ms, @default_interval_ms)
+  end
+
+  defp configured_debounce_ms do
+    :arbiter
+    |> Application.get_env(:board_autopilot, [])
+    |> Keyword.get(:debounce_ms, @default_debounce_ms)
   end
 
   defp configured_paused? do
