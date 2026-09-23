@@ -137,6 +137,45 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       assert entry["thinking"] == "medium"
       assert entry["difficulty_at_dispatch"] == 2
     end
+
+    # bd-b7e33c post-merge finding (2026-09-22): the 04:26Z production
+    # verification misread an agy run as having `session_id: NULL` /
+    # `provider: null` because `arb worker runs --json` (this endpoint) never
+    # surfaced those columns at all — they were silently dropped from the
+    # summary, not actually null in `worker_runs`. Surface them so a resume's
+    # conversation continuity (or lack of it) is directly observable from the
+    # CLI/API without reaching into the DB.
+    test "lists provider/session_id/resumed_from_run_id", %{conn: conn} do
+      now = DateTime.utc_now()
+
+      prior =
+        insert_run!(%{
+          task_id: "bd-session-fields",
+          provider: "gemini",
+          session_id: "25df47b0-054e-434e-84c1-6876fd9f77de",
+          started_at: DateTime.add(now, -600, :second)
+        })
+
+      _resumed =
+        insert_run!(%{
+          task_id: "bd-session-fields",
+          provider: "gemini",
+          session_id: "89a2b784-6bd5-46e6-a971-2178ca58cdcd",
+          resumed_from_run_id: prior.id,
+          started_at: now
+        })
+
+      conn = get(conn, ~p"/api/workers/history", %{task_id: "bd-session-fields"})
+      [resumed_entry, prior_entry] = json_response(conn, 200)["data"]
+
+      assert prior_entry["provider"] == "gemini"
+      assert prior_entry["session_id"] == "25df47b0-054e-434e-84c1-6876fd9f77de"
+      assert prior_entry["resumed_from_run_id"] == nil
+
+      assert resumed_entry["provider"] == "gemini"
+      assert resumed_entry["session_id"] == "89a2b784-6bd5-46e6-a971-2178ca58cdcd"
+      assert resumed_entry["resumed_from_run_id"] == prior.id
+    end
   end
 
   describe "GET /api/workers/history/:id" do
