@@ -305,6 +305,129 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
     end
   end
 
+  # bd-6jjgk0 round 3, finding 1: a real outage where the worker credential is
+  # actually dead must still close the dispatch gate even while an unrelated
+  # `:usage_poll` episode (a separately cached token, #1875) is outstanding for
+  # the same adapter. Before this fix, `already_expired?/2` read one shared
+  # per-adapter status, so once a `:usage_poll` expiry was recorded, a later
+  # gate-source (`:periodic_probe`/`:worker_report`) expiry for the same
+  # adapter was silently dropped — the gate stayed open and the mailbox never
+  # got the "dispatches suspended" escalation, while `Dispatch` kept sending
+  # workers into a dead credential.
+  describe "per-source episodes: gate-source expiry not masked by :usage_poll (bd-6jjgk0 r3f1)" do
+    test "a gate-source mark_expired/4 still closes the gate while a :usage_poll episode is open" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-r3f1-ws", prefix: "cwg"})
+      pid = start_watchdog()
+
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          auth_expired_reason(),
+          pid,
+          :usage_poll
+        )
+
+      :sys.get_state(pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :sys.get_state(pid)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid),
+             "a gate-source expiry must close the gate even while a :usage_poll episode " <>
+               "is outstanding for the same adapter"
+
+      subjects = Message.inbox("admiral", workspace_id: ws.id) |> Enum.map(& &1.subject)
+      assert Enum.count(subjects, &(&1 =~ "credentials expired — proactive detection")) == 1
+      assert Enum.count(subjects, &(&1 =~ "credentials expired — usage-poll signal")) == 1
+    end
+
+    test "a periodic-probe expiry still closes the gate while a :usage_poll episode is open" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-r3f1b-ws", prefix: "cwh"})
+      pid = start_watchdog()
+
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          auth_expired_reason(),
+          pid,
+          :usage_poll
+        )
+
+      :sys.get_state(pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      # Same dedupe path a real periodic CLI-probe :auth_expired result takes
+      # (`probe_one/2`'s already_expired?/3 check) — driven directly since
+      # Claude has no real CLI to probe in CI.
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          auth_expired_reason(),
+          pid,
+          :periodic_probe
+        )
+
+      :sys.get_state(pid)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      assert [_] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "usage-poll signal"))
+
+      assert [_] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "proactive detection"))
+    end
+  end
+
+  # bd-6jjgk0 round 3, finding 2: a `:usage_poll` success must only clear a
+  # `:usage_poll`-raised episode. Before this fix, `recovers?/2` had a
+  # catch-all `true` clause, so a `:usage_poll` success also cleared (and
+  # posted "restored" for) an outstanding `:periodic_probe`/`:worker_report`
+  # episode while the gate — which only those sources control — stayed
+  # closed, reintroducing the expired/restored flap this task exists to fix.
+  describe "a :usage_poll recovery never clears a gate-source episode (bd-6jjgk0 r3f2)" do
+    test "a :usage_poll recovery leaves an outstanding gate-source episode open and the gate closed" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cw-r3f2-ws", prefix: "cwr3"})
+      pid = start_watchdog()
+
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          auth_expired_reason(),
+          pid,
+          :usage_poll
+        )
+
+      :sys.get_state(pid)
+
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :sys.get_state(pid)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, pid, :usage_poll)
+      :sys.get_state(pid)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid),
+             "a :usage_poll recovery must not reopen a gate that a gate-source expiry closed"
+
+      # The :usage_poll episode is cleared and restored...
+      assert [_restored] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "restored"))
+
+      # ...but the gate-source (:worker_report) episode is untouched: still
+      # outstanding (unread, uncleared), with no "restored" message of its own.
+      assert [still_open] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.subject =~ "proactive detection"))
+
+      refute still_open.cleared_at
+    end
+  end
+
   describe "periodic probe (handle_info :check)" do
     setup do
       {:ok, ws} = Ash.create(Workspace, %{name: "cw-probe-ws", prefix: "cwp"})
