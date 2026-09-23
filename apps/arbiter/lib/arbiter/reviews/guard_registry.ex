@@ -318,6 +318,29 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "diff, so a provider that timed out on the previous one starts even again."
     },
     %{
+      id: :empty_net_diff_approval,
+      doc_ref: "G20",
+      class: :b,
+      class_source: :inferred,
+      class_note:
+        "Same shape as G2, which §5.3 classes `b`: the target has already absorbed the " <>
+          "branch's contribution, so the park is an honest completion, not a misfire — " <>
+          "only the detection differs (content emptiness, not SHA equality).",
+      bound: {:evaluations, 1},
+      episode: {:task, :review_id, :round},
+      terminal: :parked,
+      sites: [
+        {ReviewGate, :finalize_approval, 3}
+      ],
+      anchors: ["finalize_approval", "coverage_net_diff_id(state)"],
+      summary:
+        "bd-aq81qz: an APPROVE whose net diff against the target is empty — commits " <>
+          "exist (head_sha != base_sha, so G2 does not fire) but contribute nothing, e.g. " <>
+          "already-squashed commits plus a merge of the target back in. Reuses " <>
+          "`coverage_net_diff_id/1`'s `{:error, :no_net_diff}` answer (the same check the " <>
+          "coverage row itself would fail on) rather than deriving emptiness twice"
+    },
+    %{
       id: :verdict_parse,
       doc_ref: "G5",
       class: :c,

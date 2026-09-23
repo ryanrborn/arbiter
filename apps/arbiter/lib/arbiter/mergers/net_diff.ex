@@ -157,6 +157,21 @@ defmodule Arbiter.Mergers.NetDiff do
     end
   end
 
+  @doc """
+  Is `diff` literally empty content — a diff that was successfully fetched but
+  describes no change?
+
+  Deliberately narrower than `fingerprint/1` returning `nil`: that also covers
+  a failed fetch or an unfingerprintable value, which must never read as
+  evidence of anything (bd-aq81qz). `blank?/1` is for callers who already have
+  a diff in hand (a successful `get_diff/2`) and want to know specifically
+  whether the merge it is about to authorise contributes nothing — a `false`
+  from a fetch failure would wrongly refuse a perfectly good merge.
+  """
+  @spec blank?(String.t() | nil) :: boolean()
+  def blank?(diff) when is_binary(diff), do: String.trim(diff) == ""
+  def blank?(_diff), do: false
+
   # Hunk headers carry line numbers (and a section heading) that move whenever
   # the base branch shifts the surrounding file; keep the marker, drop the rest.
   defp normalize_line("@@ " <> _rest), do: "@@"

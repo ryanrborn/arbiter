@@ -5279,8 +5279,9 @@ defmodule Arbiter.Worker do
   # and the round rows must keep saying what the gate actually decided. A guard
   # that refused an APPROVE, and an already-absorbed branch, both record the
   # REQUEST_CHANGES shape they record today; everything else is inconclusive.
-  defp park_verdict_for(reason) when reason in [:verdict_guard_exhausted, :empty_diff],
-    do: :request_changes
+  defp park_verdict_for(reason)
+       when reason in [:verdict_guard_exhausted, :empty_diff, :empty_net_diff],
+       do: :request_changes
 
   defp park_verdict_for(_reason), do: :no_verdict
 

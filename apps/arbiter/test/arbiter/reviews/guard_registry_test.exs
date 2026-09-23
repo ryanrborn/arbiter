@@ -48,7 +48,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
        "stamped and the merge proceeds — and is bounded by the bd-5jr49o breaker"},
     {Arbiter.Worker.ReviewGate, :coverage_net_diff_id, 1,
      "bd-203cl5: computes net_diff_id for the coverage row; its {:error, _} means " <>
-       "'no fingerprint', consumed by the page above, and blocks no merge"},
+       "'no fingerprint'. bd-aq81qz: a `:no_net_diff` answer is now also consumed by " <>
+       "`finalize_approval/3` (G20, registered separately) to park instead of merging; " <>
+       "this function itself still only computes the fingerprint and refuses nothing"},
     {Arbiter.Worker.ReviewGate, :resolve_revision, 2,
      "bd-2exkl0: provider fallback visibility: notifies coordinator on fallback, not a refusal " <>
        "(moved here from worker_meta/2 when the provider was resolved once per spawn " <>
@@ -174,8 +176,8 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     test "every guard in the design doc's §2 inventory has exactly one row" do
       doc_ids = inventory_ids()
 
-      assert length(doc_ids) == 65,
-             "expected §2's 65 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
+      assert length(doc_ids) == 66,
+             "expected §2's 66 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
                "table shape changed?"
 
       missing = doc_ids -- GuardRegistry.doc_refs()

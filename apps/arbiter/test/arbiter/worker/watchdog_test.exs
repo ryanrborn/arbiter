@@ -2580,6 +2580,41 @@ defmodule Arbiter.Worker.WatchdogTest do
              "a post-approval fix-pass commit merged with no review having seen it"
     end
 
+    # bd-aq81qz / W7: an approval and a matching reviewed SHA are not proof the
+    # merge contributes anything. Defense-in-depth for the case ReviewGate's
+    # own G20 guard should already have parked: even if an approval somehow
+    # exists for a head whose net diff against the MR base is empty, the
+    # Watchdog must still refuse to merge it.
+    test "refuses to merge an approved head whose net diff against the base is empty" do
+      {pid, task_id} = running_worker()
+
+      # No `set_diff/3` registered for "sha-empty" — StubMerger's `get_diff/2`
+      # then answers the empty-diff default, exactly like a real forge compare
+      # of two identical trees.
+      StubMerger.queue_get("!rs8", [
+        %{status: :open, approved: true, head_sha: "sha-empty", base_ref: "main"}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!rs8",
+            auto_merge: true,
+            last_reviewed_sha: "sha-empty",
+            merge_fail_notify_threshold: 1,
+            interval_ms: 15,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!rs8") >= 3 end, 2_000)
+        end)
+
+      assert StubMerger.merge_count("!rs8") == 0,
+             "the Watchdog merged a head whose net diff against the base is empty"
+
+      assert log =~ "empty_net_diff"
+      refute Worker.state(pid).status == :completed
+    end
+
     # The suspension must not become a hole in the guard: once the fleet's push
     # has landed and the latch re-pinned, a SUBSEQUENT foreign push is refused
     # again exactly as before.
