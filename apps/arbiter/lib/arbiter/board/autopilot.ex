@@ -153,6 +153,20 @@ defmodule Arbiter.Board.Autopilot do
   board with nothing to do would still tick itself forever at debounce
   speed.
 
+  This is a real, accepted behaviour change from the pre-bd-axgpec, tick-only
+  scheduler: with dead credentials and several Ready tasks behind free slots,
+  a burst of successful-looking dispatches (a dispatch call "succeeds" in the
+  sense of starting a worker; the worker then dies on its own auth check) can
+  now happen back-to-back, up to `slots_free` deep, before `AuthHold` opens
+  and the board-level hold takes over — instead of one attempt per 15s/60s
+  tick. The number of such attempts stays bounded by the number of free
+  slots, not unbounded, and `AuthHold`/`promote_or_hold/2` still cuts it off
+  as soon as the threshold trips; only the attempts *before* that point land
+  closer together. Suites that assert an exact tick-by-tick attempt count or
+  outcome sequence against dead credentials should start Autopilot with
+  `follow_up: false` (see `start_link/1`) to opt back into one pass per
+  `tick/2` call, matching that pre-existing assumption.
+
   Quota holds lifting and a `retry_not_before` expiring are not PubSub
   events — nothing broadcasts when a clock crosses a deadline — so those
   stay on the fallback tick, which is why 60s is a compromise and not a
@@ -202,6 +216,15 @@ defmodule Arbiter.Board.Autopilot do
   def topic, do: @topic
 
   @doc """
+  The PubSub topics a normally-started instance subscribes to for reactive
+  triggers: `Arbiter.Tasks.Issue.broadcast_lifecycle/2`'s `"tasks"` and
+  `Arbiter.Events`'s global `"events"` topic. Exposed so a test can assert
+  against the real value instead of hardcoding a copy that could drift.
+  """
+  @spec default_topics() :: [String.t()]
+  def default_topics, do: [@tasks_topic, @events_topic]
+
+  @doc """
   Start the autopilot.
 
   Options:
@@ -218,6 +241,12 @@ defmodule Arbiter.Board.Autopilot do
       triggers, drive with `send/2` or `tick/2` instead) or private topic
       names to exercise the real `Phoenix.PubSub.subscribe/2` path without
       picking up unrelated broadcasts from other tests.
+    * `:follow_up` — whether a successful dispatch schedules an immediate
+      follow-up pass (see "Reactive triggers" above); defaults to `true`.
+      A suite that drives a fixed-count `tick/2` loop and asserts on exact
+      dispatch-attempt counts or exact tick-by-tick outcomes should pass
+      `false`, so each `tick/2` call runs exactly one pass — matching the
+      pre-bd-axgpec behaviour it is asserting against.
     * `:snapshot` / `:dispatch` — seams for tests; default to
       `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/1`.
     * `:escalate` — seam for tests; defaults to `default_escalate/3`, which
@@ -306,7 +335,7 @@ defmodule Arbiter.Board.Autopilot do
         :error -> initial_paused_state()
       end
 
-    topics = Keyword.get(opts, :topics, [@tasks_topic, @events_topic])
+    topics = Keyword.get(opts, :topics, default_topics())
     Enum.each(topics, &Phoenix.PubSub.subscribe(Arbiter.PubSub, &1))
 
     state = %{
@@ -315,6 +344,7 @@ defmodule Arbiter.Board.Autopilot do
       paused_changed_by: changed_by,
       interval_ms: interval,
       debounce_ms: debounce,
+      follow_up?: Keyword.get(opts, :follow_up, true),
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
@@ -475,7 +505,7 @@ defmodule Arbiter.Board.Autopilot do
   # trigger landed while this dispatch was in flight — a pass that dispatched
   # nothing must never reschedule itself, or a quiet board would tick itself
   # forever at debounce speed.
-  defp after_dispatch(state, {:ok, _}),
+  defp after_dispatch(%{follow_up?: true} = state, {:ok, _}),
     do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
 
   defp after_dispatch(%{replan_after_dispatch: true} = state, _outcome),

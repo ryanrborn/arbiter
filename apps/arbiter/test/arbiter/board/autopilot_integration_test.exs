@@ -60,6 +60,10 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
             # `Ash.create`/`Ash.update` broadcasts on the real "tasks" topic
             # and race an unplanned reactive pass against the explicit one.
             topics: [],
+            # And no immediate follow-up pass after a successful dispatch —
+            # each `tick/2` call below asserts on one pass at a time (see
+            # `after_dispatch/2`'s moduledoc note on this test knob).
+            follow_up: false,
             snapshot: &Snapshot.load/1,
             dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
           ],

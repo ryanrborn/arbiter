@@ -604,6 +604,38 @@ defmodule Arbiter.Board.AutopilotTest do
     # topic). Each uses its own private topic — passed via `:topics` — rather
     # than the real "tasks"/"events" topics, so it isn't exposed to unrelated
     # broadcasts from other async tests in the suite.
+    test "the default topics are exactly what Issue.broadcast_lifecycle/2 and Events broadcast on" do
+      # Guards against a silent regression where `@tasks_topic`/`@events_topic`
+      # (or the default passed to `Keyword.get(opts, :topics, ...)` in `init/1`)
+      # drift from the strings the rest of the app actually broadcasts on —
+      # every other test in this describe block passes a private `:topics`
+      # list, so none of them would catch that.
+      assert Autopilot.default_topics() == ["tasks", "events"]
+    end
+
+    test "a task closing runs a pass over the real default topics, with no :topics override" do
+      # `start/1` always injects a `:topics` default of its own (usually `[]`,
+      # to keep the rest of this suite isolated from real broadcasts), so it
+      # cannot be used here — this test needs `init/1`'s own default, meaning
+      # no `:topics` key at all in the opts `Autopilot.start_link/1` sees.
+      test = self()
+
+      {:ok, _pid} =
+        Autopilot.start_link(
+          name: nil,
+          interval_ms: :never,
+          debounce_ms: 20,
+          paused: false,
+          follow_up: false,
+          snapshot: fn opts -> board("bd-1", opts[:paused]) end,
+          dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+        )
+
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, "tasks", {:task_lifecycle, :closed, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
     test "a task closing runs a pass when delivered over real PubSub" do
       topic = "autopilot-test-tasks-#{System.unique_integer([:positive])}"
       _pid = start(paused: false, topics: [topic])

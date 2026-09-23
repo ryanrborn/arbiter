@@ -232,10 +232,14 @@ defmodule Arbiter.Worker.AuthDeathTest do
           # asserts on exact dispatch-attempt counts; a real subscription
           # would let this file's own worker-death/reopen broadcasts on the
           # "tasks"/"events" topics race in an extra reactive pass.
+          # No immediate follow-up pass after a successful dispatch — this
+          # test asserts an exact attempt count per explicit `tick/2` call
+          # (see `after_dispatch/2`'s moduledoc note on this test knob).
           name: nil,
           paused: false,
           interval_ms: :never,
           topics: [],
+          follow_up: false,
           snapshot: fn opts ->
             Snapshot.load(Keyword.merge(opts, workspace_id: ws.id, slots_total: 4))
           end,
