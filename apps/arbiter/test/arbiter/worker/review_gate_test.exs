@@ -60,9 +60,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @reject_twice Path.expand("../../fixtures/review_reject_twice.sh", __DIR__)
   @revise_slow_then_fast Path.expand("../../fixtures/revise_slow_then_fast.sh", __DIR__)
   @reject_slow_then_approve_fast Path.expand(
-                                    "../../fixtures/review_reject_slow_then_approve_fast.sh",
-                                    __DIR__
-                                  )
+                                   "../../fixtures/review_reject_slow_then_approve_fast.sh",
+                                   __DIR__
+                                 )
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
