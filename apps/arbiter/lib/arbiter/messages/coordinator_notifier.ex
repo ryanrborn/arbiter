@@ -335,7 +335,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   def credential_restored(_snapshot, _adapter), do: :ok
 
   defp outstanding_credential_escalation(ws_id, subject) do
-    Message.last_with_subject(Message.coordinator_ref(), [subject], workspace_id: ws_id, uncleared: true)
+    Message.last_with_subject(Message.coordinator_ref(), [subject],
+      workspace_id: ws_id,
+      uncleared: true
+    )
   rescue
     _ -> nil
   end
@@ -345,7 +348,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("CoordinatorNotifier.credential_expired/3 restate swallowed: #{Exception.message(e)}")
+      Logger.debug(
+        "CoordinatorNotifier.credential_expired/3 restate swallowed: #{Exception.message(e)}"
+      )
+
       :ok
   catch
     :exit, _ -> :ok
@@ -1589,7 +1595,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   defp dispatch_gate_note(_reason),
-    do: "Note: new worker dispatches for this adapter are suspended until credentials are restored."
+    do:
+      "Note: new worker dispatches for this adapter are suspended until credentials are restored."
 
   # Categories whose remediation is nothing but "re-dispatch (the task)" —
   # `:exited_without_done` ("Review the transcript, then re-dispatch"),

@@ -1098,11 +1098,16 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
-               CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, reason)
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 reason
+               )
 
       assert [escalation] = Message.inbox("admiral", workspace_id: ws)
 
-      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+      assert :ok =
+               CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
 
       cleared = Ash.get!(Message, escalation.id)
       assert cleared.cleared_at
@@ -1116,12 +1121,21 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
-               CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, reason)
-
-      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 reason
+               )
 
       assert :ok =
-               CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, reason)
+               CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 reason
+               )
 
       # `inbox/2` only lists unread-and-uncleared rows, and the first episode's
       # escalation is now cleared — read every row (cleared or not) for this
@@ -1139,7 +1153,9 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
     test "recovering with nothing outstanding posts nothing" do
       ws = uniq("ws")
 
-      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+      assert :ok =
+               CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+
       assert Message.inbox("admiral", workspace_id: ws) == []
     end
   end
