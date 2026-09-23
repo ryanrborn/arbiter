@@ -157,6 +157,18 @@ else
   echo "warning: $GLIBC_GUARD is missing — skipping the glibc check." >&2
 fi
 
+# ...nor one that links a shared library this host doesn't have. This build
+# bundles the host's own OTP, whose crypto NIF usually links the host's
+# libcrypto, so accept whatever this host's loader resolves (--host): the
+# tarball is for *this* machine. The published release is held to the
+# portable allowlist instead (#1977).
+SHLIB_GUARD="$CLONE_PATH/scripts/check-release-shared-libs.sh"
+if [ -x "$SHLIB_GUARD" ]; then
+  bash "$SHLIB_GUARD" --host "$TARBALL"
+else
+  echo "warning: $SHLIB_GUARD is missing — skipping the shared-library check." >&2
+fi
+
 ESCRIPT="$OUTPUT_DIR/arb-local-${SHA}-${TIMESTAMP}"
 cp "$CLONE_PATH/apps/arbiter_cli/arb" "$ESCRIPT"
 chmod +x "$ESCRIPT"
