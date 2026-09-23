@@ -3390,6 +3390,50 @@ defmodule Arbiter.MCP.ToolsTest do
       assert entry.difficulty_at_dispatch == 3
     end
 
+    # bd-b7e33c post-merge finding (2026-09-22): only `provider` was surfaced
+    # here; `session_id` and `resumed_from_run_id` were silently dropped, the
+    # same gap the REST `/api/workers/history` endpoint had — which is what
+    # made the 04:26Z production verification misread a captured agy
+    # conversation id as NULL. Surface both so resume continuity is directly
+    # observable through this tool too.
+    test "surfaces session_id and resumed_from_run_id", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "session fields target", workspace_id: ctx.ws.id})
+
+      {:ok, prior} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          provider: "gemini",
+          session_id: "25df47b0-054e-434e-84c1-6876fd9f77de",
+          started_at: DateTime.add(DateTime.utc_now(), -600, :second)
+        })
+
+      {:ok, resumed} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          provider: "gemini",
+          session_id: "89a2b784-6bd5-46e6-a971-2178ca58cdcd",
+          resumed_from_run_id: prior.id,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, %{runs: [resumed_entry, prior_entry]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert prior_entry.id == prior.id
+      assert prior_entry.session_id == "25df47b0-054e-434e-84c1-6876fd9f77de"
+      assert prior_entry.resumed_from_run_id == nil
+
+      assert resumed_entry.id == resumed.id
+      assert resumed_entry.session_id == "89a2b784-6bd5-46e6-a971-2178ca58cdcd"
+      assert resumed_entry.resumed_from_run_id == prior.id
+    end
+
     test "honors a bounded limit", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "many runs", workspace_id: ctx.ws.id})
 
@@ -4442,6 +4486,42 @@ defmodule Arbiter.MCP.ToolsTest do
       assert entry.repo == "test/repo"
     end
 
+    # bd-45tkhq: closes the loop the CLI-level `Worker.list_children/0` tests
+    # (worker_test.exs) don't — those pin the underlying supervisor sweep, but
+    # nothing asserted that a *resumed* worker actually survives up through
+    # `Tools.worker_list/2`, the layer the acceptance criterion names. This
+    # dispatches, stops, and restarts under the same task_id (the `Worker`-
+    # level shape of `worker_resume`), then suspends the resumed process past
+    # the original 500ms probe budget before calling worker_list — the exact
+    # scenario the incident's second observation hit.
+    test "a resumed worker suspended past the old snapshot budget still appears", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "resumed worker target", workspace_id: ctx.ws.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      ref = Process.monitor(pid)
+      :ok = Worker.stop(task.id, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, resumed_pid} =
+        Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      on_exit(fn -> Process.alive?(resumed_pid) && Worker.stop(task.id, :normal) end)
+
+      :sys.suspend(resumed_pid)
+
+      spawn(fn ->
+        Process.sleep(700)
+        :sys.resume(resumed_pid)
+      end)
+
+      try do
+        assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+        assert Enum.any?(workers, &(&1.task_id == task.id))
+      after
+        Process.alive?(resumed_pid) && :sys.resume(resumed_pid)
+      end
+    end
+
     test "does not include workers from another workspace", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "pl-other", prefix: "plo"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign pc", workspace_id: other_ws.id})
@@ -5067,6 +5147,26 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, data} = Tools.task_create(agnostic, %{"title" => "to default"})
       {:ok, reloaded} = Ash.get(Issue, data.id)
       assert reloaded.workspace_id == default.id
+    end
+
+    # bd-45tkhq: an unscoped `worker_list` from a workspace-agnostic
+    # coordinator silently resolves to a guessed default workspace the same
+    # way `task_create` does above. When a worker is genuinely live in a
+    # *different* workspace, that guess returns `count: 0` — indistinguishable
+    # from "nothing is running" — unless the response says which workspace it
+    # scoped to.
+    test "an agnostic coordinator's unscoped worker_list names the workspace it scoped to" do
+      {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+      {:ok, other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
+      {:ok, task} = Ash.create(Issue, %{title: "live elsewhere", workspace_id: other.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: other.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, %{workers: [], workspace_id: ws_id}} = Tools.worker_list(agnostic, %{})
+      assert ws_id == default.id
     end
   end
 

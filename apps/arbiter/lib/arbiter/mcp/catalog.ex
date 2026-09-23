@@ -1009,7 +1009,12 @@ defmodule Arbiter.MCP.Catalog do
           "running while the primary is parked awaiting its merge. Check resumable before " <>
           "attempting to stop/resume: false indicates the task is blocked (e.g. awaiting " <>
           "merge queue or review gate) and cannot be safely touched. Never operate on a " <>
-          "subordinate row (role is not null) — the merge queue owns those passes.",
+          "subordinate row (role is not null) — the merge queue owns those passes. The " <>
+          "response always includes `workspace_id`: the workspace this call actually scoped " <>
+          "to (the `workspace` arg if given, else the caller's bound workspace, else the " <>
+          "installation default). An empty `workers: []` means no live workers in THAT " <>
+          "workspace, not that nothing is running anywhere — check `workspace_id` before " <>
+          "reading a zero count as \"everything died\".",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.worker_list/2
     },
