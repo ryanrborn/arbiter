@@ -176,8 +176,8 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     test "every guard in the design doc's §2 inventory has exactly one row" do
       doc_ids = inventory_ids()
 
-      assert length(doc_ids) == 66,
-             "expected §2's 66 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
+      assert length(doc_ids) == 67,
+             "expected §2's 67 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
                "table shape changed?"
 
       missing = doc_ids -- GuardRegistry.doc_refs()

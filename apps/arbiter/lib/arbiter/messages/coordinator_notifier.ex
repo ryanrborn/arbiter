@@ -416,6 +416,44 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Escalate an orphaned approved merge the fleet has stopped retrying
+  (bd-a370ak / #2002).
+
+  Fired once by the worker-less merge retry (`Arbiter.Worker.Watchdog.start_retry/1`)
+  when an approved PR whose worker has exited can no longer be merged
+  automatically: the head moved past the reviewed commit, the net diff is
+  empty, CI is red, the PR is blocked, or the merge keeps being refused. The
+  retry has stopped and latched the task's pending-merge stamp, so this page
+  is not repeated — it is the hand-off to a human. Best-effort, returns `:ok`.
+  """
+  @spec orphaned_merge_abandoned(map(), String.t() | nil, term()) :: :ok
+  def orphaned_merge_abandoned(snapshot, mr_ref, reason) do
+    escalate_event("orphaned_merge_abandoned/3", snapshot, fn task_id ->
+      subject = "#{task_id} approved merge abandoned (orphaned PR: #{orphan_reason_tag(reason)})"
+
+      body =
+        [
+          "#{title_for(task_id)} was approved, but its worker exited before the merge " <>
+            "landed, and the fleet's retry cannot merge it automatically.",
+          mr_ref && "PR/MR: #{mr_ref}",
+          "Reason: #{describe_reason(reason)}",
+          "The retry has stopped and will not page again. Merge it by hand once the " <>
+            "reason is resolved, re-dispatch the task (`arb worker resume #{task_id}`) " <>
+            "for a fresh review round, or close it."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  defp orphan_reason_tag({tag, _}) when is_atom(tag), do: tag
+  defp orphan_reason_tag({tag, _, _}) when is_atom(tag), do: tag
+  defp orphan_reason_tag(tag) when is_atom(tag), do: tag
+  defp orphan_reason_tag(_), do: :merge_failed
+
+  @doc """
   Escalate a blocked merge to the coordinator (#354, Phase 1).
 
   Fired by `Arbiter.Worker.Watchdog` when an approved/parked PR can't merge and
