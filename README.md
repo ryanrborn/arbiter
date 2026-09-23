@@ -397,14 +397,38 @@ copy is rotated and the others aren't.
 installing shell into `~/.arbiter/arbiter.env` automatically, same as the
 other captured secrets above.
 
+#### Account-model path (requires `:provider_accounts_enabled`)
+
+If your install has enabled the provider-account model (see
+`docs/provider-account-design.md` and `config/config.exs:131`), you can
+instead attach workspace credentials to named provider accounts via the `arb
+account` CLI:
+
+```sh
+# Create or reference a provider account
+arb account create claude my_account
+
+# Attach it to a workspace
+arb account attach <workspace> claude my_account
+
+# Install or rotate the credential
+arb account rotate <workspace> claude --token <your-long-ttl-token>
+```
+
+This path is particularly useful if you have **multiple Claude credentials**
+(e.g., for different Anthropic accounts or organizations) and want to route
+different workspaces to different accounts — the account model lets each
+workspace reference its own account identity directly, without duplicating
+tokens across workspaces or relying on install-wide environment fallbacks.
+
 **Precedence when both are set:** a spawn can end up with both
-`CLAUDE_CODE_OAUTH_TOKEN` (install-wide) and `ANTHROPIC_API_KEY` (workspace
-`credentials_ref`/`api_keys` rotation) in its environment at once. Which one
-the `claude` CLI honours is decided by the CLI itself, not by Arbiter — if it
-prefers the OAuth token, a workspace that deliberately configured its own key
-would silently authenticate against the install-wide account instead. If a
-workspace's `ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence
-before relying on it, or unset the install-wide token for that install.
+`CLAUDE_CODE_OAUTH_TOKEN` (install-wide) and credentials from the account model
+in its environment at once. Which one the `claude` CLI honours is decided by
+the CLI itself, not by Arbiter — if it prefers the OAuth token, a workspace
+with an account-attached credential would silently authenticate against the
+install-wide account instead. If a workspace's account credential must win,
+verify the CLI's actual precedence before relying on it, or unset the
+install-wide token for that install.
 
 **Redaction:** `Arbiter.Worker.ClaudeSession.start/1` adds
 `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values to the session's

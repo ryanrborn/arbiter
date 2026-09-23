@@ -1,6 +1,6 @@
 # Provider accounts — extracting credentials, quota and cost out of the workspace
 
-**Status:** implemented (P0–P11 all shipped as of 2026-09-23). No significant deviations from the design.
+**Status:** implemented behind `:provider_accounts_enabled` (default off) as of 2026-09-23; P0–P11 all shipped. See §7.5 for deviations from the original design.
 **Date:** 2026-09-12
 **Task:** bd-7df8nh · **Tracker:** github:1593
 **Author:** worker
@@ -636,6 +636,26 @@ false. Two decisions the rows above do not spell out:
   with no workspace in hand — the fleet-wide watchdog and quota probes — takes
   the unambiguous install-wide *account* credential with those steps beneath
   it as a floor. P4 deletes them; P3 does not.
+
+**What P4 actually shipped (bd-6yb06i).** The destructive step — removal of
+the legacy `ConfigDir` fallback chain and deletion of install-wide-unambiguous
+sources — was deferred per operator ruling on #1947 (commit `7eaaaafe`). The
+design intended P4 to land as the final step of a three-phase sequence
+(N / N+1 / N+2 in §7.5), making the account model mandatory once the rollback
+window closed. Instead, the fallback chain remains in place: `ConfigDir.oauth_token/1`
+still consults the server process env and `CLAUDE_CODE_OAUTH_TOKEN` as fallbacks
+when no account is found. This means:
+
+* **The account model is opt-in, not the live default.** `:provider_accounts_enabled`
+  defaults `false` in every environment (§7.5 / `config/config.exs:131`), and P3's
+  read paths are gated on it. A workspace without an explicit account join still
+  sources credentials from its `encrypted_worker_env` blob, and the fleet-wide
+  probes still fall back to install-wide sources. The reversal preserves the
+  three-release N / N+1 / N+2 structure.
+* **No further destructive changes.** P4's nominal scope (deletion) is closed.
+  Extending the fallback chain or changing its behaviour is a future decision
+  and requires explicit work, not a phase; there is no "P4 rolled back but P12
+  deletes it anyway" trap.
 
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
