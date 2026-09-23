@@ -1451,6 +1451,33 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert html =~ ~s(phx-click="add_agent_type" phx-value-role="agent" phx-value-type="codex")
     end
 
+    # P10 (`docs/provider-account-design.md` §8, bd-icwk2k): the workspace
+    # detail page names which account a selected provider is metered under.
+    test "names the provider account a selected worker agent is metered under", %{conn: conn} do
+      ws = new_workspace(%{config: %{"agent" => %{"type" => "claude"}}})
+
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "personal-max"})
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert html =~ "account: personal-max"
+    end
+
+    test "shows no account label for a provider with no linked account", %{conn: conn} do
+      ws = new_workspace(%{config: %{"agent" => %{"type" => "claude"}}})
+
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      refute html =~ "account:"
+    end
+
     test "adds, reorders, and removes agent.type providers, persisting order", %{conn: conn} do
       ws = new_workspace()
 

@@ -21,6 +21,7 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
         name: nil,
         paused: false,
         interval_ms: :never,
+        topics: [],
         snapshot: fn opts -> default_board(opts[:paused]) end
       )
 

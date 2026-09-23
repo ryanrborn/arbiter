@@ -367,6 +367,35 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "default $10.00 · emricare $12.50 · vstim $7.50"
     end
 
+    test "the total can exceed the workspace breakdown sum (probe/preflight spend, bd-adyhvn)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              # Server-computed total (workspace spend + a preflight row with
+              # no workspace_id) is bigger than the two breakdown lines sum
+              # to (10.0 + 12.5 = 22.5) — the CLI must print the server's
+              # figure verbatim, not recompute it from the breakdown.
+              "cost_usd" => 23.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 12.5}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $23.00"
+      assert out =~ "default $10.00 · emricare $12.50"
+    end
+
     test "omits the breakdown when the account has a single workspace" do
       stub_get("/api/quota", %{
         "data" => %{
@@ -574,6 +603,57 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert code == 0
       assert out =~ "Gemini CLI"
       assert out =~ "auth expired"
+    end
+  end
+
+  describe "--account (P10, bd-icwk2k)" do
+    test "goes straight to the account, with the total + workspace breakdown" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 4.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 6.0}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "Anthropic quota (account personal-max"
+      assert out =~ "2 workspaces: default, emricare"
+      refute out =~ "via workspace"
+    end
+
+    test "--account is forwarded to the API as a query param, taking priority over --workspace" do
+      stub_routes([
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["account"] == "personal-max"
+           refute Map.has_key?(conn.query_params, "workspace")
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"data" => %{"workspace_id" => nil, "claude" => nil}})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Quota.run(["--account", "personal-max", "--workspace", "emricare"])
+        end)
+
+      assert code == 0
     end
   end
 end

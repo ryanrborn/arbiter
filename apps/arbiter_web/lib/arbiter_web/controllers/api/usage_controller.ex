@@ -5,13 +5,16 @@ defmodule ArbiterWeb.Api.UsageController do
   Routes:
 
     * `GET /api/usage`          — aggregated rollup. Required query: `by` (one of
-                                  `day | task | epic | workspace | repo |
-                                  model | step | provider | source | session`;
-                                  `campaign` also accepted as a deprecated alias
-                                  for `epic`). Optional: `workspace_id`, `since`
+                                  `day | task | epic | workspace |
+                                  provider_account | repo | model | step |
+                                  provider | source | session`; `campaign`
+                                  also accepted as a deprecated alias for
+                                  `epic`, and `account` accepted as an alias
+                                  for `provider_account`). Optional:
+                                  `workspace_id`, `account`, `since`
                                   (ISO8601), `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
-                                  filters: `workspace_id`, `task_id`,
+                                  filters: `workspace_id`, `account`, `task_id`,
                                   `session_id`, `since`, `step`, `source`,
                                   `limit` (default 50).
     * `GET /api/usage/calibration` — difficulty mis-rating report (bd-3j4ch4):
@@ -22,6 +25,14 @@ defmodule ArbiterWeb.Api.UsageController do
 
   `by=task` covers task-attributed spend only — probe / pre-flight / session
   rows carry no `task_id` (bd-adyhvn). Use `by=source` for the full split.
+
+  `account` (P10, `docs/provider-account-design.md` §8) accepts anything
+  `Arbiter.Accounts.get_account/1` resolves — a UUID, a `"provider:slug"`
+  ref, or a bare unambiguous slug — and filters
+  `usage_events.provider_account_id` directly (P9), so probe/pre-flight rows
+  (no `workspace_id`, but always an account) are included. `by=provider_account`
+  is the rollup dimension; `account` narrows any rollup or the raw event list
+  to one account.
 
   Both back the `arb usage` CLI; the rollup is the primary surface (per-day
   spend, top tasks, rework cost). `events` is for debugging / drill-down.
@@ -41,11 +52,13 @@ defmodule ArbiterWeb.Api.UsageController do
   def summarize(conn, params) do
     with {:ok, by} <- parse_by(params["by"]),
          {:ok, since} <- parse_since(params["since"]),
-         {:ok, limit} <- parse_optional_limit(params["limit"]) do
+         {:ok, limit} <- parse_optional_limit(params["limit"]),
+         {:ok, account_id} <- parse_account(params["account"]) do
       opts =
         [by: by]
         |> add_opt(:since, since)
         |> add_opt(:workspace_id, params["workspace_id"])
+        |> add_opt(:provider_account_id, account_id)
         |> add_opt(:limit, limit)
 
       case Usage.summarize(opts) do
@@ -90,10 +103,12 @@ defmodule ArbiterWeb.Api.UsageController do
     with {:ok, since} <- parse_since(params["since"]),
          {:ok, step} <- parse_step(params["step"]),
          {:ok, source} <- parse_source(params["source"]),
-         {:ok, limit} <- parse_limit(params["limit"]) do
+         {:ok, limit} <- parse_limit(params["limit"]),
+         {:ok, account_id} <- parse_account(params["account"]) do
       events =
         Event
         |> filter_eq(:workspace_id, params["workspace_id"])
+        |> filter_eq(:provider_account_id, account_id)
         |> filter_eq(:task_id, params["task_id"])
         |> filter_eq(:session_id, params["session_id"])
         |> filter_eq(:step, step)
@@ -200,6 +215,9 @@ defmodule ArbiterWeb.Api.UsageController do
 
   defp filter_eq(query, _field, value) when value in [nil, ""], do: query
   defp filter_eq(query, :workspace_id, v), do: Ash.Query.filter(query, workspace_id == ^v)
+
+  defp filter_eq(query, :provider_account_id, v),
+    do: Ash.Query.filter(query, provider_account_id == ^v)
 
   defp filter_eq(query, :task_id, v) do
     prefix = v <> "#%"
@@ -308,4 +326,24 @@ defmodule ArbiterWeb.Api.UsageController do
   defp parse_optional_limit(nil), do: {:ok, nil}
   defp parse_optional_limit(""), do: {:ok, nil}
   defp parse_optional_limit(raw), do: parse_limit(raw)
+
+  # `?account=` resolves the same way `arb account` refs do — a UUID, a
+  # `"provider:slug"` ref, or a bare unambiguous slug — to an account id, so
+  # `usage_events.provider_account_id` can be filtered directly (P9).
+  defp parse_account(nil), do: {:ok, nil}
+  defp parse_account(""), do: {:ok, nil}
+
+  defp parse_account(ref) when is_binary(ref) do
+    case Arbiter.Accounts.get_account(ref) do
+      {:ok, account} ->
+        {:ok, account.id}
+
+      {:error, :not_found} ->
+        {:error, {:invalid_request, "account #{inspect(ref)} not found"}}
+
+      {:error, :ambiguous} ->
+        {:error,
+         {:invalid_request, "account #{inspect(ref)} is ambiguous; use \"provider:slug\""}}
+    end
+  end
 end

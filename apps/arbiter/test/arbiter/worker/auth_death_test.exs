@@ -226,19 +226,28 @@ defmodule Arbiter.Worker.AuthDeathTest do
       test_pid = self()
 
       autopilot =
-        start_supervised!(
-          {Autopilot,
-           name: nil,
-           paused: false,
-           interval_ms: :never,
-           snapshot: fn opts ->
-             Snapshot.load(Keyword.merge(opts, workspace_id: ws.id, slots_total: 4))
-           end,
-           dispatch: fn id ->
-             send(test_pid, {:dispatch_attempt, id})
-             dispatch(id)
-           end}
-        )
+        start_supervised!({
+          Autopilot,
+          # This test drives an explicit, fixed-count `tick/2` loop and
+          # asserts on exact dispatch-attempt counts; a real subscription
+          # would let this file's own worker-death/reopen broadcasts on the
+          # "tasks"/"events" topics race in an extra reactive pass.
+          # No immediate follow-up pass after a successful dispatch — this
+          # test asserts an exact attempt count per explicit `tick/2` call
+          # (see `after_dispatch/2`'s moduledoc note on this test knob).
+          name: nil,
+          paused: false,
+          interval_ms: :never,
+          topics: [],
+          follow_up: false,
+          snapshot: fn opts ->
+            Snapshot.load(Keyword.merge(opts, workspace_id: ws.id, slots_total: 4))
+          end,
+          dispatch: fn id ->
+            send(test_pid, {:dispatch_attempt, id})
+            dispatch(id)
+          end
+        })
 
       outcomes =
         for _tick <- 1..10 do

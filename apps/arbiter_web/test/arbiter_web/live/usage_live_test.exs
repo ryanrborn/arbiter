@@ -141,6 +141,32 @@ defmodule ArbiterWeb.UsageLiveTest do
     assert html =~ "apex-api"
   end
 
+  test "switching to the By account tab renders per-account bars with the account slug", %{
+    conn: conn,
+    ws: ws
+  } do
+    account =
+      Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "personal-max"})
+
+    task = new_issue!(ws, "Some task")
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      provider_account_id: account.id,
+      cost_usd: 1.0
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+
+    html =
+      view
+      |> element("button[phx-value-tab=by_account]")
+      |> render_click()
+
+    assert html =~ "personal-max"
+  end
+
   test "changing the range segmented control reloads data", %{conn: conn, ws: ws} do
     task = new_issue!(ws, "Old task")
 
