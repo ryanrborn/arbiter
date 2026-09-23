@@ -88,6 +88,13 @@ defmodule Arbiter.Application do
       # :running forever and external_review_list(status: "running") overstates
       # what's actually in flight. See Arbiter.Reviews.StaleReviewReaper.
       Arbiter.Reviews.StaleReviewReaper,
+      # Re-arms the merge of approved PRs whose owning worker exited while the
+      # merge was waiting on CI / a draft / a transient forge refusal
+      # (bd-a370ak / #2002). Reads the durable `issues.pending_merge` stamp, so
+      # its first sweep after boot is also what picks a pending merge back up
+      # across a restart. Primary-instance only; disabled in test. See
+      # Arbiter.Workflows.PendingMergeSweeper.
+      Arbiter.Workflows.PendingMergeSweeper,
       # Owns the ETS table backing P3 shadow mode's since-boot counters and
       # its report-once dedup set (#1635 §6.3). Inert until
       # `Arbiter.Reviews.CoverageShadow.observe/1` is called from a merge

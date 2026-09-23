@@ -91,14 +91,14 @@ entire agent spend spent on the gate misfiring.
 ### 1.1 The two root causes, stated precisely
 
 **RC1 — "the reviewed SHA" is a single value.** `issues.last_reviewed_sha`
-(`apps/arbiter/lib/arbiter/tasks/issue.ex:909` (`last_reviewed_sha`)) is one
+(`apps/arbiter/lib/arbiter/tasks/issue.ex:923` (`last_reviewed_sha`)) is one
 nullable string, written by whichever of four unrelated writers ran last. There
 is no record of *which* commits an approval covered, so every consumer
 reconstructs one — badly, and differently. `Arbiter.Mergers.ReviewedSha` invents
 a *latch* (`apps/arbiter/lib/arbiter/mergers/reviewed_sha.ex:67` (`latch`)),
 both the Watchdog and the MergeQueue then invent a *suspension* on top of the
-latch (`apps/arbiter/lib/arbiter/worker/watchdog.ex:3916` (`clear_reviewed_latch`), `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1701` (`clear_reviewed_latch`)), and the Watchdog invents a *memo invalidation* on top
-of the suspension (`apps/arbiter/lib/arbiter/worker/watchdog.ex:3801` (`load_recorded_reviewed_sha`)). All of that machinery is an attempt to
+latch (`apps/arbiter/lib/arbiter/worker/watchdog.ex:4370` (`clear_reviewed_latch`), `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1701` (`clear_reviewed_latch`)), and the Watchdog invents a *memo invalidation* on top
+of the suspension (`apps/arbiter/lib/arbiter/worker/watchdog.ex:4255` (`load_recorded_reviewed_sha`)). All of that machinery is an attempt to
 reconstruct a set from a scalar.
 
 **RC2 — the comparison is two-valued.** `ReviewedSha.check/2`
@@ -114,7 +114,7 @@ real answers, and the missing one is the common path:
 
 #1622 is exactly the third case being reported as the second. The shipped fix
 bolts the missing value on *outside* the comparison, as a boolean latch with its
-own grace counter (`apps/arbiter/lib/arbiter/worker/watchdog.ex:3169` (`forge_head_lagging?`), `apps/arbiter/lib/arbiter/worker/watchdog.ex:259`
+own grace counter (`apps/arbiter/lib/arbiter/worker/watchdog.ex:3623` (`forge_head_lagging?`), `apps/arbiter/lib/arbiter/worker/watchdog.ex:259`
 (`head_lag_grace_polls`)) — which works, and is a fifth thing to keep in sync.
 
 ---
@@ -159,26 +159,27 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| W1 | Merge-coverage decision (reviewed-SHA guard, or `decide/3` under `merge.coverage_enabled` — P4) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3165` (`guarded_merge_decision`) | bd-dxgris/#1498: merging commits nobody reviewed | The whole of chain A | Routes to W2–W6 | **4** |
-| W2 | Forge-head-lag latch | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3169` (`forge_head_lagging?`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:259` (`head_lag_grace_polls`) | bd-ch9pmk/#1622: PR resource stale seconds after our own push | A push that never surfaces waits 5 polls, then falls through to W6 | `{:wait, …}`, bounded at 5 | 1 |
-| W3 | Re-read the recorded stamp | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3563` (`reconsider_stale_head`) | bd-6bg54c cause B: `effective_outcome` pins `via_review_gate` to `:approved` forever, so the memo never invalidates | — | Falls through to W4 | 1 |
-| W4 | Re-read the live head before deciding | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3588` (`resolve_against_live_head`) | bd-ch9pmk AC4: deciding against a head already seconds stale | A forge error keeps the previous reading | Falls through to W5 | 1 |
-| W5 | Content equality (base-merge-only) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3698` (`base_merge_only?`), via `apps/arbiter/lib/arbiter/mergers/net_diff.ex:151` (`equivalent?`) | bd-6bg54c: a merge from base changes the head but not the content | **Fails closed** on any diff-fetch error → a transient forge error becomes a full re-review | Returns false → W6 | 1 |
-| W6 | Unreviewed head → back to review, else page once | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3732` (`resolve_stale_reviewed_head`) | bd-6bg54c: the 303-retry loop | **Fails the worker** with `{:unreviewed_head, head}` and buys a review round — since P7 scoped by the ReviewGate to the delta since the last covered commit when one is an ancestor (§4.5), and routed through W13/W14's resume path so a fix pass still holding the family defers instead of paging; when the resume budget is spent, pages and stops | `Worker.fail` + resume, or one escalation | 2 |
-| W7 | Forge atomic precondition (`expected_sha`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1472` (`apply_guarded_merge`) | The residual poll→merge window | A racing push turns into a merge failure | **Unbounded retrying.** Retries the merge call every poll; `apps/arbiter/lib/arbiter/worker/watchdog.ex:274` (`default_merge_fail_notify_threshold`) gates only the *page*, after which **`max_polls: :infinity`** and a re-page every cadence — no terminal state | 2 |
-| W8 | Latch suspension for fleet-authored pushes (update-branch only, since P7) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3916` (`clear_reviewed_latch`) | Deadlocking the fleet's own rebase/fix-pass against its own guard | The guard is **deliberately** scoped to advances the fleet did not initiate. The consequence is that the CI `fix_pass` path (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1978` (`clear_reviewed_latch`)) re-latches to the fix-pass head and merges content no reviewer saw — a deliberate scoping choice, but the same shape #1498 exists to stop. §4.5 argues it should change. **P7 (bd-60r6wp / #1738) changed it:** only update-branch still suspends; a fix pass or conflict resolver keeps the approved baseline (`note_authored_push/1`) and its head is judged on content by W5/W6 | Baseline floats to the new head | 2 |
-| W9 | Baseline tracking per poll | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3827` (`track_reviewed_baseline`) | Losing the baseline across polls | Re-pins to a stale head while suspended | — | 2 |
-| W10 | `via_review_gate` outcome pinning | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1315` (`effective_outcome`) | A gate-approved lane whose forge shows no approval | Approval never lapses ⇒ W3's memo never invalidates (the bd-6bg54c cause-B mechanism) | — | 1 |
-| W11 | CI `:not_started` grace | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1354` (`not_started_grace_polls`) | bd-aeb9wv/#1189: zero check-runs race | A no-CI repo waits 5 polls every time | Falls through to merge, bound 5 | 1 |
-| W12 | Poll ceiling → `{:awaiting_review_timeout, N}` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2547` (`handle_review_timeout`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:235` (`default_max_polls_auto`) | bd-66ey1o: a lane parked forever | **12 runs, $43.27.** A slow-but-healthy CI run fails the worker | `Worker.fail` then auto-resume | 3 |
-| W13 | Auto-resume budget | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2639` (`attempt_auto_resume`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:306` (`default_max_auto_resumes`) | bd-8eheb6: a resumable run left for a human | Budget spent → escalate and stop | One escalation (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2981` (`escalate_auto_resume_give_up`)) | 2 |
-| W14 | Resume-deferral budget | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2618` (`handle_resume_error`) | bd-di4t6d: resume refused by the task's own fix pass; three observed indefinite stalls | 30 deferrals ≈ 30 min of polling | One escalation `{:resume_blocked, …}` | 1 |
-| W15 | Non-author-approval park | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1518` (`handle_nonauthor_approval`) | bd-c3lchp: forge requires a non-author approver; the ceiling marked it FAILED | — | Escalate once, `max_polls: :infinity` | 1 |
-| W16 | Block escalation debounce | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1697` (`debounce_escalate_block`) | #1226: escalation storms | A changed block reason re-pages | Once per episode | 2 |
-| W17 | Auto-resolve attempts (`behind_base`, `ci_failed`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1841` (`maybe_escalate_unresolved`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:265` (`default_max_auto_resolve_attempts`) | #354 Phase 2a | Two failed attempts paid before escalating | Escalate, `max_polls: :infinity`, re-page per cadence (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2123` (`escalate_unresolved_block`)) | 3 |
-| W18 | Conflict-resolution attempts | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2219` (`drive_conflict_resolution`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:299` (`default_max_conflict_attempts`) | #354 Phase 2b | A phantom conflict spends two resolver workers | One escalation (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2253` (`escalate_conflict_exhausted`)) | 2 |
-| W19 | Park heartbeat | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1865` (`park_heartbeat_due?`) | bd-5mzzww: a PR parked 19h on one page | Re-pages a park that is being worked | Re-page every 720 polls | 1 |
-| W20 | Coverage-unknown bounded wait | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3306` (`wait_for_coverage`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:308` (`coverage_unknown_grace_polls`) | bd-df3zlo/#1736: an `{:unknown, _}` coverage answer waited on forever | A forge whose compare API is down parks an otherwise mergeable PR after 5 polls | Park + one page (`:coverage_unknown`), no further merge for that head, and the `auto_merge` poll ceiling lifted to `:infinity` so the park cannot decay into an `{:awaiting_review_timeout, _}` re-review; a new head reopens it and restores the ceiling | 1 |
+| W1 | Merge-coverage decision (reviewed-SHA guard, or `decide/3` under `merge.coverage_enabled` — P4) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3619` (`guarded_merge_decision`) | bd-dxgris/#1498: merging commits nobody reviewed | The whole of chain A | Routes to W2–W6 | **4** |
+| W2 | Forge-head-lag latch | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3623` (`forge_head_lagging?`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:259` (`head_lag_grace_polls`) | bd-ch9pmk/#1622: PR resource stale seconds after our own push | A push that never surfaces waits 5 polls, then falls through to W6 | `{:wait, …}`, bounded at 5 | 1 |
+| W3 | Re-read the recorded stamp | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4017` (`reconsider_stale_head`) | bd-6bg54c cause B: `effective_outcome` pins `via_review_gate` to `:approved` forever, so the memo never invalidates | — | Falls through to W4 | 1 |
+| W4 | Re-read the live head before deciding | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4042` (`resolve_against_live_head`) | bd-ch9pmk AC4: deciding against a head already seconds stale | A forge error keeps the previous reading | Falls through to W5 | 1 |
+| W5 | Content equality (base-merge-only) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4152` (`base_merge_only?`), via `apps/arbiter/lib/arbiter/mergers/net_diff.ex:151` (`equivalent?`) | bd-6bg54c: a merge from base changes the head but not the content | **Fails closed** on any diff-fetch error → a transient forge error becomes a full re-review | Returns false → W6 | 1 |
+| W6 | Unreviewed head → back to review, else page once | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4186` (`resolve_stale_reviewed_head`) | bd-6bg54c: the 303-retry loop | **Fails the worker** with `{:unreviewed_head, head}` and buys a review round — since P7 scoped by the ReviewGate to the delta since the last covered commit when one is an ancestor (§4.5), and routed through W13/W14's resume path so a fix pass still holding the family defers instead of paging; when the resume budget is spent, pages and stops | `Worker.fail` + resume, or one escalation | 2 |
+| W7 | Forge atomic precondition (`expected_sha`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1921` (`apply_guarded_merge`) | The residual poll→merge window | A racing push turns into a merge failure | **Unbounded retrying.** Retries the merge call every poll; `apps/arbiter/lib/arbiter/worker/watchdog.ex:276` (`default_merge_fail_notify_threshold`) gates only the *page*, after which **`max_polls: :infinity`** and a re-page every cadence — no terminal state | 2 |
+| W8 | Latch suspension for fleet-authored pushes (update-branch only, since P7) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4370` (`clear_reviewed_latch`) | Deadlocking the fleet's own rebase/fix-pass against its own guard | The guard is **deliberately** scoped to advances the fleet did not initiate. The consequence is that the CI `fix_pass` path (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2432` (`clear_reviewed_latch`)) re-latches to the fix-pass head and merges content no reviewer saw — a deliberate scoping choice, but the same shape #1498 exists to stop. §4.5 argues it should change. **P7 (bd-60r6wp / #1738) changed it:** only update-branch still suspends; a fix pass or conflict resolver keeps the approved baseline (`note_authored_push/1`) and its head is judged on content by W5/W6 | Baseline floats to the new head | 2 |
+| W9 | Baseline tracking per poll | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4281` (`track_reviewed_baseline`) | Losing the baseline across polls | Re-pins to a stale head while suspended | — | 2 |
+| W10 | `via_review_gate` outcome pinning | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1458` (`effective_outcome`) | A gate-approved lane whose forge shows no approval | Approval never lapses ⇒ W3's memo never invalidates (the bd-6bg54c cause-B mechanism) | — | 1 |
+| W11 | CI `:not_started` grace | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1791` (`not_started_grace_polls`) | bd-aeb9wv/#1189: zero check-runs race | A no-CI repo waits 5 polls every time | Falls through to merge, bound 5 | 1 |
+| W12 | Poll ceiling → `{:awaiting_review_timeout, N}` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3001` (`handle_review_timeout`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:235` (`default_max_polls_auto`) | bd-66ey1o: a lane parked forever | **12 runs, $43.27.** A slow-but-healthy CI run fails the worker | `Worker.fail` then auto-resume | 3 |
+| W13 | Auto-resume budget | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3093` (`attempt_auto_resume`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:380` (`default_max_auto_resumes`) | bd-8eheb6: a resumable run left for a human | Budget spent → escalate and stop | One escalation (`apps/arbiter/lib/arbiter/worker/watchdog.ex:3435` (`escalate_auto_resume_give_up`)) | 2 |
+| W14 | Resume-deferral budget | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3072` (`handle_resume_error`) | bd-di4t6d: resume refused by the task's own fix pass; three observed indefinite stalls | 30 deferrals ≈ 30 min of polling | One escalation `{:resume_blocked, …}` | 1 |
+| W15 | Non-author-approval park | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1972` (`handle_nonauthor_approval`) | bd-c3lchp: forge requires a non-author approver; the ceiling marked it FAILED | — | Escalate once, `max_polls: :infinity` | 1 |
+| W16 | Block escalation debounce | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2151` (`debounce_escalate_block`) | #1226: escalation storms | A changed block reason re-pages | Once per episode | 2 |
+| W17 | Auto-resolve attempts (`behind_base`, `ci_failed`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2295` (`maybe_escalate_unresolved`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:265` (`default_max_auto_resolve_attempts`) | #354 Phase 2a | Two failed attempts paid before escalating | Escalate, `max_polls: :infinity`, re-page per cadence (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2577` (`escalate_unresolved_block`)) | 3 |
+| W18 | Conflict-resolution attempts | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2673` (`drive_conflict_resolution`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:373` (`default_max_conflict_attempts`) | #354 Phase 2b | A phantom conflict spends two resolver workers | One escalation (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2707` (`escalate_conflict_exhausted`)) | 2 |
+| W19 | Park heartbeat | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2319` (`park_heartbeat_due?`) | bd-5mzzww: a PR parked 19h on one page | Re-pages a park that is being worked | Re-page every 720 polls | 1 |
+| W20 | Coverage-unknown bounded wait | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3760` (`wait_for_coverage`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:310` (`coverage_unknown_grace_polls`) | bd-df3zlo/#1736: an `{:unknown, _}` coverage answer waited on forever | A forge whose compare API is down parks an otherwise mergeable PR after 5 polls | Park + one page (`:coverage_unknown`), no further merge for that head, and the `auto_merge` poll ceiling lifted to `:infinity` so the park cannot decay into an `{:awaiting_review_timeout, _}` re-review; a new head reopens it and restores the ceiling | 1 |
+| W21 | Worker-less merge retry of an orphaned approved PR | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1550` (`detached_outcome`), `apps/arbiter/lib/arbiter/worker/watchdog.ex:1599` (`detached_attempt_merge`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:368` (`retry_transient_failure_limit`) | bd-a370ak/#2002: an approved, green PR stranded when its worker exited while the merge waited on CI, a draft or a 405/409 — nothing re-evaluated it (#1947/#1966/#1932 sat 17h) | Runs W1–W5 and #1996's zero-net-diff guard verbatim, so it can only refuse what a live Watchdog would; a misfire there pages a human instead of dispatching a re-review, because there is no worker to resume | Waits out draft / CI pending (no merge call); retries transient forge refusals up to 30, any other refusal up to `merge_fail_notify_threshold`; then one page (`orphaned_merge_abandoned`) and the task's `pending_merge` stamp is latched escalated so no later sweep or boot re-arms it | 1 |
 
 ### 2.3 `apps/arbiter/lib/arbiter/workflows/merge_queue.ex` — the out-of-process queue
 
@@ -235,12 +236,12 @@ Counting the 64 rows above:
   baseline" (W3, M2). A patrol tick can move a merge authorisation.
 * **Two guards retry without any bound: M3 and W7.** M3 leaves the queue item's
   status untouched, so the same refused merge is re-attempted every tick. W7's
-  *paging* is bounded (`apps/arbiter/lib/arbiter/worker/watchdog.ex:274`
+  *paging* is bounded (`apps/arbiter/lib/arbiter/worker/watchdog.ex:276`
   (`default_merge_fail_notify_threshold`), then a cadence) but its *retrying* is
   not: the error arm of `apply_guarded_merge/2` only increments a counter
-  (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1287` (`merge_fail_count`)) and
+  (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1958` (`merge_fail_count`)) and
   re-issues the merge call on the next poll, and the paging branch lifts
-  `apps/arbiter/lib/arbiter/worker/watchdog.ex:1331` (`max_polls`) to `:infinity`
+  `apps/arbiter/lib/arbiter/worker/watchdog.ex:2000` (`max_polls`) to `:infinity`
   so the polls never run out. W17 lifts `max_polls` the same way but *is* bounded
   on attempts (`apps/arbiter/lib/arbiter/worker/watchdog.ex:265`
   (`default_max_auto_resolve_attempts`)) and merely watches afterwards; that is
@@ -370,8 +371,8 @@ below calls it and nothing writes coverage any other way:
 | ReviewGate verdict guards | — | nothing (a `fail_closed` is a reject) |
 | ReviewPatrol post-review | `last_reviewed_sha: head` on the engagement | `Coverage.record(kind: :reviewed, source: :review_patrol)` on the **authoring task**, plus the engagement cursor as today |
 | ExternalReview baseline | `apps/arbiter/lib/arbiter/reviews/external_review.ex:1418` (`last_reviewed_sha`) | `Coverage.record(kind: :reviewed, source: :external_review)` when the external verdict is an approval; cursor only otherwise |
-| Watchdog fleet push (update-branch / rebase) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3916` (`clear_reviewed_latch`) suspends the guard | `Coverage.record(kind: :mechanical, …)` **only if** the fingerprint matches; otherwise nothing is recorded and the new head is honestly uncovered |
-| Watchdog CI `fix_pass` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1978` (`clear_reviewed_latch`) — merges unguarded | nothing. A `fix_pass` changes content by construction, so its head is `:uncovered` and routes to a scoped re-review. **This closes the hole in §2.6.** **P7 ✅ (bd-60r6wp / #1738)** |
+| Watchdog fleet push (update-branch / rebase) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4370` (`clear_reviewed_latch`) suspends the guard | `Coverage.record(kind: :mechanical, …)` **only if** the fingerprint matches; otherwise nothing is recorded and the new head is honestly uncovered |
+| Watchdog CI `fix_pass` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2432` (`clear_reviewed_latch`) — merges unguarded | nothing. A `fix_pass` changes content by construction, so its head is `:uncovered` and routes to a scoped re-review. **This closes the hole in §2.6.** **P7 ✅ (bd-60r6wp / #1738)** |
 | MergeQueue conflict resolver push | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1701` (`clear_reviewed_latch`) | fingerprint test; a conflict resolution that wrote content is uncovered, exactly as `NetDiff`'s moduledoc already argues **P7 ✅ (bd-60r6wp / #1738)** |
 | Operator | out-of-band hand-merge | `arb review cover` → `kind: :operator` |
 
@@ -488,7 +489,7 @@ once with a commit instruction; escalate `:uncommitted`; escalate `:no_changes`
 Round 2 approves `S2`. CI fails on `S2`. The Watchdog dispatches a fix-pass
 worker, which pushes `S3` with real content.
 
-* **Today:** `apps/arbiter/lib/arbiter/worker/watchdog.ex:1978` (`clear_reviewed_latch`) **suspends** the guard for the fleet's own push, then
+* **Today:** `apps/arbiter/lib/arbiter/worker/watchdog.ex:2432` (`clear_reviewed_latch`) **suspends** the guard for the fleet's own push, then
   `track_reviewed_baseline/2` re-latches to `S3` once the head moves. `S3` merges
   with no review round having seen it. The suspension is deliberate and
   necessary — without it the fleet deadlocks against its own rebase — but it is
@@ -748,10 +749,10 @@ That list is frozen by test: it may shrink, never grow. **P9 shrank it by ten**
 | Deleted | Anchor | Replaced by |
 |---|---|---|
 | `ReviewedSha.check/2` and `latch/3` | `apps/arbiter/lib/arbiter/mergers/reviewed_sha.ex:82` (`check`) | `Coverage.decide/3` rules 1–6 |
-| Watchdog latch/suspension/memo (`reviewed_sha`, `recorded_reviewed_sha`, `recorded_sha_loaded?`, `cleared_recorded_sha`, `latch_suspended_at_head`, `head_lag_polls`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3827` (`track_reviewed_baseline`) | coverage rows |
-| `forge_head_lagging?` + grace counter | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3169` (`forge_head_lagging?`) | rule 2 (ancestry) |
-| `reconsider_stale_head`, `resolve_against_live_head` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3563` (`reconsider_stale_head`) | rules 1–4, one pass |
-| `base_merge_only?` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3698` (`base_merge_only?`) | rule 3 (same `NetDiff`, generalised) |
+| Watchdog latch/suspension/memo (`reviewed_sha`, `recorded_reviewed_sha`, `recorded_sha_loaded?`, `cleared_recorded_sha`, `latch_suspended_at_head`, `head_lag_polls`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4281` (`track_reviewed_baseline`) | coverage rows |
+| `forge_head_lagging?` + grace counter | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3623` (`forge_head_lagging?`) | rule 2 (ancestry) |
+| `reconsider_stale_head`, `resolve_against_live_head` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4017` (`reconsider_stale_head`) | rules 1–4, one pass |
+| `base_merge_only?` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4152` (`base_merge_only?`) | rule 3 (same `NetDiff`, generalised) |
 | MergeQueue's mirrored latch (M2, M4, M5, M6) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1346` (`item_reviewed_sha`) | the same `Coverage.decide/3` call |
 | M3's unbounded retry | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1763` (`try_merge`) | class A's bound + terminal park |
 | G16's escalation shapes | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2081` (`escalate_commit_gate`) | one fingerprint predicate, one escalation, two remediation strings |
@@ -795,7 +796,7 @@ So shadow mode keeps a **durable** counter as well.
 `Arbiter.Reviews.CoverageShadow`
 (`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:180` (`observe`)) is
 called from both merge paths —
-`apps/arbiter/lib/arbiter/worker/watchdog.ex:3438` (`observe_coverage`) and
+`apps/arbiter/lib/arbiter/worker/watchdog.ex:3892` (`observe_coverage`) and
 `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1356`
 (`observe_coverage`) — and, per distinct
 `{site, mr_ref, head, old->new}` observation, logs one `:warning` line naming
@@ -942,7 +943,7 @@ new path is proven live.
   bd-1atwts and bd-wtvu9r merged as #1548 and #1572.)
 * **Changing the ReviewGate's round budget, model tier or prompts.**
 * **Webhook-driven merge detection.** Still the right upgrade
-  (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1315` (`effective_outcome`)
+  (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1458` (`effective_outcome`)
   already encapsulates classification), still out of scope.
 
 ---

@@ -265,8 +265,10 @@ defmodule Arbiter.Worker.Watchdog do
   require Logger
 
   alias Arbiter.Mergers
+  alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
+  alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: PRegistry
@@ -350,6 +352,20 @@ defmodule Arbiter.Worker.Watchdog do
   # (CLI / MCP tool / dashboard) can find the Watchdog for a task by task_id
   # alone and message it directly — needed for `retry_auto_resolve/1` (bd-bspakl).
   @watchdog_registry_suffix ":watchdog"
+
+  # bd-a370ak / #2002: the worker-less merge retry. A PREFIX, not a
+  # `<task_id>:` suffix, so it sits outside the task's registry family — see
+  # `start_retry/1`.
+  @retry_registry_prefix "merge_retry:"
+
+  # The retry polls a PR nobody is actively working on; there is no reason to
+  # spend a forge call a minute on it.
+  @default_retry_interval_ms 120_000
+
+  # Consecutive *transient* merge failures (405/409/5xx/network) a retry
+  # tolerates before it gives up and pages anyway. Transient means "the forge
+  # expects this to clear", not "retry forever".
+  @retry_transient_failure_limit 30
   # Bounded rebase attempts before the Watchdog gives up auto-resolving a
   # `:conflict` block and escalates to the coordinator (#354, Phase 2b). Each
   # attempt is one dispatched rebase-resolve worker; if two consecutive passes
@@ -445,10 +461,93 @@ defmodule Arbiter.Worker.Watchdog do
     DynamicSupervisor.start_child(Arbiter.Worker.WatchdogSupervisor, {__MODULE__, opts})
   end
 
+  @doc """
+  Start a **worker-less merge retry** for an approved PR whose owning worker
+  (and so its Watchdog) is gone (bd-a370ak / #2002). Started by
+  `Arbiter.Workflows.PendingMergeSweeper` from the task's durable
+  `Arbiter.Mergers.PendingMerge` stamp.
+
+  Required opts: `:task_id`, `:mr_ref`, `:adapter`, `:reviewed_sha` (the
+  baseline the stamp recorded; `nil` is accepted and refused on the first
+  poll). Optional: `:workspace`, `:repo`, `:via_review_gate`,
+  `:interval_ms` (default `#{@default_retry_interval_ms}`), `:initial_delay_ms`,
+  `:merge_fail_notify_threshold`.
+
+  It polls the PR and runs the very merge decision a live Watchdog runs —
+  the reviewed-SHA guard, the coverage decision, the base-merge-only
+  exemption, the zero-net-diff guard — but it never dispatches a worker, and
+  every outcome other than "wait" is terminal: merged (the task is finalized
+  the way the Driver would), closed (the stamp is dropped), or refused
+  (the coordinator is paged once and the stamp is latched escalated). See
+  "Worker-less merge retry" in the moduledoc.
+
+  Registered under `merge_retry:<task_id>` — deliberately *outside* the
+  task's `<task_id>:`/`<task_id>#` registry family, so `:close`'s
+  `StopWorker` / `CleanupWorktree` never wait on (or try to stop) the very
+  process that is closing the task.
+  """
+  @spec start_retry(keyword()) :: DynamicSupervisor.on_start_child()
+  def start_retry(opts) when is_list(opts) do
+    start(Keyword.put(opts, :detached, true))
+  end
+
+  @doc "The worker-less merge retry running for `task_id`, or `nil`."
+  @spec retry_whereis(String.t()) :: pid() | nil
+  def retry_whereis(task_id) when is_binary(task_id),
+    do: PRegistry.whereis(@retry_registry_prefix <> task_id)
+
+  # Worker statuses that mean a live worker is still doing something with the
+  # task. Mirrors `Arbiter.Workflows.MergedPRFinalizer`'s list: `:completed` /
+  # `:failed` workers linger registered until the task closes, and own nothing.
+  @active_worker_statuses [
+    :idle,
+    :resuming,
+    :running,
+    :awaiting,
+    :awaiting_review_gate,
+    :awaiting_review
+  ]
+
+  @doc """
+  Who, if anyone, still owns the merge for `task_id` in this node
+  (bd-a370ak / #2002):
+
+    * `:watchdog` — a live Watchdog is registered for the task;
+    * `{:worker, status}` — no Watchdog, but a worker is still active
+      (`:awaiting_review` here means a parked worker whose Watchdog died —
+      `restart/1` is the repair for that, not a worker-less retry);
+    * `nil` — nobody: no Watchdog, and no worker, or only a terminal one.
+  """
+  @spec live_merge_owner(String.t()) :: :watchdog | {:worker, atom()} | nil
+  def live_merge_owner(task_id) when is_binary(task_id) do
+    cond do
+      is_pid(whereis(task_id)) -> :watchdog
+      (status = worker_status(task_id)) in @active_worker_statuses -> {:worker, status}
+      true -> nil
+    end
+  end
+
+  defp worker_status(task_id) do
+    case Worker.whereis(task_id) do
+      nil -> nil
+      pid -> safe_worker_status(pid)
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   @spec start_link(opts()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
     task_id = Keyword.fetch!(opts, :task_id)
-    GenServer.start_link(__MODULE__, opts, name: registry_name(task_id))
+
+    name =
+      if Keyword.get(opts, :detached, false),
+        do: PRegistry.via_tuple(@retry_registry_prefix <> task_id),
+        else: registry_name(task_id)
+
+    GenServer.start_link(__MODULE__, opts, name: name)
   end
 
   @doc false
@@ -802,13 +901,20 @@ defmodule Arbiter.Worker.Watchdog do
     adapter = Keyword.fetch!(opts, :adapter)
     mr_ref = Keyword.fetch!(opts, :mr_ref)
 
+    # bd-a370ak: a worker-less merge retry has no worker by definition.
+    detached = Keyword.get(opts, :detached, false)
+
     worker_pid =
-      case Keyword.fetch!(opts, :worker) do
-        pid when is_pid(pid) -> pid
-        ref when is_binary(ref) -> Worker.whereis(ref)
+      if detached do
+        nil
+      else
+        case Keyword.fetch!(opts, :worker) do
+          pid when is_pid(pid) -> pid
+          ref when is_binary(ref) -> Worker.whereis(ref)
+        end
       end
 
-    if is_pid(worker_pid) do
+    if detached or is_pid(worker_pid) do
       workspace = Keyword.get(opts, :workspace)
       Mergers.prepare_with_repo(workspace, Keyword.get(opts, :repo))
 
@@ -870,7 +976,10 @@ defmodule Arbiter.Worker.Watchdog do
         # buys a DB round-trip per poll of a retrying lane.
         recorded_reviewed_sha: Keyword.get(opts, :last_reviewed_sha),
         recorded_sha_loaded?: is_binary(Keyword.get(opts, :last_reviewed_sha)),
-        reviewed_sha: nil,
+        # Seeded only by `start_retry/1`, from the durable stamp: a worker-less
+        # retry must never latch its own baseline off whatever head it happens
+        # to observe first (see `detached_poll/1`).
+        reviewed_sha: normalize_sha(Keyword.get(opts, :reviewed_sha)),
         # Set by `clear_reviewed_latch/1` to the head the branch sat at when the
         # fleet issued its own push. The latch stays suspended — and the guard
         # floats to whatever head each poll reports — until the head moves off
@@ -925,7 +1034,12 @@ defmodule Arbiter.Worker.Watchdog do
         # holds a lift — which is also how `restore_poll_ceiling/1` knows the
         # lift in effect is not ours to revoke.
         coverage_park_poll: nil,
-        interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
+        interval_ms:
+          Keyword.get(
+            opts,
+            :interval_ms,
+            if(detached, do: @default_retry_interval_ms, else: @default_interval_ms)
+          ),
         max_polls: Keyword.get(opts, :max_polls, default_max_polls),
         # The configured ceiling as passed at start (before any indefinite-park
         # lift). Restored into `max_polls` once a block episode clears, and used
@@ -1117,10 +1231,21 @@ defmodule Arbiter.Worker.Watchdog do
         # (bd-5mzzww ask 3), set via `mark_ci_external/2`. Scoped to the
         # current `:ci_failed` episode: cleared the moment the block reason
         # changes, so a later genuine failure is never mislabelled.
-        ci_external_note: nil
+        ci_external_note: nil,
+        # bd-a370ak / #2002. `detached` marks a worker-less merge retry
+        # (`start_retry/1`); its poll runs `detached_poll/1` instead of the
+        # live loop. `pending_merge_stamp` is the `{reason, reviewed_sha}` this
+        # Watchdog last wrote to the task's durable `pending_merge`, so an
+        # unchanged deferral costs no DB write per poll. `retry_*_failures`
+        # count a retry's consecutive merge failures toward its give-up.
+        detached: detached,
+        repo: Keyword.get(opts, :repo),
+        pending_merge_stamp: nil,
+        retry_merge_failures: 0,
+        retry_transient_failures: 0
       }
 
-      Process.monitor(worker_pid)
+      if is_pid(worker_pid), do: Process.monitor(worker_pid)
       schedule(self(), Keyword.get(opts, :initial_delay_ms, 0))
       {:ok, state}
     else
@@ -1228,6 +1353,24 @@ defmodule Arbiter.Worker.Watchdog do
     {:noreply, state}
   end
 
+  # bd-a370ak / #2002 — the worker-less merge retry (`start_retry/1`). Stands
+  # down the moment a live lane owns the task again: a re-dispatched worker
+  # gets its own Watchdog, and two merge loops on one PR is one too many.
+  def handle_info(:poll, %{detached: true} = state) do
+    case live_merge_owner(state.task_id) do
+      nil ->
+        detached_poll(state)
+
+      owner ->
+        Logger.info(
+          "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} standing " <>
+            "down — a live lane owns the task again (#{inspect(owner)})"
+        )
+
+        {:stop, :normal, state}
+    end
+  end
+
   def handle_info(:poll, state) do
     case safe_get(state) do
       {:ok, result} when is_map(result) ->
@@ -1330,6 +1473,298 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp effective_outcome(_state, result), do: classify(result)
 
+  # ---- worker-less merge retry (bd-a370ak / #2002) ------------------------
+  #
+  # A narrower loop than the live one, over the SAME guard code. It never
+  # dispatches anything (no fix pass, no conflict resolver, no update-branch,
+  # no auto-resume): nobody is attached to the PR any more, so anything that
+  # needs a new commit or a new review round is a human's call. What it does:
+  #
+  #   * waits out the transient blockers — a draft PR, CI running / queued, a
+  #     not-yet-created check suite (bounded by `@not_started_grace_polls`, as
+  #     live), undecided coverage;
+  #   * merges through `guarded_merge_decision/1` + the zero-net-diff guard —
+  #     the stale-reviewed-SHA guard, the coverage decision, the
+  #     base-merge-only exemption, exactly as a live Watchdog would;
+  #   * retries transient forge refusals (405/409/5xx/network), bounded;
+  #   * on anything else — a stale head, an empty diff, red CI, a conflict, a
+  #     non-transient refusal that keeps failing — pages the coordinator ONCE
+  #     and latches the stamp escalated, so no later sweep or boot re-arms it.
+  #
+  # The baseline is the stamp's `reviewed_sha`, seeded into `reviewed_sha` at
+  # init. `track_reviewed_baseline/2` is deliberately NOT run here: on a
+  # nil baseline it would latch onto whatever head the first poll reports,
+  # which for a retry started hours later is exactly the unreviewed commit the
+  # guard exists to refuse.
+
+  # The status poll is unattended periodic polling — the limiter's
+  # `:background` class (bd-8y1i58) — and a paused read is just another
+  # transient wait. The merge call itself stays foreground: it is the one
+  # request this whole loop exists to make.
+  defp detached_poll(state) do
+    case Arbiter.GitHub.Limiter.with_priority(:background, :merge_retry, fn -> safe_get(state) end) do
+      {:ok, result} when is_map(result) ->
+        state =
+          state
+          |> note_local_head_visible(Map.get(result, :head_sha))
+          |> remember_base_ref(result)
+          |> load_recorded_reviewed_sha()
+
+        detached_outcome(effective_outcome(state, result), result, state)
+
+      {:error, reason} ->
+        Logger.debug(
+          "Worker.Watchdog: merge_retry get/1 error for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}: #{inspect(reason)}"
+        )
+
+        detached_reschedule(state)
+    end
+  end
+
+  defp detached_outcome(:merged, _result, state) do
+    Logger.info(
+      "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} is already " <>
+        "merged; finalizing"
+    )
+
+    finalize_detached_merge(state)
+    {:stop, :normal, state}
+  end
+
+  defp detached_outcome(:closed, _result, state) do
+    Logger.info(
+      "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} was closed " <>
+        "without merging; dropping the pending merge"
+    )
+
+    PendingMerge.clear(state.task_id)
+    {:stop, :normal, state}
+  end
+
+  # Only reachable on a forge-approval lane (a ReviewGate lane is always
+  # `:approved`): the approval that was pending a merge has been dismissed.
+  defp detached_outcome(:pending, _result, state),
+    do: give_up_retry(state, :approval_lapsed)
+
+  defp detached_outcome(:approved, result, state) do
+    block = effective_block_reason(state, result)
+
+    cond do
+      is_nil(reviewed_sha(state)) ->
+        give_up_retry(state, :no_reviewed_baseline)
+
+      block == :draft ->
+        detached_wait(state, "the PR is still a draft")
+
+      ci_pending?(result) ->
+        detached_wait(state, "CI is #{inspect(Map.get(result, :pipeline))}")
+
+      Map.get(result, :pipeline) == :not_started and
+          state.not_started_polls + 1 < @not_started_grace_polls ->
+        detached_wait(
+          %{state | not_started_polls: state.not_started_polls + 1},
+          "no check-runs yet for the head"
+        )
+
+      ci_failed?(result) ->
+        give_up_retry(state, :ci_failed)
+
+      not is_nil(block) ->
+        give_up_retry(state, {:blocked, block})
+
+      true ->
+        detached_merge(%{state | not_started_polls: 0})
+    end
+  end
+
+  defp detached_merge(state) do
+    case guarded_merge_decision(state) do
+      # `wait_for_coverage/3` pages once itself when it parks; latch the stamp
+      # without a second page.
+      {:wait, %{coverage_parked?: true} = state} ->
+        latch_retry_escalated(state, :coverage_unknown)
+
+      {:wait, state} ->
+        detached_wait(state, "the merge decision is waiting")
+
+      {:stale, reviewed, head, state} ->
+        give_up_retry(state, {:stale_reviewed_sha, reviewed, head})
+
+      {:merge, expected_sha, state} ->
+        detached_attempt_merge(state, expected_sha)
+    end
+  end
+
+  defp detached_attempt_merge(state, expected_sha) do
+    merge_result =
+      if empty_net_diff_at_merge?(state, expected_sha),
+        do: {:error, :empty_net_diff},
+        else: do_safe_merge(state, expected_sha)
+
+    case merge_result do
+      :ok ->
+        Logger.info(
+          "Worker.Watchdog: merge_retry auto-merged orphaned approved MR #{state.mr_ref} " <>
+            "for task=#{state.task_id} (pinned to #{expected_sha})"
+        )
+
+        finalize_detached_merge(state)
+        {:stop, :normal, state}
+
+      {:error, :empty_net_diff} ->
+        give_up_retry(state, :empty_net_diff)
+
+      {:error, reason} ->
+        handle_retry_merge_failure(state, reason)
+    end
+  end
+
+  defp handle_retry_merge_failure(state, reason) do
+    if PendingMerge.transient_merge_error?(reason) do
+      n = state.retry_transient_failures + 1
+
+      if n >= @retry_transient_failure_limit do
+        give_up_retry(state, {:merge_failed, reason})
+      else
+        detached_wait(%{state | retry_transient_failures: n}, "merge refused: #{inspect(reason)}")
+      end
+    else
+      n = state.retry_merge_failures + 1
+
+      if n >= state.merge_fail_notify_threshold do
+        give_up_retry(state, {:merge_failed, reason})
+      else
+        detached_wait(%{state | retry_merge_failures: n}, "merge failed: #{inspect(reason)}")
+      end
+    end
+  end
+
+  defp detached_wait(state, why) do
+    Logger.debug(
+      "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} waiting: #{why}"
+    )
+
+    detached_reschedule(state)
+  end
+
+  defp detached_reschedule(state) do
+    schedule(self(), state.interval_ms)
+    {:noreply, %{state | poll_count: state.poll_count + 1}}
+  end
+
+  # The Driver's merged-completion path, without a worker to complete: the
+  # tracker hook, then `Verification.finalize_merged/2` (close, or park at
+  # `:awaiting_verification` for a `verify_after_deploy` task) — the same
+  # funnel `MergedPRFinalizer` uses for a PR merged behind a dead worker.
+  defp finalize_detached_merge(state) do
+    sync_tracker_merged(state)
+    PendingMerge.clear(state.task_id)
+
+    case Ash.get(Arbiter.Tasks.Issue, state.task_id) do
+      {:ok, %{status: status} = task} when status not in [:closed, :awaiting_verification] ->
+        case Verification.finalize_merged(task, close_upstream: true, mr_ref: state.mr_ref) do
+          {:ok, outcome, _} ->
+            Logger.info(
+              "Worker.Watchdog: merge_retry finalized task=#{state.task_id} (#{outcome})"
+            )
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.Watchdog: merge_retry could not finalize task=#{state.task_id}: " <>
+                "#{inspect(reason)} — MergedPRFinalizer will pick it up"
+            )
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.Watchdog: merge_retry finalize raised for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "Worker.Watchdog: merge_retry finalize exited for task=#{state.task_id}: " <>
+          inspect(reason)
+      )
+  end
+
+  # AC4: the one page. The stamp is latched escalated so the sweeper — on
+  # every later tick and every later boot — leaves it to the human it paged.
+  defp give_up_retry(state, reason) do
+    Logger.warning(
+      "Worker.Watchdog: merge_retry giving up on task=#{state.task_id} mr=#{state.mr_ref}: " <>
+        "#{inspect(reason)}; paging the coordinator once"
+    )
+
+    safe(fn ->
+      Arbiter.Messages.CoordinatorNotifier.orphaned_merge_abandoned(
+        snapshot(state),
+        state.mr_ref,
+        reason
+      )
+    end)
+
+    latch_retry_escalated(state, reason)
+  end
+
+  defp latch_retry_escalated(state, reason) do
+    PendingMerge.mark_escalated(state.task_id, reason)
+    {:stop, :normal, state}
+  end
+
+  # ---- pending-merge stamp (bd-a370ak / #2002) ------------------------------
+  #
+  # A live Watchdog on an auto-merge lane that reaches an approved verdict but
+  # does not merge on this poll records why, durably, so the merge outlives this
+  # process. Written only when `{reason, baseline}` changes — a lane deferring
+  # on CI for twenty polls costs one write, not twenty.
+
+  defp note_pending_merge(%{detached: true} = state, _reason, _detail), do: state
+
+  defp note_pending_merge(state, reason, detail) do
+    baseline = stamp_baseline(state)
+    key = {reason, baseline}
+
+    if state.pending_merge_stamp == key do
+      state
+    else
+      PendingMerge.stamp(state.task_id, %{
+        mr_ref: state.mr_ref,
+        reviewed_sha: baseline,
+        via_review_gate: state.via_review_gate,
+        reason: reason,
+        detail: detail
+      })
+
+      %{state | pending_merge_stamp: key}
+    end
+  end
+
+  # While the latch is suspended (the fleet's own update-branch is in flight)
+  # `reviewed_sha/1` floats to the current head — fine for the live guard,
+  # which still hands the forge an atomic precondition, but never a value to
+  # persist as "the reviewed commit". Keep whatever was stamped before.
+  defp stamp_baseline(%{latch_suspended_at_head: at} = state) when not is_nil(at) do
+    case state.pending_merge_stamp do
+      {_reason, sha} -> sha
+      nil -> nil
+    end
+  end
+
+  defp stamp_baseline(state), do: reviewed_sha(state)
+
+  defp clear_own_pending_merge(%{pending_merge_stamp: nil} = state), do: state
+
+  defp clear_own_pending_merge(state) do
+    PendingMerge.clear(state.task_id)
+    %{state | pending_merge_stamp: nil}
+  end
+
   # ---- outcome handling ---------------------------------------------------
   #
   # The poll loop and any future webhook trigger both funnel through
@@ -1337,6 +1772,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp apply_outcome(:merged, _result, state) do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for task=#{state.task_id}")
+    state = clear_own_pending_merge(state)
     sync_tracker_merged(state)
     safe(fn -> Worker.complete(state.worker_pid, :merged) end)
 
@@ -1346,6 +1782,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp apply_outcome(:closed, _result, state) do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} closed for task=#{state.task_id}")
+    state = clear_own_pending_merge(state)
     safe(fn -> Worker.fail(state.worker_pid, {:mr_closed, state.mr_ref}) end)
     {:stop, :normal, state}
   end
@@ -1361,7 +1798,12 @@ defmodule Arbiter.Worker.Watchdog do
       # `max_polls`. See `@not_started_grace_polls`.
       Map.get(result, :pipeline) == :not_started and
           state.not_started_polls + 1 < @not_started_grace_polls ->
-        state = %{state | not_started_polls: state.not_started_polls + 1}
+        state =
+          note_pending_merge(
+            %{state | not_started_polls: state.not_started_polls + 1},
+            :ci_not_started,
+            nil
+          )
 
         Logger.info(
           "Worker.Watchdog: deferring auto-merge for task=#{state.task_id} " <>
@@ -1379,6 +1821,7 @@ defmodule Arbiter.Worker.Watchdog do
             "will retry next poll"
         )
 
+        state = note_pending_merge(state, :ci_pending, Map.get(result, :pipeline))
         reschedule(%{state | not_started_polls: 0})
 
       # CI reported, and it reported *failure*. "Not pending" is not "safe to
@@ -1400,6 +1843,7 @@ defmodule Arbiter.Worker.Watchdog do
             "mr=#{state.mr_ref}; pipeline concluded :failed, staying parked"
         )
 
+        state = note_pending_merge(state, :ci_failed, nil)
         reschedule(%{state | not_started_polls: 0})
 
       true ->
@@ -1465,13 +1909,18 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp do_apply_approved_auto_merge(state) do
     case guarded_merge_decision(state) do
+      # bd-a370ak: the approval no longer covers the head, so there is no
+      # approved merge pending any more — whatever this or an earlier episode
+      # stamped must not be retried against it. The stale path below routes
+      # to a review round or pages; either way it owns what happens next.
       {:stale, reviewed, head, state} ->
-        resolve_stale_reviewed_head(state, reviewed, head)
+        PendingMerge.clear(state.task_id)
+        resolve_stale_reviewed_head(%{state | pending_merge_stamp: nil}, reviewed, head)
 
       # The forge has not caught up with our own push yet, so it is not yet
       # possible to say anything true about the head. Keep polling.
       {:wait, state} ->
-        reschedule(state)
+        reschedule(note_pending_merge(state, :merge_waiting, nil))
 
       {:merge, expected_sha, state} ->
         apply_guarded_merge(state, expected_sha)
@@ -1498,6 +1947,7 @@ defmodule Arbiter.Worker.Watchdog do
           "Worker.Watchdog: auto-merged approved MR #{state.mr_ref} for task=#{state.task_id}"
         )
 
+        state = clear_own_pending_merge(state)
         sync_tracker_merged(state)
         safe(fn -> Worker.complete(state.worker_pid, :merged) end)
         {:stop, :normal, state}
@@ -1506,6 +1956,10 @@ defmodule Arbiter.Worker.Watchdog do
         # Merge failed (race, branch conflict, transient). Stay parked and let
         # the next poll re-attempt rather than failing the task outright.
         fail_count = state.merge_fail_count + 1
+
+        # bd-a370ak: durably, so a worker exit before the next attempt does not
+        # strand the approved PR.
+        state = note_pending_merge(state, :merge_failed, PendingMerge.describe(reason))
 
         Logger.warning(
           "Worker.Watchdog: auto-merge failed for task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry (consecutive failure #{fail_count})"
