@@ -408,6 +408,7 @@ defmodule Arbiter.Worker.ClaudeSession do
           session
           |> absorb_usage(event)
           |> capture_steps(event)
+          |> track_async_tasks(event)
           |> scan_split_done(event)
           |> buffer_gemini_display(event)
 
@@ -875,6 +876,54 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   defp capture_steps(session, _event), do: session
 
+  # bd-1eb6fc: agy's `manage_task status` result is freeform text ("Status:
+  # RUNNING" / "Status: SUCCEEDED" / …), not a structured field — the only way
+  # to know whether the worker's own most recent check of a background task
+  # (a `mix test`/`mix precommit` backgrounded by agy's `run_command`) still
+  # read RUNNING is to parse the same tool output the model itself read.
+  # Track the last-known state per task id so `Worker.on_claude_done/1` can
+  # tell whether `arb done` fired while a task the worker had just checked
+  # was still outstanding — investigated in bd-1eb6fc after a run whose
+  # completion could not be distinguished from "the test run nobody ever saw
+  # finish" (conversation f4f6f359, task-96: last known status RUNNING,
+  # process killed ~1s later on the `arb done` sentinel, no further status
+  # check ever recorded).
+  defp track_async_tasks(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "tool", "state" => "DONE"} = step
+       }) do
+    if step["tool_name"] == "manage_task" do
+      params = get_in(step, ["tool_info", "parameters"]) || %{}
+      output = get_in(step, ["tool_info", "output"])
+      task_id = params["TaskId"]
+      status = manage_task_status(output)
+
+      cond do
+        not is_binary(task_id) -> session
+        status == "RUNNING" -> update_async_tasks(session, &Map.put(&1, task_id, true))
+        is_binary(status) -> update_async_tasks(session, &Map.delete(&1, task_id))
+        true -> session
+      end
+    else
+      session
+    end
+  end
+
+  defp track_async_tasks(session, _event), do: session
+
+  defp manage_task_status(output) when is_binary(output) do
+    case Regex.run(~r/Status:\s*(\S+)/, output) do
+      [_, status] -> status
+      _ -> nil
+    end
+  end
+
+  defp manage_task_status(_output), do: nil
+
+  defp update_async_tasks(session, fun) do
+    Map.update(session, :async_tasks_running, fun.(%{}), fun)
+  end
+
   # bd-25ivqe finding 2: an agy `ERROR` tool step isn't always a permission
   # denial — it's also how agy reports an ordinary tool failure (a malformed
   # call, a missing path). Only agy's own denial signature justifies
@@ -980,6 +1029,16 @@ defmodule Arbiter.Worker.ClaudeSession do
   """
   @spec usage_summary(map()) :: map()
   def usage_summary(%{} = session), do: Map.get(session, :usage, %{}) || %{}
+
+  @doc """
+  Task ids from a `manage_task status` check whose last-known result was
+  RUNNING, per `track_async_tasks/2`. Empty for any non-agy provider, or a
+  session that never polled a background task. bd-1eb6fc.
+  """
+  @spec async_tasks_running(map()) :: [String.t()]
+  def async_tasks_running(%{} = session) do
+    session |> Map.get(:async_tasks_running, %{}) |> Map.keys()
+  end
 
   # Refresh the session's activity from a decoded event, stamping :activity_at.
   # Events that carry no salient activity (tool *results*, partial deltas,

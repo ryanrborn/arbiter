@@ -1312,6 +1312,128 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  describe "arb done while an agy manage_task is still RUNNING (bd-1eb6fc)" do
+    defp manage_task_status_event(step_index, task_id, status) do
+      %{
+        "event" => "step_update",
+        "step_update" => %{
+          "step_index" => step_index,
+          "state" => "DONE",
+          "step_type" => "tool",
+          "tool_name" => "manage_task",
+          "tool_info" => %{
+            "name" => "manage_task",
+            "parameters" => %{"Action" => "status", "TaskId" => task_id},
+            "output" => "Task: #{task_id}\nStatus: #{status}\nLast progress: 0s ago\n"
+          }
+        }
+      }
+    end
+
+    defp agy_text_event(step_index, state, text_delta) do
+      %{
+        "event" => "step_update",
+        "step_update" => %{
+          "step_index" => step_index,
+          "state" => state,
+          "step_type" => "agent_response",
+          "text_delta" => text_delta
+        }
+      }
+    end
+
+    test "completing right after a RUNNING status check is recorded on the run" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-task-running")
+
+      events = [
+        manage_task_status_event(1, "#{task_id}/task-1", "RUNNING"),
+        agy_text_event(2, "DONE", "arb done\n")
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+
+      failure_summary = Worker.state(pid).meta.failure_summary
+      assert failure_summary =~ "RUNNING"
+      assert failure_summary =~ "#{task_id}/task-1"
+    end
+
+    test "a task that finished before `arb done` is not flagged" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-task-finished")
+
+      events = [
+        manage_task_status_event(1, "#{task_id}/task-1", "RUNNING"),
+        manage_task_status_event(2, "#{task_id}/task-1", "SUCCEEDED"),
+        agy_text_event(3, "DONE", "arb done\n")
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+      refute Map.get(Worker.state(pid).meta, :failure_summary)
+    end
+
+    test "a task the worker never checked is not flagged" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-task-none")
+
+      events = [agy_text_event(1, "DONE", "arb done\n")]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+      refute Map.get(Worker.state(pid).meta, :failure_summary)
+    end
+  end
+
   describe "codex exec --json parsing" do
     test "codex events render display lines and summarize the run" do
       {pid, task_id} = start_worker()
