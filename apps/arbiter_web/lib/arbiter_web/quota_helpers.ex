@@ -59,6 +59,7 @@ defmodule ArbiterWeb.QuotaHelpers do
   def quota_pace(bar, gate_policy \\ nil, now \\ DateTime.utc_now()) do
     %{policy: {account, _workspace} = policy, enforcing?: enforcing?} =
       gate_policy || Quota.gate_policy(nil, nil)
+
     kind = if bar.window == "5h", do: :primary, else: :long
     label = Map.get(bar, :label) || bar.window
     opts = [now: now]
@@ -90,16 +91,6 @@ defmodule ArbiterWeb.QuotaHelpers do
   defp pace_state(:approaching, _overage_status), do: :amber
   defp pace_state(:sampling, _overage_status), do: :grey
   defp pace_state(:ok, _overage_status), do: :green
-
-  @doc """
-  The bar colour for a pace `state` from `quota_pace/3`: red and amber are
-  the state tokens, grey the neutral sampling token, and green the
-  provider's own hue.
-  """
-  def quota_state_color(:red, _provider), do: "var(--arb-fail)"
-  def quota_state_color(:amber, _provider), do: "var(--arb-attention)"
-  def quota_state_color(:grey, _provider), do: "var(--arb-done)"
-  def quota_state_color(:green, provider), do: quota_provider_hue(provider)
 
   @doc """
   Tooltip phrase for where a bar sits against the gate's ceiling, from

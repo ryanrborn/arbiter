@@ -82,6 +82,15 @@ defmodule Arbiter.Quota.Gate do
   staleness semantics of `stale?/1` / `long_window_stale?/1`. The gate is
   consulted only when a worker is about to *start*, so a running worker is
   never interrupted by a paced line it has pushed utilization past.
+
+  ## The pace verdict (bd-clzkvp)
+
+  Both utilization rules are decided by `Arbiter.Quota.Pace.evaluate/4`,
+  through `pace/6`: the window holds exactly when its verdict is `:holding`.
+  The same verdict — `:ok`, `:approaching`, `:holding` or `:sampling` —
+  colours the web quota bars, evaluated under `paced_policy/1` so an account
+  that has not opted into pacing still sees where the paced ceiling is. There
+  is no second definition of "ahead of pace" for the UI to drift from.
   """
 
   alias Arbiter.Accounts.ProviderAccount

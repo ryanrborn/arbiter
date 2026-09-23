@@ -305,7 +305,12 @@ defmodule Arbiter.QuotaTest do
     end
 
     test "a :continue workspace's gate policy is not enforcing" do
-      ws = Ash.create!(Workspace, %{name: "cont", config: %{"quota" => %{"on_exhaustion" => "continue"}}})
+      ws =
+        Ash.create!(Workspace, %{
+          name: "cont",
+          config: %{"quota" => %{"on_exhaustion" => "continue"}}
+        })
+
       {:ok, _} = Quota.capture(ws.id, @headers)
 
       assert [%{gate_policy: %{enforcing?: false}}] = Quota.list_latest_for_workspace(ws.id)

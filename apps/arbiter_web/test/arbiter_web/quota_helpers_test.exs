@@ -166,14 +166,6 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       assert state(bar("claude", "5h", 0.10, 0.02)) == :grey
     end
 
-    test "the state colours: provider hue for green, tokens for the rest" do
-      assert quota_state_color(:green, "claude") == "var(--arb-proposal)"
-      assert quota_state_color(:green, "antigravity") == "var(--arb-info)"
-      assert quota_state_color(:amber, "claude") == "var(--arb-attention)"
-      assert quota_state_color(:red, "claude") == "var(--arb-fail)"
-      assert quota_state_color(:grey, "claude") == "var(--arb-done)"
-    end
-
     test "regression: 7d at 35% used / 29% elapsed is red only where the gate holds" do
       # The deficit-minute colours called this red for every account. At the
       # default 0.20 weekly floor the paced gate does hold it (1.2x pace)…
@@ -294,7 +286,8 @@ defmodule ArbiterWeb.QuotaHelpersTest do
           paced: quote(do: paced()),
           flat: quote(do: flat()),
           loose_floors: quote(do: paced(%{"paced_floor" => 0.6, "weekly_paced_floor" => 0.45})),
-          tight_flat: quote(do: account(%{"throttle_threshold" => 0.5, "weekly_threshold" => 0.4}))
+          tight_flat:
+            quote(do: account(%{"throttle_threshold" => 0.5, "weekly_threshold" => 0.4}))
         ] do
       test "#{window}, #{name} account" do
         account = unquote(account)
@@ -320,7 +313,8 @@ defmodule ArbiterWeb.QuotaHelpersTest do
   end
 
   defp snapshot(window, u, elapsed) do
-    {primary, long} = if window == "5h", do: {{u, elapsed}, {0.0, 0.5}}, else: {{0.0, 0.5}, {u, elapsed}}
+    {primary, long} =
+      if window == "5h", do: {{u, elapsed}, {0.0, 0.5}}, else: {{0.0, 0.5}, {u, elapsed}}
 
     %Snapshot{
       provider: "claude",

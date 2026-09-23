@@ -73,7 +73,9 @@ defmodule Arbiter.Quota.GatePaceVerdictTest do
 
   defp pace(policy, window, u, elapsed),
     do:
-      Gate.pace(policy, window, label(window), u, reset_after(elapsed, seconds(window)), now: @now)
+      Gate.pace(policy, window, label(window), u, reset_after(elapsed, seconds(window)),
+        now: @now
+      )
 
   defp gate_holds?(policy, window, u, elapsed) do
     case Gate.gating_window(snapshot(window, u, elapsed), policy, now: @now) do

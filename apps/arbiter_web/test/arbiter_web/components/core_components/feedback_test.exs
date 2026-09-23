@@ -130,7 +130,7 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
     end
 
     defp color_of(provider, u, reset_at),
-      do: ArbiterWeb.QuotaHelpers.quota_state_color(pace_of(provider, u, reset_at).state, provider)
+      do: ArbiterWeb.QuotaHelpers.quota_note_color(pace_of(provider, u, reset_at).state, false)
 
     defp bar(attrs) do
       render_component(&quota_bar/1, Map.merge(%{window: "5h", reset_at: nil}, attrs))
@@ -197,7 +197,12 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
       assert color == "var(--arb-attention)"
 
       doc =
-        bar(%{provider: "claude", utilization: 0.45, reset_at: reset_at, on_exhaustion: :throttle})
+        bar(%{
+          provider: "claude",
+          utilization: 0.45,
+          reset_at: reset_at,
+          on_exhaustion: :throttle
+        })
 
       assert LazyHTML.text(note(doc)) =~ label
       assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 1
@@ -308,7 +313,12 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
       label = label_of("claude", 0.45, reset_at)
 
       doc =
-        bar(%{provider: "claude", utilization: 0.45, reset_at: reset_at, on_exhaustion: :throttle})
+        bar(%{
+          provider: "claude",
+          utilization: 0.45,
+          reset_at: reset_at,
+          on_exhaustion: :throttle
+        })
 
       assert title(doc) =~ "45% quota used"
       assert title(doc) =~ "of window elapsed"
