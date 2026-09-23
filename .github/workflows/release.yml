@@ -51,7 +51,9 @@ jobs:
             make \
             gcc \
             gcc-c++ \
-            openssl-devel \
+            binutils \
+            perl \
+            perl-IPC-Cmd \
             ncurses-devel \
             unzip \
             tar \
@@ -61,11 +63,29 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Install Erlang/OTP 28
+      # Erlang/OTP is built from source here, with OpenSSL linked statically
+      # into the crypto NIF (#1977). The rabbitmq el8 RPM used until v0.1.69
+      # linked it against this image's libcrypto.so.1.1, so the release could
+      # not boot on any OpenSSL-3-only host (Fedora >= 36, Ubuntu >= 22.04,
+      # Debian >= 12, RHEL 9). Versions and checksums are pinned in the
+      # script; the cache is keyed on its contents. The "Check shipped
+      # binaries…" steps below enforce the outcome on the packaged tarball.
+      - name: Restore Erlang/OTP build cache
+        id: otp-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/otp
+          key: otp-static-openssl-ubi8-${{ hashFiles('scripts/build-release-otp.sh') }}
+
+      - name: Build Erlang/OTP 28 with static OpenSSL
+        if: steps.otp-cache.outputs.cache-hit != 'true'
         run: |
-          OTP_RPM_VERSION="28.5.0.2-1"
-          curl -fsSL "https://github.com/rabbitmq/erlang-rpm/releases/download/v28.5.0.2/erlang-${OTP_RPM_VERSION}.el8.x86_64.rpm" -o /tmp/erlang.rpm
-          dnf install -y /tmp/erlang.rpm
+          bash scripts/build-release-otp.sh --prefix /opt/otp
+
+      - name: Put Erlang/OTP on PATH
+        run: |
+          echo "/opt/otp/bin" >> "$GITHUB_PATH"
+          /opt/otp/bin/erl -noshell -eval 'ok = crypto:start(), io:format("~p~n", [crypto:info_lib()]), halt().'
 
       - name: Install Elixir 1.19
         run: |
@@ -162,6 +182,16 @@ jobs:
         # Locally: scripts/check-release-glibc.sh _build/prod/rel/arbiter
         run: |
           bash scripts/check-release-glibc.sh --baseline 2.28 "${TARBALL}"
+
+      - name: Check shipped binaries only link always-present system libraries
+        # Last line of defence for #1977: a bundled .so / ELF binary whose
+        # NEEDED libraries include anything outside the allowlist in the
+        # script (glibc family, libgcc_s, libstdc++, libtinfo) fails the
+        # release here, naming the file and the library — e.g. a crypto NIF
+        # that links libcrypto.so.1.1 and so cannot boot on an OpenSSL-3 host.
+        # Locally: scripts/check-release-shared-libs.sh _build/prod/rel/arbiter
+        run: |
+          bash scripts/check-release-shared-libs.sh "${TARBALL}"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
