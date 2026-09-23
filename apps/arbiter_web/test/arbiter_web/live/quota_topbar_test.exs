@@ -158,8 +158,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       {:ok, view, _html} = live(conn, "/")
       refute has_element?(view, "#quota-topbar-antigravity")
 
-      broadcast!(ws, antigravity_quota!(ws, gemini_5h_remaining: 90.0))
-      broadcast!(ws, antigravity_quota!(ws, gemini_5h_remaining: 30.0))
+      broadcast!(antigravity_quota!(ws, gemini_5h_remaining: 90.0))
+      broadcast!(antigravity_quota!(ws, gemini_5h_remaining: 30.0))
 
       doc = view |> render() |> LazyHTML.from_fragment()
       assert doc |> LazyHTML.query("#quota-topbar-antigravity") |> Enum.count() == 1
@@ -211,8 +211,12 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       |> LazyHTML.query("#{scope} [data-quota-bar] [data-quota-pct]")
       |> Enum.map(&String.trim(LazyHTML.text(&1)))
 
-  defp broadcast!(ws, row) do
-    view = row |> Arbiter.Quota.CloudCode.view() |> Map.put(:workspace_id, ws.id)
-    Phoenix.PubSub.broadcast(Arbiter.PubSub, "quota:#{ws.id}", {:quota_updated, ws.id, view})
+  # The production fan-out `CloudCode.refresh/2` ends in: account → every
+  # workspace it meters → `{:quota_updated, ws_id, view}`.
+  defp broadcast!(row) do
+    Arbiter.Quota.Broadcast.quota_updated(
+      row.provider_account_id,
+      Arbiter.Quota.CloudCode.view(row)
+    )
   end
 end
