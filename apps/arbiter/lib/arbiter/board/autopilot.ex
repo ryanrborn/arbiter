@@ -467,7 +467,8 @@ defmodule Arbiter.Board.Autopilot do
   # trigger landed while this dispatch was in flight — a pass that dispatched
   # nothing must never reschedule itself, or a quiet board would tick itself
   # forever at debounce speed.
-  defp after_dispatch(state, {:ok, _}), do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
+  defp after_dispatch(state, {:ok, _}),
+    do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
 
   defp after_dispatch(%{replan_after_dispatch: true} = state, _outcome),
     do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
