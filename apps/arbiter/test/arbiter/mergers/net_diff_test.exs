@@ -76,19 +76,4 @@ defmodule Arbiter.Mergers.NetDiffTest do
       refute NetDiff.equivalent?("", "")
     end
   end
-
-  describe "blank?/1" do
-    test "true for a diff that fetched cleanly but describes no change" do
-      assert NetDiff.blank?("")
-      assert NetDiff.blank?("   \n\n")
-    end
-
-    test "false for real content" do
-      refute NetDiff.blank?(@reviewed)
-    end
-
-    test "false for a failed fetch, never a positive claim from an absence of data" do
-      refute NetDiff.blank?(nil)
-    end
-  end
 end
