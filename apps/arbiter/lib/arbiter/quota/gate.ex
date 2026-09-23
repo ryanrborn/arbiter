@@ -50,8 +50,8 @@ defmodule Arbiter.Quota.Gate do
   modes are mutually exclusive; the default is `"flat"`.
 
     * `"flat"` — a fixed ceiling: `throttle_threshold` (5h / session,
-      default `#{@default_throttle_threshold}`) and `weekly_threshold`
-      (7d / weekly, default `#{@default_weekly_threshold}`). The paced floors
+      default `0.85`) and `weekly_threshold`
+      (7d / weekly, default `0.90`). The paced floors
       are ignored.
     * `"paced"` — the ceiling tracks time through the window:
 
@@ -60,8 +60,8 @@ defmodule Arbiter.Quota.Gate do
 
       so at any moment the window may be about as used as it is elapsed, plus
       a head start after a reset: `paced_floor` (primary, default
-      `#{@default_paced_floor}`) and `weekly_paced_floor` (long, default
-      `#{@default_weekly_paced_floor}`). `throttle_threshold` /
+      `0.35`) and `weekly_paced_floor` (long, default
+      `0.20`). `throttle_threshold` /
       `weekly_threshold` are ignored and there is no hard ceiling: the
       threshold reaches 1.0 as the window ends, so its last quota can be spent
       just before the reset.

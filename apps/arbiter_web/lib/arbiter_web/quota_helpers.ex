@@ -157,9 +157,9 @@ defmodule ArbiterWeb.QuotaHelpers do
     end
   end
 
-  defp color_hex(:red), do: @color_red
   defp window_seconds(label), do: Gate.window_seconds(label)
 
+  defp color_hex(:red), do: @color_red
   defp color_hex(:amber), do: @color_amber
   defp color_hex(:green), do: @color_green
   defp color_hex(:grey), do: @color_grey
