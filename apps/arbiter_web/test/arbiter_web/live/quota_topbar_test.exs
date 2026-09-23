@@ -116,6 +116,107 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     assert has_element?(view, "#usage-quota-antigravity", "Antigravity")
   end
 
+  # bd-clzkvp: the bars colour by the dispatch gate's pace verdict for the
+  # linked account, and say whether the gate is holding or only would hold.
+  describe "bar colour follows the gate's pace verdict" do
+    defp link_account!(ws, quota_config) do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+          provider: :claude,
+          slug: "acct-#{System.unique_integer([:positive])}",
+          quota_config: quota_config
+        })
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+    end
+
+    # `u5` used 10% into the 5h window; `u7` used 29% into the 7d window.
+    defp capture!(ws, u5, u7 \\ 0.01) do
+      now = DateTime.to_unix(DateTime.utc_now())
+
+      {:ok, _} =
+        Quota.capture(ws.id, [
+          {"anthropic-ratelimit-unified-5h-utilization", to_string(u5)},
+          {"anthropic-ratelimit-unified-5h-reset", to_string(now + round(0.9 * 18_000))},
+          {"anthropic-ratelimit-unified-5h-status", "allowed"},
+          {"anthropic-ratelimit-unified-7d-utilization", to_string(u7)},
+          {"anthropic-ratelimit-unified-7d-reset", to_string(now + round(0.71 * 604_800))},
+          {"anthropic-ratelimit-unified-7d-status", "allowed"}
+        ])
+    end
+
+    test "a paced account's 5h bar is red and holding, on the top bar and /usage", %{
+      conn: conn,
+      ws: ws
+    } do
+      link_account!(ws, %{"threshold_mode" => "paced"})
+      capture!(ws, 0.4)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               "#quota-topbar-claude-5h[data-quota-state=red][data-quota-hold=enforcing]"
+             )
+
+      {:ok, usage, _html} = live(conn, "/usage")
+
+      assert has_element?(
+               usage,
+               "#usage-quota-claude [data-quota-state=red][data-quota-hold=enforcing]"
+             )
+    end
+
+    test "a flat account's bar is red at the paced thresholds but only would hold", %{
+      conn: conn,
+      ws: ws
+    } do
+      link_account!(ws, %{})
+      capture!(ws, 0.4)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               "#quota-topbar-claude-5h[data-quota-state=red][data-quota-hold=not_enforcing]"
+             )
+
+      assert view |> element("#quota-topbar-claude-5h") |> render() =~ "(gate not enforcing)"
+    end
+
+    test "the account's floors reach the bar: 7d at 35% / 29% is red only if the gate holds", %{
+      conn: conn,
+      ws: ws
+    } do
+      link_account!(ws, %{"threshold_mode" => "paced", "weekly_paced_floor" => 0.4})
+      capture!(ws, 0.01, 0.35)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, "#quota-topbar-claude-7d[data-quota-state=amber]")
+      refute has_element?(view, "#quota-topbar-claude-7d[data-quota-hold]")
+    end
+
+    test "a live update keeps the account's gate policy", %{conn: conn, ws: ws} do
+      link_account!(ws, %{"threshold_mode" => "paced"})
+      capture!(ws, 0.1)
+
+      {:ok, view, _html} = live(conn, "/")
+      refute has_element?(view, "#quota-topbar-claude-5h[data-quota-hold]")
+
+      capture!(ws, 0.4)
+
+      assert has_element?(
+               view,
+               "#quota-topbar-claude-5h[data-quota-state=red][data-quota-hold=enforcing]"
+             )
+    end
+  end
+
   describe "antigravity in the top bar (bd-gukyy1)" do
     test "stacks one row per provider, each with its two windows, beside the chrome", %{
       conn: conn,
