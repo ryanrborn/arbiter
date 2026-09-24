@@ -4407,8 +4407,12 @@ defmodule Arbiter.Worker.Watchdog do
 
     if state.max_auto_resumes > 0 and attempts < state.max_auto_resumes do
       # `Dispatch.resume/2` requires the prior worker to be terminal before it
-      # re-attaches, exactly as on the awaiting-review-timeout path.
-      safe(fn -> Worker.fail(state.worker_pid, {:unreviewed_head, head}) end)
+      # re-attaches, exactly as on the awaiting-review-timeout path — and, as
+      # there, the failure is a slot hand-off (bd-92mx1m), released by every
+      # give-up arm.
+      safe(fn ->
+        Worker.fail(state.worker_pid, {:unreviewed_head, head}, slot_handoff: true)
+      end)
 
       state = %{
         state
