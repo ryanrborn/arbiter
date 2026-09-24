@@ -302,6 +302,82 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
     test "no open findings means no gap — a round-1 APPROVE is untouched by this guard" do
       refute ReviewFindings.gap?(ReviewFindings.approval_gap([], "VERDICT: APPROVE", nil))
     end
+
+    test "an ADDRESSED claim citing a dotfile survives the backstop when that dotfile was touched",
+         %{open: open} do
+      # bd-bm6bfs (emr-8fqbng, MR !294): the finding and its disposition both
+      # cite `.gitlab-ci.yml`. `git diff --name-only` reports the leading dot
+      # too, so the touched set below is exactly what a real diff produces.
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — `.gitlab-ci.yml:57` now includes the missing glob
+      VERIFICATION: FULL
+      """
+
+      touched = MapSet.new([".gitlab-ci.yml"])
+
+      refute ReviewFindings.gap?(ReviewFindings.approval_gap(open, approve, touched))
+    end
+  end
+
+  describe "approval_gap/3 — bd-bm6bfs (emr-8fqbng round 2, false park on a dispositioned APPROVE)" do
+    setup do
+      # The exact round-1 findings text persisted for emr-8fqbng (MR !294),
+      # read back from review_gate_rounds.findings.
+      round1 = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [MET] No `minio/minio`/`minio/mc` Docker Hub references remain; all point to pinned `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` — `.gitlab-ci.yml:35`, `.gitlab-ci.yml:109`, `docker-compose.yml:14`; repo-wide grep for `minio/minio|minio/mc` returns only the quay.io references.
+      - [MET] test/coverage/visual jobs run on CI-config changes — `.gitlab-ci.yml:57` and `.gitlab-ci.yml:209` add `".gitlab-ci.yml"` to the `test`/`coverage` rules `changes` lists (added in this branch); `visual`'s rules already included it at the fork point (`.gitlab-ci.yml:121`, pre-existing).
+      - [NOT MET] `audit:hex` passes via minimum patched bumps to `ash`, `ash_authentication`, `ash_authentication_phoenix`, `igniter`, `mint` clearing all advisories (incl. CRITICAL EEF-CVE-2026-88952) — `mix.exs` and `mix.lock` have zero diff versus the merge-base; `ash_authentication` is still locked at 4.14.2 (`mix.lock:7`) and `mix.exs:56` still declares `"~> 4.1"` unchanged. No dependency work was done at all.
+      - [NOT MET] `audit:terraform` passes via a working tflint install URL — `.gitlab-ci.yml:433` is untouched by this diff and still curls `https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh`, the exact URL the task says now 404s.
+      - [NOT MET] MR pipeline fully green / mergeable under `ci_must_pass` — direct consequence of the two items above: `audit:hex` and `audit:terraform` jobs are untouched and will still fail, so the pipeline cannot be fully green.
+      Findings:
+      1. **[HIGH] Missing dependency security bumps** — `mix.exs` (lines 54–61) and `mix.lock` (lines 5, 7, 8, 70, 86). No changes at all versus merge-base `e48cfee`. Fix: bump the version constraints in `mix.exs`, run `mix deps.get && mix deps.audit` / `mix hex.audit` until clean.
+      2. **[HIGH] tflint install URL still 404s** — `.gitlab-ci.yml:433`. Fix: point at a working URL, e.g. a pinned release asset.
+      3. **[HIGH] Pipeline not fully green / not mergeable** — consequence of findings 1 and 2.
+      VERIFICATION: FULL
+      arb done
+      """
+
+      {:ok, open: ReviewFindings.extract(round1, 1)}
+    end
+
+    test "the round's own DISPOSITIONS block dispositions every open finding and the APPROVE is accepted",
+         %{open: open} do
+      # The exact round-2 findings text persisted for emr-8fqbng — the APPROVE
+      # the verdict guard wrongly parked because it thought F1.2/F1.4 were
+      # undispositioned, even though the DISPOSITIONS block plainly addresses
+      # them. `.gitlab-ci.yml` is the file both the findings and the
+      # dispositions cite, and it really was touched by the revise round.
+      round2 = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] No `minio/minio` or `minio/mc` Docker Hub references remain in `.gitlab-ci.yml` or other CI/dev config; every one points to a pinned `quay.io/minio/...` tag.
+      - [MET] The MR's own pipeline gets past 'prepare environment' on the test, coverage and visual jobs, and those jobs pass.
+      Findings: none.
+      VERIFICATION: FULL
+      DISPOSITIONS:
+      - [ADDRESSED] F1.2 — `.gitlab-ci.yml:57` (test job) and `.gitlab-ci.yml:209` (coverage job) now include `".gitlab-ci.yml"` in their `changes:` globs, mirroring `visual`'s existing rule.
+      - [ADDRESSED] F1.4 — same fix as F1.2, same locations (`.gitlab-ci.yml:57`, `.gitlab-ci.yml:209`); this id's suggested fix is identical to F1.2's and was implemented verbatim.
+      - [ADDRESSED] F1.3 — the missing pipeline evidence for `test`/`coverage` now exists.
+      - [OBSOLETE] F1.1 — this id carried no file citation and an empty findings body.
+      arb done
+      """
+
+      d = ReviewFindings.dispositions(round2)
+      assert %{status: :addressed} = d["F1.2"]
+      assert %{status: :addressed} = d["F1.3"]
+      assert %{status: :addressed} = d["F1.4"]
+      assert %{status: :obsolete} = d["F1.1"]
+
+      # The revise round's real `git diff --name-only` output — it only
+      # touched `.gitlab-ci.yml`.
+      touched = MapSet.new([".gitlab-ci.yml"])
+
+      refute ReviewFindings.gap?(ReviewFindings.approval_gap(open, round2, touched))
+    end
   end
 
   describe "approval_gap/3 — the bd-1xss5z deadlock shape (bd-c6tdbu)" do
@@ -452,6 +528,43 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
       assert ["VERDICT: APPROVE", "", line | _] = String.split(banner, "\n")
       assert line =~ "PRIOR FINDINGS NOT ACCOUNTED FOR"
       assert banner =~ "F1.1"
+    end
+
+    test "prepend_disposition_banner/2 quotes the disposition line it DID parse for an unproven claim, " <>
+           "so a coordinator can tell a parser miss from a real omission (bd-bm6bfs)" do
+      open =
+        ReviewFindings.extract(
+          "VERDICT: REQUEST_CHANGES\n- **Medium**: x (.gitlab-ci.yml:1)",
+          1
+        )
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — `.gitlab-ci.yml:57` now includes the missing glob
+      """
+
+      # An empty touched set makes the disposition "unproven" even though the
+      # parser plainly saw and parsed it — the false-park shape.
+      gap = ReviewFindings.approval_gap(open, approve, MapSet.new())
+
+      # Isolate the BANNER text itself (not the untouched findings text it
+      # gets spliced next to) — the banner is what a coordinator actually
+      # reads in the park message.
+      banner_text = ReviewFindings.disposition_banner_text(gap, approve)
+
+      assert banner_text =~
+               "[ADDRESSED] F1.1 — `.gitlab-ci.yml:57` now includes the missing glob"
+    end
+
+    test "prepend_disposition_banner/2 says plainly when a finding has no parsed line at all" do
+      open = ReviewFindings.extract("VERDICT: REQUEST_CHANGES\n- **Medium**: x (a/b.ex:1)", 1)
+      gap = ReviewFindings.approval_gap(open, "VERDICT: APPROVE\nok", nil)
+
+      banner_text = ReviewFindings.disposition_banner_text(gap, "VERDICT: APPROVE\nok")
+
+      assert banner_text =~ "no disposition at all"
+      refute banner_text =~ "[ADDRESSED]"
     end
   end
 end

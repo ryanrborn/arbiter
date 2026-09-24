@@ -94,8 +94,13 @@ defmodule Arbiter.Worker.ReviewFindings do
 
   # A file path token, optionally with `:line` / `:line-line`. Deliberately
   # requires a dotted extension of 1..6 letters so ordinary prose ("e.g.", "i.e.")
-  # and bare identifiers do not read as paths — see `@path_stoplist`.
-  @path ~r/((?:[\w.\-]+\/)*[\w\-]+\.[a-zA-Z]{1,6})(?::\d+(?:-\d+)?)?/
+  # and bare identifiers do not read as paths — see `@path_stoplist`. The
+  # leading `\.?` lets a dotfile's own leading dot (`.gitlab-ci.yml`) survive
+  # the match — bd-bm6bfs: without it, `.gitlab-ci.yml` was captured as
+  # `gitlab-ci.yml`, so `touched?/2` could never match it against a real `git
+  # diff --name-only` entry (which keeps the dot), and the unproven-file
+  # backstop rejected every ADDRESSED disposition that cited a dotfile.
+  @path ~r/((?:[\w.\-]+\/)*\.?[\w\-]+\.[a-zA-Z]{1,6})(?::\d+(?:-\d+)?)?/
   @path_stoplist ~w(e.g i.e etc vs no.of)
 
   # A finding id as it appears in a DISPOSITIONS line.
@@ -316,7 +321,7 @@ defmodule Arbiter.Worker.ReviewFindings do
   """
   @spec prepend_disposition_banner(String.t(), gap()) :: String.t()
   def prepend_disposition_banner(findings, gap) when is_binary(findings) do
-    banner = disposition_banner_text(gap)
+    banner = disposition_banner_text(gap, findings)
 
     case String.split(findings, "\n", parts: 2) do
       [verdict_line, rest] -> verdict_line <> "\n\n" <> banner <> "\n\n" <> rest
@@ -324,14 +329,28 @@ defmodule Arbiter.Worker.ReviewFindings do
     end
   end
 
-  @doc "The missing-dispositions banner text. Public for inspection in tests."
-  @spec disposition_banner_text(gap()) :: String.t()
-  def disposition_banner_text(gap) do
+  @doc """
+  The missing-dispositions banner text. Public for inspection in tests.
+
+  `text` is the round's own findings text the gap was computed against —
+  needed here (not just `gap`'s finding structs) so a `missing`/`unaddressed`/
+  `unproven` id whose DISPOSITIONS line the parser DID find can quote that
+  line verbatim in the banner. bd-bm6bfs (emr-8fqbng): the guard's park
+  message used to say only "not accounted for", which reads identically
+  whether the parser saw nothing for an id or saw an `[ADDRESSED]` line it
+  declined to honor (the mechanical unproven-file backstop). Quoting the
+  parsed line lets a coordinator tell those apart without reading the raw
+  transcript.
+  """
+  @spec disposition_banner_text(gap(), String.t()) :: String.t()
+  def disposition_banner_text(gap, text) when is_binary(text) do
+    d = dispositions(text)
+
     "⚠️ PRIOR FINDINGS NOT ACCOUNTED FOR — this round returned APPROVE without " <>
       "establishing that the findings raised against this work were actually addressed. " <>
       "An approval is not a verdict on how the diff reads; it is a claim that every open " <>
       "finding is resolved, and that claim must be made per finding, by id. Unresolved:\n" <>
-      reason_lines(gap) <>
+      reason_lines(gap, d) <>
       "\nRe-open each cited location in the CURRENT diff and either show where it was fixed, " <>
       "say what is still missing, or explain why the finding no longer applies."
   end
@@ -545,24 +564,37 @@ defmodule Arbiter.Worker.ReviewFindings do
     |> Enum.map_join("\n", &("      " <> String.trim_leading(&1)))
   end
 
-  defp reason_lines(%{missing: missing, unaddressed: unaddressed, unproven: unproven}) do
+  defp reason_lines(%{missing: missing, unaddressed: unaddressed, unproven: unproven}, d) do
     [
-      label_lines(missing, "no disposition at all — the round never mentioned it"),
-      label_lines(unaddressed, "marked [NOT ADDRESSED] — admitted still open"),
+      label_lines(missing, "no disposition at all — the round never mentioned it", d),
+      label_lines(unaddressed, "marked [NOT ADDRESSED] — admitted still open", d),
       label_lines(
         unproven,
-        "claimed [ADDRESSED], but no revision touched a file it cited and the disposition names no other location"
+        "claimed [ADDRESSED], but no revision touched a file it cited and the disposition names no other location",
+        d
       )
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join()
   end
 
-  defp label_lines([], _label), do: ""
+  defp label_lines([], _label, _d), do: ""
 
-  defp label_lines(findings, label) do
+  defp label_lines(findings, label, d) do
     Enum.map_join(findings, "", fn f ->
-      "  • #{f.id} [#{f.severity}] #{cited(f)} — #{label}\n"
+      "  • #{f.id} [#{f.severity}] #{cited(f)} — #{label}#{quoted_line(f, d)}\n"
     end)
+  end
+
+  # The disposition line the parser actually matched for this id, quoted
+  # verbatim right under the reason — empty for `missing`, where there is no
+  # line to quote. This is what makes a `missing` vs an `unaddressed`/
+  # `unproven` distinguishable in the park message without reading the raw
+  # transcript (bd-bm6bfs).
+  defp quoted_line(%{id: id}, d) do
+    case Map.get(d, id) do
+      %{line: line} -> "\n    parsed: #{line}"
+      nil -> ""
+    end
   end
 end
