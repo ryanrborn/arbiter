@@ -16,6 +16,13 @@
 #        "NOT_ADDRESSED" — APPROVE that openly admits `- [NOT ADDRESSED] F1.1`.
 #                  An approval that admits an open Medium finding must be
 #                  rejected the same way an admitted `[NOT MET]` criterion is.
+#        "DOTFILE" — bd-bm6bfs (emr-8fqbng, MR !294): round 1 cites a dotfile
+#                  (`.gitlab-ci.yml:1`, not `guard.txt:1`) and round 2's
+#                  `- [ADDRESSED]` disposition cites the same dotfile, paired
+#                  with `revise_commit_dotfile.sh` (which really touches it).
+#                  The mechanical backstop must match `.gitlab-ci.yml` against
+#                  `git diff --name-only`'s own `.gitlab-ci.yml` — not silently
+#                  drop the leading dot — so the gate converges.
 #
 # A marker file in the CWD (the reviewer's worktree, unique per test) tells the
 # first pass apart from later ones — ReviewGate spawns a fresh reviewer mind per
@@ -40,6 +47,11 @@ if [ -f "$marker" ]; then
       echo "DISPOSITIONS:"
       echo "- [NOT ADDRESSED] F1.1 — still unguarded, but the rest of the diff reads fine"
       ;;
+    DOTFILE)
+      echo "Findings: none."
+      echo "DISPOSITIONS:"
+      echo "- [ADDRESSED] F1.1 — \`.gitlab-ci.yml:1\` now includes the missing glob"
+      ;;
     *)
       # BLIND: the defect. An approval with no disposition for F1.1 at all.
       echo "The change looks good; no issues found."
@@ -51,7 +63,11 @@ else
   : > "$marker"
   echo "reviewing the diff for the first time"
   echo "VERDICT: REQUEST_CHANGES"
-  echo "- **Medium**: the over-match guard is missing (guard.txt:1)."
+  if [ "$mode" = "DOTFILE" ]; then
+    echo "- **Medium**: the CI \`changes:\` glob is missing (.gitlab-ci.yml:1)."
+  else
+    echo "- **Medium**: the over-match guard is missing (guard.txt:1)."
+  fi
   echo "  Suggested fix: anchor the match instead of using a bare contains check."
   echo "VERIFICATION: FULL"
   echo "arb done"
