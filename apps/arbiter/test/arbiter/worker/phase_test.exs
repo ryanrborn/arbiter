@@ -212,4 +212,22 @@ defmodule Arbiter.Worker.PhaseTest do
       assert Phase.any_agent_live?(author(:running), [])
     end
   end
+
+  # bd-92mx1m: a worker failed only so an automatic round can replace it (the
+  # ReviewGate fix round, the Watchdog's awaiting_review auto-resume) has not
+  # been parked for a person, so its task keeps its slot through the hand-off.
+  describe "a :failed worker mid slot hand-off" do
+    test "is handing off, not waiting on you" do
+      assert Phase.of(author(:failed, %{meta: %{slot_handoff: true}})) == :handing_off
+    end
+
+    test "a plain :failed worker still waits on you" do
+      assert Phase.of(author(:failed, %{meta: %{slot_handoff: false}})) == :waiting_on_you
+      assert Phase.of(author(:failed)) == :waiting_on_you
+    end
+
+    test "an :awaiting worker is unaffected by the marker" do
+      assert Phase.of(author(:awaiting, %{meta: %{slot_handoff: true}})) == :waiting_on_you
+    end
+  end
 end

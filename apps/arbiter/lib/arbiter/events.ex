@@ -62,6 +62,7 @@ defmodule Arbiter.Events do
   | `external_review` | An ExternalReview lifecycle transition (running/completed/failed) |
   | `loop_proposal`  | A loop-engineering proposal is recorded / reinforced / promoted / applied / rejected (opt-in only) |
   | `quota_gate_bypass` | A quota gate is bypassed via explicit override (force_quota) |
+  | `slot_cap_override` | A resume of a task that released its slot went over a full concurrency cap via explicit `force` (bd-92mx1m) |
   | `coverage_shadow` | P3 shadow mode: the review-coverage predicate and the `last_reviewed_sha` merge guard were compared on a guarded-merge decision (opt-in only) |
 
   ## Broadcast hooks
@@ -77,6 +78,7 @@ defmodule Arbiter.Events do
     * `Arbiter.Loop.record/2`, `apply_pending/2` and `reject_pending/2` →
       `:loop_proposal`
     * `Arbiter.Reviews.CoverageShadow.observe/1` → `:coverage_shadow`
+    * `Arbiter.Worker.ResumeSlot.admit/2` → `:slot_cap_override`
 
   All broadcasts are best-effort: PubSub failures are logged at debug and swallowed.
   """
@@ -92,7 +94,7 @@ defmodule Arbiter.Events do
     resource Record
   end
 
-  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass coverage_shadow)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass slot_cap_override coverage_shadow)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics

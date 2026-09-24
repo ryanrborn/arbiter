@@ -25,7 +25,9 @@ defmodule Arbiter.Worker.Phase do
       owns the outcome.
     * `:waiting_on_you` — the worker asked a question, or parked failed.
     * `:handing_off` — a live-status record between agents; the brief
-      transition window.
+      transition window. Also a `:failed` worker carrying
+      `meta[:slot_handoff]` — failed only so an automatic round can replace it
+      (bd-92mx1m).
     * `:done` — the worker completed.
 
   ## Phase is not liveness
@@ -122,6 +124,7 @@ defmodule Arbiter.Worker.Phase do
   def of(worker, siblings) when is_map(worker) do
     cond do
       Map.get(worker, :status) == :completed -> :done
+      slot_handoff?(worker) -> :handing_off
       Map.get(worker, :status) in [:awaiting, :failed] -> :waiting_on_you
       subordinate_role(worker) -> subordinate_phase(worker)
       true -> author_phase(worker, siblings)
@@ -181,6 +184,15 @@ defmodule Arbiter.Worker.Phase do
 
   # No liveness input at all: behave exactly as the pre-bd-aw2cyt surfaces
   # did, where a `:running` record meant a running agent.
+  # bd-92mx1m: a worker failed only so an automatic round can replace it — the
+  # ReviewGate fix round, the Watchdog's awaiting_review auto-resume — carries
+  # `meta[:slot_handoff]` until that round starts or is given up on. Nobody has
+  # been asked anything yet, so it is a hand-off between agents, not a park:
+  # the task keeps its slot (`SlotGate.task_occupies_slot?/1`), and a resume
+  # of it is not a new admission (`Arbiter.Worker.ResumeSlot`).
+  defp slot_handoff?(worker),
+    do: Map.get(worker, :status) == :failed and meta_get(worker, :slot_handoff) == true
+
   defp unknown_liveness_phase(worker) do
     if Map.get(worker, :status) in SlotGate.slot_statuses(), do: :implementing, else: :handing_off
   end
