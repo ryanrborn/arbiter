@@ -265,13 +265,13 @@ defmodule Arbiter.Agents.ClaudeTest do
       :ok
     end
 
-    test "returns [] when no api_key is configured (CLI uses ambient auth)" do
-      assert Claude.spawn_env([]) == []
+    test "returns just the explicit token unset when no api_key is configured (CLI uses ambient auth)" do
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
     test "exports `ANTHROPIC_API_KEY` from `opts[:api_key]`" do
       assert Claude.spawn_env(api_key: "literal-token") ==
-               [{"ANTHROPIC_API_KEY", "literal-token"}]
+               [{"CLAUDE_CODE_OAUTH_TOKEN", false}, {"ANTHROPIC_API_KEY", "literal-token"}]
     end
 
     test "rotates through `api_keys` from active config" do
@@ -287,10 +287,21 @@ defmodule Arbiter.Agents.ClaudeTest do
         "api_keys" => ["env:ARB_TEST_KEY_A", "env:ARB_TEST_KEY_B"]
       })
 
-      assert Claude.spawn_env([]) == [{"ANTHROPIC_API_KEY", "key-a"}]
-      assert Claude.spawn_env([]) == [{"ANTHROPIC_API_KEY", "key-b"}]
+      assert Claude.spawn_env([]) == [
+               {"CLAUDE_CODE_OAUTH_TOKEN", false},
+               {"ANTHROPIC_API_KEY", "key-a"}
+             ]
+
+      assert Claude.spawn_env([]) == [
+               {"CLAUDE_CODE_OAUTH_TOKEN", false},
+               {"ANTHROPIC_API_KEY", "key-b"}
+             ]
+
       # Wraps back to the first key on the next call.
-      assert Claude.spawn_env([]) == [{"ANTHROPIC_API_KEY", "key-a"}]
+      assert Claude.spawn_env([]) == [
+               {"CLAUDE_CODE_OAUTH_TOKEN", false},
+               {"ANTHROPIC_API_KEY", "key-a"}
+             ]
     end
 
     test "prepends an isolated CLAUDE_CONFIG_DIR when config isolation is enabled" do
@@ -311,13 +322,17 @@ defmodule Arbiter.Agents.ClaudeTest do
       # Config-dir isolation comes first; the API key composes on top.
       assert Claude.spawn_env(api_key: "literal-token") == [
                {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false},
                {"ANTHROPIC_API_KEY", "literal-token"}
              ]
     end
 
     test "spawn_env ignores a stray `:anthropic_base_url` opt (proxy removed, bd-7cvh8z)" do
-      assert Claude.spawn_env(anthropic_base_url: "http://localhost/whatever") == []
-      assert Claude.spawn_env([]) == []
+      assert Claude.spawn_env(anthropic_base_url: "http://localhost/whatever") == [
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
+
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
   end
 
@@ -351,8 +366,8 @@ defmodule Arbiter.Agents.ClaudeTest do
       :ok
     end
 
-    test "omits CLAUDE_CODE_OAUTH_TOKEN when the OS env var is unset" do
-      assert Claude.spawn_env([]) == []
+    test "emits an explicit unset when the OS env var is unset" do
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
     test "exports CLAUDE_CODE_OAUTH_TOKEN under its own literal name, unchanged" do
@@ -366,7 +381,6 @@ defmodule Arbiter.Agents.ClaudeTest do
 
       env = Claude.spawn_env([])
 
-      assert {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"} in env
       refute List.keyfind(env, "ANTHROPIC_API_KEY", 0)
     end
 
@@ -424,8 +438,9 @@ defmodule Arbiter.Agents.ClaudeTest do
     test "resolves the token from the workspace threaded on opts[:workspace]" do
       ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
 
-      # Without the workspace the server env is all we can see, and it is unset.
-      assert Claude.spawn_env([]) == []
+      # Without the workspace there is nothing to consult, so the pair is an
+      # explicit unset rather than the workspace's token.
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
       assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}]
     end
 

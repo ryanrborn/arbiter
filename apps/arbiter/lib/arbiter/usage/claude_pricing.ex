@@ -26,8 +26,9 @@ defmodule Arbiter.Usage.ClaudePricing do
   ## The price table
 
   Published Anthropic list prices, USD per **1M** tokens. `cache_write` is the
-  5-minute-TTL write (1.25× input) and `cache_read` is 0.1× input, except where
-  a model documents its own rate. Matching is longest-prefix-wins, so a future
+  5-minute-TTL write (1.25× input), `cache_write_1h` the 1-hour-TTL write (2×
+  input) and `cache_read` is 0.1× input, except where a model documents its own
+  rate. Matching is longest-prefix-wins, so a future
   dated snapshot (`claude-opus-5-20260401`) prices as its family, and
   `claude-sonnet-5` can never inherit `claude-opus-5`'s rate.
 
@@ -42,9 +43,14 @@ defmodule Arbiter.Usage.ClaudePricing do
       one's rate.
     * **Context-tier premium not modelled.** The CLI labels 1M-context usage
       `claude-opus-5[1m]`; the suffix is stripped and the base rate applied.
-    * **Long-TTL cache writes.** A 1-hour-TTL write costs 2× input, not 1.25×;
-      the buckets don't distinguish them, so a session leaning on the 1h TTL is
-      under-priced.
+    * **Long-TTL cache writes are priced only when the caller splits them
+      out.** A 1-hour-TTL write costs 2× input, not 1.25×. `ClaudeSessionFile`
+      reads the split off each turn's `usage.cache_creation` and passes it as
+      `:cache_creation_1h_tokens` (a *subset* of `:cache_creation_tokens`);
+      Claude Code writes every worker and coordinator cache at the 1h TTL, and
+      pricing them at 1.25× is what put the estimate 12–15% below the CLI's own
+      figure (bd-8vnuy3). A caller that does not pass the split gets the old
+      all-5-minute pricing.
     * **Fast mode not modelled.** Claude Code exposes a fast-mode toggle; Opus 5
       in fast mode bills at $10/$50 per MTok, double the table's rate. The
       transcript doesn't record the speed, so a fast-mode session is priced at
@@ -59,11 +65,16 @@ defmodule Arbiter.Usage.ClaudePricing do
   module is not consulted at all.
   """
 
-  @typedoc "The four billed token buckets, as `ClaudeSessionFile` reports them."
+  @typedoc """
+  The billed token buckets, as `ClaudeSessionFile` reports them.
+  `:cache_creation_1h_tokens` is the 1-hour-TTL *subset* of
+  `:cache_creation_tokens`, not a fifth bucket.
+  """
   @type buckets :: %{
           optional(:tokens_in) => non_neg_integer(),
           optional(:tokens_out) => non_neg_integer(),
           optional(:cache_creation_tokens) => non_neg_integer(),
+          optional(:cache_creation_1h_tokens) => non_neg_integer(),
           optional(:cache_read_tokens) => non_neg_integer()
         }
 
@@ -72,6 +83,10 @@ defmodule Arbiter.Usage.ClaudePricing do
   # input/output are the published rates; cache_write/cache_read are derived
   # from input unless the model publishes its own (see `expand/1`).
   @opus %{input: 5.0, output: 25.0}
+  # Opus 5.5 is cheaper than the Opus 5 it prefix-matches, and reads cache at
+  # 0.05× input. Fitted against the CLI's own `modelUsage[…].costUSD` on the
+  # live ledger, exact to the cent over 14 sessions (bd-8vnuy3).
+  @opus_5_5 %{input: 4.0, output: 20.0, cache_read: 0.2}
   # Fable 5.1 reads cache at 0.025× input, not the usual 0.1×. Mythos 5.1 is
   # the same tier at the same per-token price and is priced from this entry,
   # but whether it shares the cache-read rate is open upstream — see the
@@ -80,6 +95,7 @@ defmodule Arbiter.Usage.ClaudePricing do
   @fable_5 %{input: 10.0, output: 50.0}
 
   @price_table %{
+    "claude-opus-5-5" => @opus_5_5,
     "claude-opus-5" => @opus,
     "claude-opus-4-8" => @opus,
     "claude-opus-4-7" => @opus,
@@ -135,9 +151,15 @@ defmodule Arbiter.Usage.ClaudePricing do
     with prices when is_map(prices) <- prices_for(model),
          counts = counts(buckets),
          true <- Enum.any?(counts, fn {_k, n} -> n > 0 end) do
+      # The 1h count is a subset of the write total; clamp it so a caller that
+      # over-reports can never bill a token at both write rates.
+      long_ttl = min(counts.cache_creation_1h_tokens, counts.cache_creation_tokens)
+      short_ttl = counts.cache_creation_tokens - long_ttl
+
       (counts.tokens_in * prices.input +
          counts.tokens_out * prices.output +
-         counts.cache_creation_tokens * prices.cache_write +
+         short_ttl * prices.cache_write +
+         long_ttl * prices.cache_write_1h +
          counts.cache_read_tokens * prices.cache_read) / @per_million
     else
       _ -> nil
@@ -164,6 +186,7 @@ defmodule Arbiter.Usage.ClaudePricing do
       input: input,
       output: output,
       cache_write: Map.get(prices, :cache_write, input * 1.25),
+      cache_write_1h: Map.get(prices, :cache_write_1h, input * 2.0),
       cache_read: Map.get(prices, :cache_read, input * 0.1)
     }
   end
@@ -182,6 +205,7 @@ defmodule Arbiter.Usage.ClaudePricing do
       tokens_in: non_neg(Map.get(buckets, :tokens_in)),
       tokens_out: non_neg(Map.get(buckets, :tokens_out)),
       cache_creation_tokens: non_neg(Map.get(buckets, :cache_creation_tokens)),
+      cache_creation_1h_tokens: non_neg(Map.get(buckets, :cache_creation_1h_tokens)),
       cache_read_tokens: non_neg(Map.get(buckets, :cache_read_tokens))
     }
   end

@@ -72,7 +72,7 @@ defmodule ArbiterWeb.LayoutsTest do
       assert headers == ["Work", "Fleet", "Analysis", "Config"]
     end
 
-    test "the top_nav bar is gone" do
+    test "the old top-nav bar is gone" do
       html = render_app()
 
       refute html =~ ~s(id="top-nav")
@@ -278,8 +278,14 @@ defmodule ArbiterWeb.LayoutsTest do
 
       expected_elapsed_pct = ArbiterWeb.QuotaHelpers.quota_elapsed_pct_5h("claude", reset_at)
 
+      bar = %{provider: "claude", window: "5h", utilization: 0.85, reset_at: reset_at}
+
       expected_pace_label =
-        ArbiterWeb.QuotaHelpers.quota_pace_label_5h("claude", 0.85, reset_at, nil, :throttle)
+        ArbiterWeb.QuotaHelpers.quota_pace_label(
+          bar,
+          ArbiterWeb.QuotaHelpers.quota_pace(bar, nil),
+          :throttle
+        )
 
       # Sanity-check the fixture actually exercises the amber/red pace path
       # (and not the "claude" label ever leaking `quota_provider_label/1`'s

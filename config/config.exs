@@ -93,25 +93,11 @@ config :arbiter, :quota,
   throttle_threshold: 0.85,
   overage_alert_usd: 50.0
 
-# Quota-bar color thresholds (bd-l4epbc). The topbar/usage-page bars color on
-# projected *deficit minutes* — how long the window would run dry before
-# reset at the current burn rate — not on absolute utilization (a raw
-# used/elapsed ratio is alarming early in the window and meaningless late in
-# it). See `ArbiterWeb.QuotaHelpers`.
-#
-#   * deficit_red_minutes / deficit_amber_minutes: the two color boundaries.
-#   * sampling_floor_elapsed_minutes / sampling_floor_used: below these, a
-#     single burst implies a nonsense burn rate, so the bar renders neutral
-#     grey ("sampling") instead of guessing.
-#   * wall_guard_used: utilization at/above which the bar is never better
-#     than amber, regardless of pace — being on-pace and being out of quota
-#     are independent facts.
-config :arbiter_web, :quota_bar_colors,
-  deficit_red_minutes: 60,
-  deficit_amber_minutes: 20,
-  sampling_floor_elapsed_minutes: 15,
-  sampling_floor_used: 0.05,
-  wall_guard_used: 0.95
+# Quota-bar colours (bd-clzkvp) have no config of their own: each bar is
+# coloured by the dispatch gate's pace verdict for its window
+# (`Arbiter.Quota.Pace`, via `Arbiter.Quota.Gate.pace/6`), so the paced gate's
+# settings — `paced_floor` / `weekly_paced_floor` in an account's
+# `quota_config` or a workspace's `config["quota"]` — are what move them.
 
 # Direct Gemini CLI + Antigravity quota tracking (bd-57ukgb). Unlike the
 # Anthropic snapshot (passively captured by the proxy), these fetch live from
@@ -119,15 +105,15 @@ config :arbiter_web, :quota_bar_colors,
 # `quota_get` tool is invoked. Enabled by default; `config/test.exs` turns it
 # off so the quota surface stays a pure DB read under test.
 # Provider accounts (docs/provider-account-design.md §7.5, bd-77j2if). The
-# read-flip switch for phase P3: when true, `ConfigDir.oauth_token/1` and
-# `WorkerEnv.resolve/1` will source provider credentials from
+# read-flip switch for phase P3 (bd-aiodva) onward: when true, `ConfigDir.oauth_token/1`
+# `ConfigDir.env/1` and `WorkerEnv.resolve/1` source provider credentials from
 # `provider_accounts` / `provider_credentials` instead of the workspace's
 # `worker_env` blob.
 #
-# It is false here and **nothing reads it yet**. P2 (this release) is the
-# additive half of the three-release plan: it populates the new tables and
-# writes an encrypted backup row, but every existing read path still comes off
-# `workspaces.encrypted_worker_env`. Rolling P2 back is "drop the new tables".
+# It is false here by default. P3+ read from accounts when this flag is true;
+# the fallback chain (§7.5) handles flag-off for legacy deployments.
+# P2 (bd-77j2if) was the additive setup: it populates the new tables and writes
+# an encrypted backup row. Rolling P2 back is "drop the new tables".
 config :arbiter, :provider_accounts_enabled, false
 
 config :arbiter, :cloud_code_quota, enabled: true

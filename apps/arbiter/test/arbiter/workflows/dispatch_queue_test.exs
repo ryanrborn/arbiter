@@ -846,10 +846,17 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  # P10 (bd-icwk2k): `Overage.windowed_spend/2` reads
+  # `usage_events.provider_account_id` directly (P9) rather than summing
+  # through the workspace link, so this has to stamp the same account
+  # `seed_quota/2` seeds the snapshot under — mirroring what
+  # `Arbiter.Worker`'s own write path (`AccountResolver.account_id/2`) does
+  # for a real dispatch.
   defp seed_usage(ws, cost_usd) do
     Ash.create!(Arbiter.Usage.Event, %{
       task_id: "usage-#{System.unique_integer([:positive])}",
       workspace_id: ws.id,
+      provider_account_id: quota_account_id!(ws.id),
       step: :work,
       cost_usd: cost_usd,
       occurred_at: DateTime.utc_now() |> DateTime.truncate(:second)

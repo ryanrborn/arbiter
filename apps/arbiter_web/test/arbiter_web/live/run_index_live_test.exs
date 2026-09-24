@@ -54,6 +54,24 @@ defmodule ArbiterWeb.RunIndexLiveTest do
     refute html =~ "completed-only"
   end
 
+  test "the interrupted filter shows runs shut down with the server, not failures (bd-aje6fj)",
+       %{conn: conn} do
+    _interrupted =
+      run(%{
+        task_id: "bd-int",
+        task_title: "interrupted-only",
+        status: :interrupted,
+        failure_reason: "server shutdown"
+      })
+
+    _failed = run(%{task_id: "bd-bad3", task_title: "crashed-only", status: :failed})
+
+    {:ok, _view, html} = live(conn, ~p"/workers/history?#{%{status: :interrupted}}")
+
+    assert html =~ "interrupted-only"
+    refute html =~ "crashed-only"
+  end
+
   test "empty state uses the moon icon when no runs match", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/workers/history?#{%{status: :running}}")
 

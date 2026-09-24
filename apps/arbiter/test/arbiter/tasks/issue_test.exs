@@ -283,6 +283,28 @@ defmodule Arbiter.Tasks.IssueTest do
       assert reopened.source_pr == nil
     end
 
+    test "clears pr_opened_notified_ref and pr_opened_transitioned_ref so a new PR after reopen gets its own comment (bd-bqlwjo)",
+         %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "opened-a-pr", workspace_id: ws.id})
+
+      {:ok, issue} =
+        Ash.update(
+          issue,
+          %{
+            pr_ref: "owner/repo#123",
+            pr_opened_notified_ref: "https://github.com/owner/repo/pull/123",
+            pr_opened_transitioned_ref: "https://github.com/owner/repo/pull/123"
+          },
+          action: :update
+        )
+
+      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
+
+      assert reopened.pr_opened_notified_ref == nil
+      assert reopened.pr_opened_transitioned_ref == nil
+    end
+
     test "clears the recorded close intent — it describes a close that no longer stands
           (bd-bsco7f)",
          %{closed: closed} do

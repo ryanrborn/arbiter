@@ -73,6 +73,43 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
     end
   end
 
+  # bd-8vnuy3: the live-spend reader re-reads files that are being appended to,
+  # and must be able to tell a clean read from one that skipped lines.
+  describe "read_totals/2 cache TTL split and malformed lines" do
+    test "sums the 1h-TTL subset of cache writes and prices it at 2x input" do
+      dir = tmp_dir()
+      path = Path.join(dir, "ttl.jsonl")
+
+      File.write!(path, """
+      {"type":"assistant","timestamp":"2026-09-22T10:00:00.000Z","message":{"id":"m1","model":"claude-sonnet-5","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":300000,"cache_creation":{"ephemeral_1h_input_tokens":200000,"ephemeral_5m_input_tokens":100000}}}}
+      {"type":"assistant","timestamp":"2026-09-22T10:00:01.000Z","message":{"id":"m2","model":"claude-sonnet-5","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":100000}}}
+      """)
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert totals.cache_creation_tokens == 400_000
+      # m2 carries no breakdown: counted as a 5-minute write, never guessed 1h.
+      assert totals.cache_creation_1h_tokens == 200_000
+      # sonnet-5, $2 input: 200_000 * 4.0 + 200_000 * 2.5 = 1.3
+      assert totals.cost_source == :estimated
+      assert_in_delta totals.cost_usd, 1.3, 0.0000001
+      assert totals.malformed_lines == 0
+    end
+
+    test "counts non-blank lines that are not JSON objects, and still sums the rest" do
+      dir = tmp_dir()
+      path = Path.join(dir, "torn.jsonl")
+
+      File.write!(
+        path,
+        Enum.join(@lines, "\n") <> "\n" <> ~s({"type":"assistant","message":{"id":"m-torn","usa)
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert totals.malformed_lines == 1
+      assert totals.message_count == 2
+    end
+  end
+
   # `--resume <sid>` appends a second run's turns to the FIRST run's file, but
   # Arbiter opens a new Workers.Run row for the resumed attempt. Without a
   # cutoff the child run would be billed for everything its parent spent.

@@ -72,7 +72,7 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `task_show`, `task_create`, `task_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off issue dispatch:
 
 - **Skills** — `skill_list`/`skill_get`/`skill_create`/`skill_update`/`skill_delete` for managing reusable skill content.
-- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire issues together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. Chains of issues run by declaring the edges, not by building a separate graph object.
+- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire issues together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. A pause stops new board dispatches only — fix passes, conflict resolvers and review rounds already under way keep running — so `scheduler_status` reports a drain state (`running` / `draining` with what is in flight / `quiescent`, the only safe restart point); `arb scheduler pause && arb scheduler wait` blocks until it is safe to restart. Chains of issues run by declaring the edges, not by building a separate graph object.
 - **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not task-linked.
 
 See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
@@ -369,15 +369,21 @@ makes existing encrypted secrets unrecoverable.
 ### Claude CLI authentication (`CLAUDE_CODE_OAUTH_TOKEN`) — recommended
 
 Real worker spawns and the `CredentialWatchdog`'s health probe both authenticate
-the `claude` CLI via `Arbiter.Agents.Claude.spawn_env/1`. By default that falls
-back to whatever OAuth session is active for the account running the Arbiter
-server (`~/.claude/.credentials.json`) — which means an operator's personal
-session expiring blocks every workspace's dispatch until it's manually
-re-authenticated.
+the `claude` CLI via `Arbiter.Agents.Claude.spawn_env/1`. The supported path is
+**provider accounts** — a `provider_accounts` row, joined to a workspace via
+`workspace_provider_accounts`, holding an active `provider_credentials` row for
+`CLAUDE_CODE_OAUTH_TOKEN` (`docs/provider-account-design.md`); enable it with
+`:provider_accounts_enabled`.
 
-To avoid that, set a long-TTL Claude Code OAuth token once, install-wide, in
-`.arbiter.env` (same file/trust model as `ARBITER_CLOAK_KEY` / `SECRET_KEY_BASE`
-above — loaded via `EnvironmentFile=` when running as a service):
+**With that flag off (the default),** `spawn_env/1` keeps the pre-migration
+behaviour exactly: a token configured per-workspace (`worker_env`, encrypted at
+rest) wins, then the arbiter server's own OS process environment
+(`CLAUDE_CODE_OAUTH_TOKEN` in `.arbiter.env` / the service unit), then — for a
+workspace-less spawn like the Watchdog probe — the single unambiguous token
+across every workspace that defines one. Set a long-TTL token once,
+install-wide, in `.arbiter.env` (same file/trust model as `ARBITER_CLOAK_KEY` /
+`SECRET_KEY_BASE` above — loaded via `EnvironmentFile=` when running as a
+service):
 
 ```sh
 echo "CLAUDE_CODE_OAUTH_TOKEN=<your-long-ttl-token>" >> ~/.arbiter/arbiter.env
@@ -387,24 +393,64 @@ echo "CLAUDE_CODE_OAUTH_TOKEN=<your-long-ttl-token>" >> ~/.arbiter/arbiter.env
 `spawn_env/1` exports this under its own literal name (never remapped to
 `ANTHROPIC_API_KEY` — the two are not interchangeable to the CLI) whenever it's
 present in the OS environment, so the probe and real dispatch always agree.
-Prefer this single install-wide var over configuring the same token as a
-per-workspace `credentials_ref`/`worker_env` secret in each workspace — a
-per-workspace copy only reaches real worker spawns, not the Watchdog's probe,
-and duplicating an identical token across workspaces risks copy-drift if one
-copy is rotated and the others aren't.
-
 `arb install service` also forwards `CLAUDE_CODE_OAUTH_TOKEN` from the
 installing shell into `~/.arbiter/arbiter.env` automatically, same as the
 other captured secrets above.
 
+**Migrating to a provider account:** `mix arbiter.accounts.census` only ever
+sees credentials already stored in a workspace's `worker_env`
+(`docs/provider-account-design.md` §7.1) — it has no visibility into the
+arbiter server's own process environment, so a token that has only ever lived
+in `.arbiter.env` will not appear in the census output at all. Before running
+the migration:
+
+1. Set the token as a `worker_env` value (`CLAUDE_CODE_OAUTH_TOKEN`) on at
+   least one workspace via the dashboard's workspace environment editor, so
+   `mix arbiter.accounts.census` has something to fingerprint.
+2. Run `mix arbiter.accounts.census` (optionally with
+   `--operator-credential ~/.claude/.credentials.json`), edit the resulting
+   plan to merge/name the candidate account, then apply it with
+   `mix arbiter.accounts.migrate --plan accounts.json`.
+3. Flip `:provider_accounts_enabled` on once every workspace that needs the
+   token is covered by the migrated plan — this deletes the legacy chain
+   above for good (the "flip" release; see
+   `docs/provider-account-design.md` §7.5).
+4. Remove `CLAUDE_CODE_OAUTH_TOKEN` from `.arbiter.env` / the service unit —
+   it becomes inert once the flag is on, but leaving a stale credential lying
+   around in a secrets file is its own risk.
+
+#### Account-model path (requires `:provider_accounts_enabled`)
+
+Once the flag is on, you can also manage provider accounts directly via the
+`arb account` CLI instead of (or alongside) the census/migrate flow above:
+
+```sh
+# Create or reference a provider account
+arb account create claude my_account
+
+# Attach it to a workspace
+arb account attach <workspace> claude my_account
+
+# Install or rotate the credential
+arb account rotate claude:my_account --kind oauth_token --env-var CLAUDE_CODE_OAUTH_TOKEN --secret <your-long-ttl-token>
+```
+
+This path is particularly useful if you have **multiple Claude credentials**
+(e.g., for different Anthropic accounts or organizations) and want to route
+different workspaces to different accounts — the account model lets each
+workspace reference its own account identity directly, without duplicating
+tokens across workspaces or relying on install-wide environment fallbacks.
+
 **Precedence when both are set:** a spawn can end up with both
-`CLAUDE_CODE_OAUTH_TOKEN` (install-wide) and `ANTHROPIC_API_KEY` (workspace
-`credentials_ref`/`api_keys` rotation) in its environment at once. Which one
-the `claude` CLI honours is decided by the CLI itself, not by Arbiter — if it
-prefers the OAuth token, a workspace that deliberately configured its own key
-would silently authenticate against the install-wide account instead. If a
-workspace's `ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence
-before relying on it, or unset the install-wide token for that install.
+`CLAUDE_CODE_OAUTH_TOKEN` (install-wide, or the account's) and
+`ANTHROPIC_API_KEY` (workspace `credentials_ref`/`api_keys` rotation) in its
+environment at once. Which one the `claude` CLI honours is decided by the CLI
+itself, not by Arbiter — if it prefers the OAuth token, a workspace that
+deliberately configured its own key would silently authenticate against the
+install-wide/account credential instead. If a workspace's `ANTHROPIC_API_KEY`
+must win, verify the CLI's actual precedence before relying on it, or unset
+the install-wide token for that install / leave that workspace off the
+provider-account join.
 
 **Redaction:** `Arbiter.Worker.ClaudeSession.start/1` adds
 `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values to the session's
@@ -524,4 +570,21 @@ Architecture and design decision records live in [`docs/`](docs/):
 - [Quota and Auth Posture](docs/quota-and-auth.md) — Provider quota management and credential lifecycle.
 - [Worker Security Policy](docs/worker-security.md) — Execution sandbox and security isolation for agent workers.
 - [Remote Access](docs/remote-access.md) — Connecting to dashboard and sessions over SSH tunnels.
+
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local
+development commands and contribution guidelines. Before a pull request can be
+merged, it must be signed off under the [Contributor License Agreement
+(CLA.md)](CLA.md). Found a security issue? See [`SECURITY.md`](SECURITY.md)
+for how to report it privately.
+
+## License
+
+Arbiter is licensed under the [Apache License, Version 2.0](LICENSE). Third-party
+dependencies and their licenses are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+Arbiter follows an open-core model: future commercially-licensed components ship
+as separate packages and are not covered by this repository's license. See
+[Licensing Model & Open-Core Architecture](docs/licensing-model.md) for details.
 

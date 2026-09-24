@@ -12,6 +12,8 @@ defmodule ArbiterCli.Cmd.Doctor do
     5. Do the CLI and server report the same version?
     6. Are database migrations up to date?
     7. Is the server bound to a loopback address? (the dashboard has no login)
+    8. Is it safe to restart? (the scheduler drain state — `[fail]` while a
+       paused scheduler is still draining; informational, never fatal)
 
   Exit code 0 on all green, 1 on any failure.
   """

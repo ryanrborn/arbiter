@@ -82,10 +82,13 @@ defmodule Arbiter.Board.Snapshot do
   reason defaults to "a person's" instead of silently reading as pipeline
   wait. It measures "still needs a human today", not "something is imperfect".
 
-  A worker at `:awaiting_review` holds an MR, not a subprocess, so it does not
-  consume a worker slot; every other live status does. That is what makes
-  `slots_free` mean "agents I could start right now" rather than "rows in the
-  registry".
+  A worker at `:awaiting_review` holds an MR, not a subprocess — no agent is
+  burning quota for it — but it still occupies its task's *slot* (bd-45pwo1):
+  the operator's rule is "another slot doesn't open until the issue occupying
+  it is merged", and an open MR is not merged. `slots_free` means "tasks I
+  could start dispatching right now given the cap", which is a different
+  number from `agents_live`, "agents actually burning quota this instant" —
+  see `Arbiter.Tasks.SlotGate`'s "A slot is a task, not an agent" section.
 
   ## Deriving vs loading
 
@@ -164,6 +167,7 @@ defmodule Arbiter.Board.Snapshot do
           promote: String.t() | nil,
           slots_total: non_neg_integer(),
           slots_free: non_neg_integer(),
+          slots_used: non_neg_integer(),
           agents_live: non_neg_integer(),
           quota: Scheduler.quota(),
           paused: boolean(),
@@ -234,13 +238,22 @@ defmodule Arbiter.Board.Snapshot do
 
     running = running_cards(authors, issues_by_id, gate_workers_by_author, workers)
 
-    # bd-aw2cyt: a slot is a live agent session in any role — author, reviewer,
-    # implementer round, CI fix pass, conflict resolver — not an author record
-    # in a live status. Counted over ALL workers, not just the author rows: a
-    # reviewer is a second paid session, and it is spending the cap even though
-    # its card folds into the author's.
+    # bd-aw2cyt: a live agent session in any role — author, reviewer,
+    # implementer round, CI fix pass, conflict resolver. Counted over ALL
+    # workers, not just the author rows: a reviewer is a second paid session.
+    # This is "agents live" on the header — what's actually burning quota —
+    # and no longer what the dispatch cap is measured against; see below.
     agents_live = SlotGate.occupied(workers, slot_basis)
-    slots_free = max(slots_total - agents_live, 0)
+
+    # bd-45pwo1: the dispatch cap is measured in TASKS, not agent sessions —
+    # "another slot doesn't open until the issue occupying it is merged". A
+    # task between ReviewGate rounds, waiting on CI, or waiting on a merge
+    # still holds its one slot even with no agent live for it right now; only
+    # `:done` and `:waiting_on_you` (human-parked) release it early. See
+    # `SlotGate`'s "A slot is a task, not an agent" section.
+    annotated_workers = Phase.annotate(workers)
+    slots_used = SlotGate.occupied_tasks(annotated_workers, slot_basis)
+    slots_free = max(slots_total - slots_used, 0)
 
     plan =
       Scheduler.plan(%{
@@ -272,6 +285,7 @@ defmodule Arbiter.Board.Snapshot do
       promote: plan.promote,
       slots_total: slots_total,
       slots_free: slots_free,
+      slots_used: slots_used,
       agents_live: agents_live,
       quota: quota,
       paused: paused?,
@@ -319,13 +333,17 @@ defmodule Arbiter.Board.Snapshot do
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
       slot_basis: slot_basis,
-      # bd-aw2cyt: `derive/1` subtracts the *occupied* slots from this total,
-      # and the account term folded in below is a headroom expressed in the
-      # caller's own frame — so the two have to agree on what "occupied" means.
-      # Hand it the same count `derive/1` will subtract.
+      # bd-aw2cyt/bd-45pwo1: `derive/1` subtracts the *occupied* slots from
+      # this total, and the account term folded in below is a headroom
+      # expressed in the caller's own frame — so the two have to agree on
+      # what "occupied" means. Since bd-45pwo1 that is task occupancy, not
+      # live agent sessions — hand it the same count `derive/1` will subtract.
       slots_total:
         Keyword.get(opts, :slots_total) ||
-          effective_max_concurrent(workspace_id, SlotGate.occupied(workers, slot_basis)),
+          effective_max_concurrent(
+            workspace_id,
+            SlotGate.occupied_tasks(Phase.annotate(workers), slot_basis)
+          ),
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
       ready_order: Keyword.get(opts, :ready_order, []),
@@ -373,6 +391,7 @@ defmodule Arbiter.Board.Snapshot do
       promote: nil,
       slots_total: 0,
       slots_free: 0,
+      slots_used: 0,
       agents_live: 0,
       quota: :ok,
       paused: true,

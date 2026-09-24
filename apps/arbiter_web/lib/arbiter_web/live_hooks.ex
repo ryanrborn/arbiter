@@ -35,10 +35,14 @@ defmodule ArbiterWeb.LiveHooks do
     dispatch is fixed, remove the filter.
   - Gemini CLI: deprecated and has no reconnect path; reports "project id not
     available; reconnect" (bd-5r6cdy).
-  - Antigravity: quota is only checkable while app is actively open and recently
-    refreshed; token stales ~1h after app closes (bd-5r6cdy).
 
   Once these are fixed, remove them from @hidden_providers and this comment.
+
+  Antigravity was hidden here too (bd-5r6cdy: quota was only checkable while the
+  app was open, and its token staled ~1h after it closed). The `agy` CLI
+  `/usage` probe (`Arbiter.Quota.CloudCode`) superseded that stored-token path,
+  so it is shown again (bd-gukyy1); a reading `agy` couldn't refresh carries a
+  `message` and renders muted as stale rather than as a current figure.
 
   ## `:loopback`
 
@@ -76,7 +80,7 @@ defmodule ArbiterWeb.LiveHooks do
   require Logger
 
   # Providers hidden from the UI pending fix; see module docstring for context.
-  @hidden_providers ["codex", "gemini_cli", "antigravity"]
+  @hidden_providers ["codex", "gemini_cli"]
 
   @coordinator_ref Message.coordinator_ref()
 
@@ -265,11 +269,21 @@ defmodule ArbiterWeb.LiveHooks do
   # Live broadcast views don't carry `cost_usd` (it's a read-path add-on from the
   # usage ledger, not part of the per-provider fetch), so a naive replace would
   # blank the figure on every tick. Keep the last known cost when the incoming
-  # update omits it (bd-ajh7bd).
-  defp preserve_cost(existing, %{cost_usd: nil} = incoming),
-    do: %{incoming | cost_usd: Map.get(existing, :cost_usd)}
+  # update omits it (bd-ajh7bd). Same for `gate_policy` (bd-clzkvp), which
+  # `list_latest_for_workspace/2` adds: without it the bars would fall back to
+  # the install-default thresholds on the first tick.
+  defp preserve_cost(existing, incoming) do
+    incoming
+    |> keep_existing(existing, :cost_usd)
+    |> keep_existing(existing, :gate_policy)
+  end
 
-  defp preserve_cost(_existing, incoming), do: incoming
+  defp keep_existing(incoming, existing, key) do
+    case Map.get(incoming, key) do
+      nil -> Map.put(incoming, key, Map.get(existing, key))
+      _ -> incoming
+    end
+  end
 
   # Filter out providers marked as hidden from the UI.
   defp filter_hidden_providers(quotas) do

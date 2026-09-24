@@ -87,6 +87,7 @@ defmodule ArbiterCli.Main do
       arb loop reject     <id> [--reason "..."]
 
       arb scheduler pause|resume|status
+      arb scheduler wait  [--timeout SECS] [--interval SECS]
 
       arb quota           [--workspace <id|name>] [--json]
 

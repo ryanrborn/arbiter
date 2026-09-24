@@ -92,6 +92,34 @@ defmodule Arbiter.Usage.Budget do
   """
   @spec spend_by_task([String.t()], keyword()) :: %{String.t() => float()}
   def spend_by_task(task_ids, opts \\ []) when is_list(task_ids) do
+    task_ids
+    |> settled_by_task(opts)
+    |> Enum.filter(fn {_task_id, settled} -> settled.priced_rows > 0 end)
+    |> Map.new(fn {task_id, settled} -> {task_id, settled.spend} end)
+  end
+
+  @typedoc """
+  One task's settled ledger: the priced rows' sum, and how many rows were and
+  were not priced. `unpriced_rows` is what lets a surface render a task whose
+  only spend is an agy/antigravity pass (cost `nil` by design, bd-481sz7) as
+  "n/a" rather than as a `$0.00` it never cost.
+  """
+  @type settled :: %{
+          spend: float(),
+          priced_rows: non_neg_integer(),
+          unpriced_rows: non_neg_integer()
+        }
+
+  @doc """
+  `spend_by_task/2` without dropping the unpriced rows: `%{task_id =>
+  settled()}` for every task with at least one ledger row of either kind.
+
+  The settled half of `Arbiter.Usage.LiveSpend`'s figure (bd-8vnuy3), which is
+  why it is the one read both it and `spend_by_task/2` go through — the live
+  total and the ledger total cannot drift apart on which rows they count.
+  """
+  @spec settled_by_task([String.t()], keyword()) :: %{String.t() => settled()}
+  def settled_by_task(task_ids, opts \\ []) when is_list(task_ids) do
     ids =
       task_ids
       |> Enum.reject(&(is_nil(&1) or &1 == ""))
@@ -102,11 +130,17 @@ defmodule Arbiter.Usage.Budget do
     ids
     |> Enum.chunk_every(Keyword.get(opts, :id_chunk, @id_chunk))
     |> Enum.flat_map(&read_chunk/1)
-    |> Enum.filter(&is_number(&1.cost_usd))
     |> Enum.group_by(&fold_event_id/1)
     |> Enum.filter(fn {task_id, _events} -> MapSet.member?(wanted, task_id) end)
     |> Map.new(fn {task_id, events} ->
-      {task_id, money(Enum.reduce(events, 0.0, &(&2 + &1.cost_usd)))}
+      {priced, unpriced} = Enum.split_with(events, &is_number(&1.cost_usd))
+
+      {task_id,
+       %{
+         spend: money(Enum.reduce(priced, 0.0, &(&2 + &1.cost_usd))),
+         priced_rows: length(priced),
+         unpriced_rows: length(unpriced)
+       }}
     end)
   end
 
@@ -137,10 +171,20 @@ defmodule Arbiter.Usage.Budget do
     end)
   end
 
-  defp fold_event_id(%Event{base_task_id: base}) when is_binary(base) and base != "",
+  @doc """
+  The base task a ledger row's spend belongs to: its `base_task_id` when set,
+  else its `task_id`, folded through `Arbiter.Usage.Estimate.fold_task_id/1`.
+  Shared with `Arbiter.Usage.LiveSpend` so a session is attributed by the same
+  rule the settled total uses.
+  """
+  @spec fold_event_id(map()) :: String.t() | nil
+  def fold_event_id(%{base_task_id: base}) when is_binary(base) and base != "",
     do: Estimate.fold_task_id(base)
 
-  defp fold_event_id(%Event{task_id: task_id}), do: Estimate.fold_task_id(task_id)
+  def fold_event_id(%{task_id: task_id}) when is_binary(task_id),
+    do: Estimate.fold_task_id(task_id)
+
+  def fold_event_id(_event), do: nil
 
   @doc """
   Spend so far, the estimate it is read against, and the resulting state.

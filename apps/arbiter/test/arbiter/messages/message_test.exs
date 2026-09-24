@@ -303,6 +303,32 @@ defmodule Arbiter.Messages.MessageTest do
 
       assert_receive {:event, %{topic: "inbox"}}
     end
+
+    test "restate/2 updates the row and refreshes PubSub subscribers WITHOUT firing another inbox SSE event (bd-6jjgk0)" do
+      {:ok, escalation} =
+        Message.send_mail(%{
+          to_ref: "coordinator",
+          kind: :escalation,
+          from_ref: "system",
+          subject: "Claude credentials expired — usage-poll signal",
+          body: "2 consecutive 401s",
+          workspace_id: @ws
+        })
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(@ws))
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))
+
+      {:ok, restated} = Message.restate(escalation.id, "3 consecutive 401s")
+      assert restated.body == "3 consecutive 401s"
+
+      # A LiveView inbox panel still needs to see the updated row...
+      assert_receive {:new_message, %{id: restated_id, body: "3 consecutive 401s"}}
+      assert restated_id == escalation.id
+
+      # ...but a coordinator subscribed to Arbiter.Events must not be woken
+      # again — the mailbox did not grow, so there is nothing new to page on.
+      refute_receive {:event, %{topic: "inbox"}}
+    end
   end
 
   describe "PubSub broadcast on clear_read/2" do

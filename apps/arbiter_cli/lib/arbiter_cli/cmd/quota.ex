@@ -8,8 +8,9 @@ defmodule ArbiterCli.Cmd.Quota do
 
   * Claude: OAuth polling of Anthropic's `/api/oauth/usage` endpoint plus
     `anthropic-ratelimit-unified-*` headers captured from worker responses.
-    Stores the latest snapshot per workspace, including per-model weekly
-    breakdown and `extra_usage` overage (bd-8tpha6, bd-b0zody).
+    Stores the latest snapshot per account (P5, `docs/provider-account-design.md`
+    §6), including per-model weekly breakdown and `extra_usage` overage
+    (bd-8tpha6, bd-b0zody).
   * Codex: OpenAI session + weekly windows, refreshed by the quota probe using
     the `codex` CLI's stored token. Shows a short message until a snapshot has
     been captured (i.e. the CLI isn't authenticated on this host).
@@ -40,9 +41,16 @@ defmodule ArbiterCli.Cmd.Quota do
   and muscle memory keep working. `--json` gains `account` / `workspaces`
   keys and retains `workspace_id` for one release as a deprecated alias.
 
+  `--account` (P10, `docs/provider-account-design.md` §8) goes straight to
+  the account instead of through a workspace — a UUID, a `provider:slug`
+  ref, or a bare unambiguous slug (`arb account list` for slugs). Shows that
+  account's own total plus its per-workspace breakdown, with no workspace
+  lookup involved. `--workspace` and `--account` are mutually exclusive;
+  `--account` wins if both are given.
+
   Usage:
 
-      arb quota [--workspace <id|name>] [--json]
+      arb quota [--workspace <id|name> | --account <id|provider:slug|slug>] [--json]
 
   Defaults to the installation's default workspace. With `--json` emits the
   machine-readable snapshot; otherwise a short human-readable summary.
@@ -60,18 +68,32 @@ defmodule ArbiterCli.Cmd.Quota do
       rest = Output.drop_json(argv)
 
       {opts, _rest, _bad} =
-        OptionParser.parse(rest, switches: [workspace: :string], aliases: [w: :workspace])
+        OptionParser.parse(rest,
+          switches: [workspace: :string, account: :string],
+          aliases: [w: :workspace, a: :account]
+        )
 
-      params =
-        case Keyword.get(opts, :workspace) do
-          ws when is_binary(ws) and ws != "" -> [workspace: ws]
-          _ -> []
-        end
+      params = quota_params(opts)
 
       case Client.get("/api/quota", params) do
         {:ok, %{"data" => data}} -> emit(data, mode, params)
         {:error, err} -> Output.die(err)
       end
+    end
+  end
+
+  # `--account` bypasses the workspace lookup entirely, so it wins over
+  # `--workspace` when both are given rather than silently picking one.
+  defp quota_params(opts) do
+    case Keyword.get(opts, :account) do
+      acct when is_binary(acct) and acct != "" ->
+        [account: acct]
+
+      _ ->
+        case Keyword.get(opts, :workspace) do
+          ws when is_binary(ws) and ws != "" -> [workspace: ws]
+          _ -> []
+        end
     end
   end
 

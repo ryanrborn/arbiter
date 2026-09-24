@@ -128,29 +128,40 @@ defmodule ArbiterWeb.Layouts do
       </span>
 
       <div class="ml-auto flex flex-none items-center gap-4">
-        <div :for={quota <- @quotas} class="max-lg:hidden flex flex-col gap-[3px]">
-          <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-            {quota_provider_label(quota.provider)}
-          </span>
-          <div class="flex items-center gap-3">
+        <%!-- One row per provider, stacked (bd-gukyy1): the label, then its
+              windows side by side — the shape one provider always had,
+              repeated downward so a second provider costs height (the bar
+              has room for two ~12px rows) rather than width the live badge,
+              inbox trigger and theme toggle need at `lg`. --%>
+        <div
+          :if={@quotas != []}
+          id="quota-topbar"
+          class="max-lg:hidden grid grid-cols-[auto_auto_auto] items-center gap-x-3 gap-y-[3px]"
+        >
+          <%!-- A subgrid row, so each window column lines up across
+                providers however wide one row's label or note is. --%>
+          <div
+            :for={quota <- @quotas}
+            id={"quota-topbar-#{quota.provider}"}
+            class="col-span-3 grid grid-cols-subgrid items-center"
+          >
+            <span class="flex-none min-w-[72px] text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+              {quota_provider_label(quota.provider)}
+            </span>
             <.quota_bar
+              :for={w <- quota_windows(quota)}
+              id={"quota-topbar-#{quota.provider}-#{w.window}"}
               provider={quota.provider}
               show_label={false}
-              window="5h"
-              utilization={quota.utilization_5h}
-              reset_at={quota.reset_5h_at}
+              window={w.window}
+              label={w.label}
+              utilization={w.utilization}
+              reset_at={w.reset_at}
               overage_status={quota.overage_status}
               representative_claim={quota.representative_claim}
-              on_exhaustion={@quota_on_exhaustion}
-            />
-            <.quota_bar
-              provider={quota.provider}
-              show_label={false}
-              window="7d"
-              utilization={quota.utilization_7d}
-              reset_at={quota.reset_7d_at}
-              overage_status={quota.overage_status}
-              representative_claim={quota.representative_claim}
+              stale_message={quota.message}
+              gate_policy={Map.get(quota, :gate_policy)}
+              label_width={34}
               on_exhaustion={@quota_on_exhaustion}
             />
           </div>
@@ -445,9 +456,14 @@ defmodule ArbiterWeb.Layouts do
 
   See <head> in root.html.heex which applies the theme before page load.
   """
+  attr :id, :string, default: "theme-toggle"
+
   def theme_toggle(assigns) do
     ~H"""
-    <div class="relative flex items-center rounded-[var(--radius-pill)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]">
+    <div
+      id={@id}
+      class="relative flex items-center rounded-[var(--radius-pill)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]"
+    >
       <div class="absolute inset-y-[2px] left-[2px] w-[calc(33.333%-2px)] rounded-[var(--radius-pill)] bg-[var(--surface-card)] transition-[left] duration-200 [[data-theme=light]_&]:left-[calc(33.333%+1px)] [[data-theme=dark]_&]:left-[calc(66.666%-1px)]" />
 
       <button

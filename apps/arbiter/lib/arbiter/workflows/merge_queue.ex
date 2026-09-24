@@ -1143,9 +1143,11 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:ok, _info} ->
         Logger.info("MergeQueue: spawned conflict resolver for task=#{item.task_id}")
 
+        # P7: the resolver's force-push writes a resolution — authored content —
+        # so it pins the approved baseline rather than suspending it.
         item =
           item
-          |> clear_reviewed_latch()
+          |> note_authored_push()
           |> Map.merge(%{
             status: :conflict_resolving,
             prior_status: prior,
@@ -1176,17 +1178,13 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp restore_after_resolution(state, %{prior_status: nil} = item) do
     safe_notify_resolution(state, item)
 
-    item
-    |> clear_reviewed_latch()
-    |> Map.merge(%{status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil})
+    Map.merge(item, %{status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil})
   end
 
   defp restore_after_resolution(state, %{prior_status: prior} = item) do
     safe_notify_resolution(state, item)
 
-    item
-    |> clear_reviewed_latch()
-    |> Map.merge(%{status: prior, prior_status: nil, resolver_spawned_at: nil})
+    Map.merge(item, %{status: prior, prior_status: nil, resolver_spawned_at: nil})
   end
 
   # ---- changes-requested → auto-revise (bd-95lsjb) ------------------------
@@ -1363,17 +1361,104 @@ defmodule Arbiter.Workflows.MergeQueue do
         coverage_merge_decision(state, item, head)
 
       true ->
-        legacy = legacy_merge_decision(item, head)
+        {legacy, item} = legacy_merge_decision(state, item, head)
         observe_coverage(state, item, coverage_shadow_answer(legacy), head, nil)
         {apply_legacy_decision(state, item, legacy), item}
     end
   end
 
-  defp legacy_merge_decision(item, head),
-    do: Mergers.ReviewedSha.check(item_reviewed_sha(item), head)
+  # P7 (bd-60r6wp / #1738, §4.5) gives the queue the content check M1 was
+  # missing (the Watchdog's W5, `base_merge_only?/3`). Once a conflict
+  # resolution no longer suspends the latch, the queue has to be able to tell a
+  # resolver push that changed nothing — a clean replay of the approved change
+  # onto the moved base — from one that wrote content, or every resolved
+  # conflict would sit refused on the pinned baseline forever. Equal net diffs
+  # merge pinned to the new head and record the `:mechanical` row that proof
+  # implies; anything else stays refused until a review covers it. Fails
+  # closed: a diff that cannot be read is "not equal".
+  defp legacy_merge_decision(%State{} = state, item, head) do
+    case Mergers.ReviewedSha.check(item_reviewed_sha(item), head) do
+      {:error, {:stale_reviewed_sha, reviewed, ^head}} = stale ->
+        case content_equal(state, item, reviewed, head) do
+          {true, item} -> {{:ok, head}, item}
+          {false, item} -> {stale, item}
+        end
 
-  defp apply_legacy_decision(state, item, {:ok, expected_sha}),
-    do: state.adapter.merge(item.mr_ref, expected_sha)
+      result ->
+        {result, item}
+    end
+  end
+
+  defp content_equal(_state, %{content_checked: {reviewed, head, equal?}} = item, reviewed, head),
+    do: {equal?, item}
+
+  defp content_equal(%State{} = state, item, reviewed, head) do
+    base = Map.get(item, :base) || state.base
+
+    equal? =
+      with true <- is_binary(base) and base != "",
+           {:ok, reviewed_diff} <- safe_get_diff(state, item, base, reviewed),
+           {:ok, head_diff} <- safe_get_diff(state, item, base, head),
+           true <- Mergers.NetDiff.equivalent?(reviewed_diff, head_diff) do
+        Logger.info(
+          "MergeQueue: task=#{item.task_id} mr=#{item.mr_ref} head #{head} carries the same " <>
+            "net diff against #{base} as the reviewed commit #{reviewed}; merging pinned to it"
+        )
+
+        record_content_equal_coverage(item, head, base, head_diff)
+        true
+      else
+        _ -> false
+      end
+
+    {equal?, Map.put(item, :content_checked, {reviewed, head, equal?})}
+  end
+
+  defp safe_get_diff(%State{adapter: adapter}, item, base, head) do
+    case adapter.get_diff(item.mr_ref, %{base: base, head: head}) do
+      {:ok, diff} when is_binary(diff) -> {:ok, diff}
+      other -> {:error, other}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # The same row the Watchdog's `record_content_equal_coverage/2` writes, for
+  # the same reason (AC2): a merged head should not be left with no coverage
+  # behind it when the proof that authorised it is in hand.
+  defp record_content_equal_coverage(item, head, base, head_diff) do
+    case safe_coverage(item) do
+      {:ok, coverage} ->
+        record_mechanical(
+          item,
+          Coverage.mechanical_for_diff(coverage, head, base, head_diff, :watchdog)
+        )
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp apply_legacy_decision(state, item, {:ok, expected_sha}) do
+    # bd-aq81qz / M1: an approval and a clean expected_sha are not proof the
+    # merge contributes anything — a branch redispatched onto already-squashed
+    # commits, then merged with its base, moves `head` without changing a
+    # line. Refuse the same way a stale-SHA refusal does (returned, not
+    # raised): `try_merge/2` below routes `:empty_net_diff` to the same
+    # non-terminal retry the other content refusals already get.
+    if empty_net_diff_at_merge?(state, item, expected_sha) do
+      Logger.warning(
+        "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+          "head #{expected_sha} nets to an empty diff against the target branch"
+      )
+
+      {:error, :empty_net_diff}
+    else
+      state.adapter.merge(item.mr_ref, expected_sha)
+    end
+  end
 
   defp apply_legacy_decision(_state, item, {:error, {:stale_reviewed_sha, reviewed, head}} = err) do
     Logger.warning(
@@ -1384,12 +1469,30 @@ defmodule Arbiter.Workflows.MergeQueue do
     err
   end
 
+  # Fails OPEN (`false`) on a missing base or a fetch failure: this guard only
+  # refuses on a POSITIVE proof of emptiness, never on "could not tell", which
+  # would wrongly stall a perfectly good merge on a transient forge error.
+  defp empty_net_diff_at_merge?(%State{} = state, item, head) do
+    base = Map.get(item, :base) || state.base
+
+    with true <- is_binary(base) and base != "",
+         {:ok, diff} <- safe_get_diff(state, item, base, head) do
+      Mergers.NetDiff.blank?(diff)
+    else
+      _ -> false
+    end
+  end
+
   # The flipped path. The legacy guard still runs — its answer is what the
   # disagreement log compares against, and it is the fallback when the coverage
   # table itself cannot be read, which is a fault in the new path rather than a
   # verdict from it.
   defp coverage_merge_decision(%State{} = state, item, head) do
-    legacy = legacy_merge_decision(item, head)
+    # The bare ReviewedSha answer, without P7's content check: flipped, the
+    # legacy guard only shadows, and `decide/3`'s rule 3 is the content check
+    # that is acted on — running `legacy_merge_decision/3`'s two compares as
+    # well would buy forge calls for an answer nothing acts on.
+    legacy = Mergers.ReviewedSha.check(item_reviewed_sha(item), head)
     old = coverage_shadow_answer(legacy)
 
     case safe_coverage(item) do
@@ -1614,14 +1717,19 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  # Release the baseline when the QUEUE is the one advancing the branch — an
-  # update-branch rebase or a conflict-resolver push. Mirrors
-  # `Arbiter.Worker.Watchdog.clear_reviewed_latch/1`, including the reason it
-  # is a SUSPENSION rather than a one-shot clear: the forge applies
-  # update-branch asynchronously and the resolver force-pushes many ticks
-  # later, so nil-ing the baseline here would simply be re-latched to the
-  # unchanged pre-push head on the next tick and then refuse the queue's own
-  # commit forever.
+  # Release the baseline when the QUEUE advances the branch with an
+  # update-branch rebase. Mirrors `Arbiter.Worker.Watchdog.clear_reviewed_latch/1`,
+  # including the reason it is a SUSPENSION rather than a one-shot clear: the
+  # forge applies update-branch asynchronously, so nil-ing the baseline here
+  # would simply be re-latched to the unchanged pre-push head on the next tick
+  # and then refuse the queue's own commit forever.
+  #
+  # P7 (bd-60r6wp / #1738, §4.5) took the conflict-resolver push off this path
+  # (`note_authored_push/1`): a resolution writes content, and re-latching onto
+  # its head is the old path stamping it reviewed. For the same reason this is
+  # a no-op once a resolver push is pending.
+  defp clear_reviewed_latch(%{authored_push_pending: true} = item), do: item
+
   defp clear_reviewed_latch(item) do
     %{
       item
@@ -1629,6 +1737,21 @@ defmodule Arbiter.Workflows.MergeQueue do
         last_reviewed_sha: nil,
         latch_suspended_at_head: Map.get(item, :last_head_sha) || :unknown
     }
+  end
+
+  # P7 (bd-60r6wp / #1738). Mirrors `Arbiter.Worker.Watchdog.note_authored_push/1`:
+  # the resolver's push keeps the approved baseline, and an update-branch
+  # suspension still open when it is spawned ends here, pinned to the head the
+  # branch sits at (the approved content, or an update-branch merge of it).
+  defp note_authored_push(item) do
+    item =
+      if Map.get(item, :latch_suspended_at_head) do
+        %{item | latch_suspended_at_head: nil, reviewed_sha: Map.get(item, :last_head_sha)}
+      else
+        item
+      end
+
+    Map.put(item, :authored_push_pending, true)
   end
 
   # Carry the reviewed baseline forward from one poll observation, mirroring
@@ -1711,6 +1834,12 @@ defmodule Arbiter.Workflows.MergeQueue do
         {%{item | last_error: reason}, state}
 
       {:error, {:coverage_unknown, _reason} = reason} ->
+        {%{item | last_error: reason}, state}
+
+      # bd-aq81qz: same non-terminal shape as the stale/coverage refusals
+      # above — a re-review or a coordinator fix can clear this, and marking
+      # the item :failed here would give it no way back in.
+      {:error, :empty_net_diff = reason} ->
         {%{item | last_error: reason}, state}
 
       {:error, reason} ->
@@ -1860,6 +1989,16 @@ defmodule Arbiter.Workflows.MergeQueue do
       # Holds the latch off until the head moves off this value, which is the
       # only observable proof that the queue's own commit has landed.
       latch_suspended_at_head: nil,
+      # P7 (bd-60r6wp / #1738). Set once the queue has spawned a conflict
+      # resolver on this item: that push AUTHORS content (a resolution), so it
+      # keeps the approved baseline pinned instead of suspending it, and a later
+      # update-branch must not suspend it either (`clear_reviewed_latch/1`).
+      authored_push_pending: false,
+      # P7. `{reviewed, head, equal?}` — the last content-equality verdict
+      # `legacy_merge_decision/3` reached, so a stale item that the queue
+      # re-polls every tick (M3) re-fetches the two net diffs once per head,
+      # not once per tick.
+      content_checked: nil,
       # bd-df3zlo / #1736. The coverage read path's bounded wait, keyed on the
       # head it is waiting about: a new head is a new question, so both the
       # count and the one-page-per-episode latch reset.

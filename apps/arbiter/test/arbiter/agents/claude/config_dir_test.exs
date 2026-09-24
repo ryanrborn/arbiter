@@ -171,10 +171,16 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
     end
 
-    test "env/0 returns the CLAUDE_CONFIG_DIR pair pointing at the isolated dir", %{
+    test "env/0 returns the CLAUDE_CONFIG_DIR pair and an explicit token unset", %{
       target: target
     } do
-      assert ConfigDir.env() == [{"CLAUDE_CONFIG_DIR", target}]
+      # {..., false} is Port.open's "unset this var" pair — required because
+      # a bare omission would leave an inherited server-process
+      # CLAUDE_CODE_OAUTH_TOKEN reaching the child unfiltered.
+      assert ConfigDir.env() == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
     end
 
     test "tolerates a source dir missing the seed files (auth falls back to env)", %{
@@ -191,7 +197,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
     end
   end
 
-  describe "ensure/0 + env/0 with CLAUDE_CODE_OAUTH_TOKEN set (bd-6umoh9)" do
+  describe "ensure/0 + env/0 with CLAUDE_CODE_OAUTH_TOKEN set (bd-6umoh9, kept flag-off per PR #1947)" do
     setup do
       prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
 
@@ -253,6 +259,17 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
 
       assert File.read!(Path.join(target, ".credentials.json")) ==
                File.read!(Path.join(source, ".credentials.json"))
+    end
+
+    test "env/0 explicitly unsets the token when nothing configures one", %{
+      target: target
+    } do
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      assert ConfigDir.env() == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false}
+             ]
     end
   end
 
@@ -405,11 +422,13 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
   end
 
   describe "ensure/0 when disabled" do
-    test "returns :disabled and env/0 is empty", %{target: target} do
+    test "returns :disabled and env/0 carries only the explicit token unset", %{target: target} do
       Application.put_env(:arbiter, :worker_isolate_config, false)
 
       assert ConfigDir.ensure() == :disabled
-      assert ConfigDir.env() == []
+      # Isolation being off only drops the CLAUDE_CONFIG_DIR pair — the token
+      # unset still applies, since no token is configured in this setup.
+      assert ConfigDir.env() == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
       refute File.exists?(target)
     end
   end

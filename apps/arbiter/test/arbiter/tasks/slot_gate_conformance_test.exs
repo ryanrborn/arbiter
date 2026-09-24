@@ -5,15 +5,17 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
 
   The Conductor used to be a second dispatcher with its own slot arithmetic,
   and this file pinned the two together. #1965 deleted it, so the pairing that
-  matters now is the board's rendered `slots_free` / `agents_live` against the
-  shared predicate in `Arbiter.Tasks.SlotGate` — the thing `Board.Autopilot`
-  gates a new dispatch on. If `derive/1` ever grows its own rule again, these
-  worlds catch it.
+  matters now is the board's rendered `slots_free` (task occupancy, bd-45pwo1)
+  and `agents_live` (live agent sessions, unchanged since bd-aw2cyt) against
+  the shared predicates in `Arbiter.Tasks.SlotGate` — the things
+  `Board.Autopilot` gates a new dispatch on. If `derive/1` ever grows its own
+  rule again, these worlds catch it.
   """
   use ExUnit.Case, async: true
 
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.SlotGate
+  alias Arbiter.Worker.Phase
 
   @now ~U[2026-09-16 22:25:00Z]
 
@@ -107,18 +109,21 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
             paused: false
           })
 
-        assert board.slots_free == SlotGate.free(total, workers, basis),
+        assert board.slots_free == SlotGate.task_free(total, Phase.annotate(workers), basis),
                "board disagrees with SlotGate on free slots for #{name} (total=#{total}, basis=#{basis})"
 
+        assert board.slots_used == SlotGate.occupied_tasks(Phase.annotate(workers), basis),
+               "board disagrees with SlotGate on task occupancy for #{name} (total=#{total}, basis=#{basis})"
+
         assert board.agents_live == SlotGate.occupied(workers, basis),
-               "board disagrees with SlotGate on occupancy for #{name} (total=#{total}, basis=#{basis})"
+               "board disagrees with SlotGate on agent occupancy for #{name} (total=#{total}, basis=#{basis})"
 
         refute board.slots_free < 0
       end
     end
   end
 
-  test "a cap full of live agents leaves nothing to promote, and a quiet record does not" do
+  test "a cap full of live agents leaves nothing to promote, and a finished task does not" do
     ready = %{
       id: "bd-ready",
       title: "Ready",
@@ -153,8 +158,13 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
     assert live.slots_free == 0
     assert live.promote == nil
 
+    # bd-45pwo1: an agent-less record no longer frees the slot by itself — the
+    # task is still in flight (`:handing_off`) until it finishes or parks for
+    # a human. Only a `:completed` worker (merged/closed) does.
     quiet =
-      Snapshot.derive(Map.put(common, :workers, [worker("bd-1", :running, %{agent_live: false})]))
+      Snapshot.derive(
+        Map.put(common, :workers, [worker("bd-1", :completed, %{agent_live: false})])
+      )
 
     assert quiet.slots_free == 1
     assert quiet.promote == ready.id

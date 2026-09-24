@@ -254,7 +254,10 @@ defmodule Arbiter.Agents.Claude do
     # `ConfigDir.env/0` sees only the arbiter server's own process env, which
     # on a `worker_env` install is never where the token lives. Dispatch and
     # the ReviewGate both put `:workspace` on the adapter opts; a bare adapter
-    # call (no workspace) still falls back to the server env.
+    # call (no workspace) takes the install-wide account credential with
+    # `:provider_accounts_enabled` on, and falls back to the legacy chain
+    # (server env, then install-wide-unambiguous workspace token) with it off
+    # — kept per the operator's ruling on PR #1947 (P4, bd-cblemv round 2).
     ConfigDir.env(Keyword.get(opts, :workspace)) ++ api_key_env(opts)
   end
 

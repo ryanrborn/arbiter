@@ -33,6 +33,8 @@ defmodule Arbiter.Board.AutopilotTest do
     defaults = [
       name: nil,
       interval_ms: :never,
+      debounce_ms: 20,
+      topics: [],
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 
@@ -47,6 +49,23 @@ defmodule Arbiter.Board.AutopilotTest do
 
     {:ok, pid} = Autopilot.start_link(Keyword.merge(defaults, opts))
     pid
+  end
+
+  # Waits for any in-flight dispatch (including one an immediate follow-up
+  # pass started on its own) to finish, so a test can drive a deterministic
+  # next step instead of racing the autopilot's own background activity.
+  defp await_idle(pid, tries \\ 200) do
+    case :sys.get_state(pid) do
+      %{dispatching: nil} ->
+        :ok
+
+      _ when tries > 0 ->
+        Process.sleep(2)
+        await_idle(pid, tries - 1)
+
+      _ ->
+        flunk("autopilot never returned to idle")
+    end
   end
 
   describe "promotion" do
@@ -385,10 +404,13 @@ defmodule Arbiter.Board.AutopilotTest do
       # A fresh failure right after the success should compute its backoff at
       # count: 1 (the base backoff window), not carry the earlier failure's
       # count forward — proof the success actually cleared the entry rather
-      # than just leaving a stale `retry_not_before` behind.
+      # than just leaving a stale `retry_not_before` behind. The successful
+      # dispatch above schedules its own immediate follow-up pass
+      # (bd-axgpec), so this fresh failure arrives on its own rather than
+      # needing another explicit tick.
       before_next_failure = Agent.get(clock, & &1)
-      assert {:error, {:auth_check_failed, _}} = Autopilot.tick(pid)
       assert_receive {:dispatch_attempt, "bd-1"}
+      await_idle(pid)
 
       assert {:held, "bd-1", held_until} = Autopilot.tick(pid)
       assert DateTime.compare(held_until, DateTime.add(before_next_failure, 30, :second)) != :gt
@@ -528,6 +550,280 @@ defmodule Arbiter.Board.AutopilotTest do
 
       Autopilot.resume(pid)
       assert_receive {:board_scheduler, :resumed}
+    end
+  end
+
+  describe "reactive triggers (bd-axgpec)" do
+    # Every test here uses `interval_ms: :never` (the `start/1` default) so
+    # any dispatch it sees can only have come from the reactive path, never
+    # the fallback tick.
+
+    test "a task closing runs a pass without waiting for the tick" do
+      pid = start(paused: false)
+
+      send(pid, {:task_lifecycle, :closed, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a card promoted to Ready (refined) runs a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:task_lifecycle, :updated, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a worker finishing runs a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:event, %{topic: "worker_done", task_id: "bd-9"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a worker failing runs a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:event, %{topic: "worker_failed", task_id: "bd-9"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "an unrelated event topic does not run a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:event, %{topic: "inbox", task_id: "bd-9"}})
+
+      refute_receive {:dispatched, _}, 100
+    end
+
+    # These three drive the trigger through a real `Phoenix.PubSub.broadcast/3`
+    # instead of `send/2`, so they actually exercise the `subscribe` calls in
+    # `init/1` (and would fail if those were deleted or pointed at the wrong
+    # topic). Each uses its own private topic — passed via `:topics` — rather
+    # than the real "tasks"/"events" topics, so it isn't exposed to unrelated
+    # broadcasts from other async tests in the suite.
+    test "the default topics are exactly what Issue.broadcast_lifecycle/2 and Events broadcast on" do
+      # Guards against a silent regression where `@tasks_topic`/`@events_topic`
+      # (or the default passed to `Keyword.get(opts, :topics, ...)` in `init/1`)
+      # drift from the strings the rest of the app actually broadcasts on —
+      # every other test in this describe block passes a private `:topics`
+      # list, so none of them would catch that.
+      assert Autopilot.default_topics() == ["tasks", "events"]
+    end
+
+    test "a task closing runs a pass over the real default topics, with no :topics override" do
+      # `start/1` always injects a `:topics` default of its own (usually `[]`,
+      # to keep the rest of this suite isolated from real broadcasts), so it
+      # cannot be used here — this test needs `init/1`'s own default, meaning
+      # no `:topics` key at all in the opts `Autopilot.start_link/1` sees.
+      test = self()
+
+      {:ok, _pid} =
+        Autopilot.start_link(
+          name: nil,
+          interval_ms: :never,
+          debounce_ms: 20,
+          paused: false,
+          follow_up: false,
+          snapshot: fn opts -> board("bd-1", opts[:paused]) end,
+          dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+        )
+
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, "tasks", {:task_lifecycle, :closed, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a task closing runs a pass when delivered over real PubSub" do
+      topic = "autopilot-test-tasks-#{System.unique_integer([:positive])}"
+      _pid = start(paused: false, topics: [topic])
+
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, topic, {:task_lifecycle, :closed, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a dependency edge add/remove runs a pass when delivered over real PubSub" do
+      # `Arbiter.Tasks.Dependencies.broadcast_endpoints/2` reloads each
+      # endpoint and re-broadcasts it as `{:task_lifecycle, :updated, issue}`
+      # on the "tasks" topic — the same shape used here.
+      topic = "autopilot-test-tasks-#{System.unique_integer([:positive])}"
+      _pid = start(paused: false, topics: [topic])
+
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, topic, {:task_lifecycle, :updated, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a worker finishing runs a pass when delivered over real PubSub" do
+      topic = "autopilot-test-events-#{System.unique_integer([:positive])}"
+      _pid = start(paused: false, topics: [topic])
+
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        topic,
+        {:event, %{topic: "worker_done", task_id: "bd-9"}}
+      )
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a burst of triggers in quick succession yields exactly one pass" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+      {:ok, dispatched?} = Agent.start_link(fn -> false end)
+
+      pid =
+        start(
+          paused: false,
+          # A dispatched card leaves Ready, same as a real snapshot after a
+          # real (synchronous) status transition to :in_progress — otherwise
+          # every pass, including a legitimate follow-up, would promote the
+          # same card again and this test couldn't tell a coalesced burst
+          # from an (incorrect) uncapped redispatch loop.
+          snapshot: fn opts ->
+            promote = if Agent.get(dispatched?, & &1), do: nil, else: "bd-1"
+            board(promote, opts[:paused])
+          end,
+          dispatch: fn id ->
+            Agent.update(dispatched?, fn _ -> true end)
+            Agent.update(counter, &(&1 + 1))
+            send(test, {:dispatched, id})
+            {:ok, %{task_id: id}}
+          end
+        )
+
+      for _ <- 1..5, do: send(pid, {:task_lifecycle, :updated, %{id: "bd-2"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+      # Give any (incorrect) extra passes time to land before checking the
+      # count — the debounce window is 20ms, so 200ms is generous.
+      Process.sleep(200)
+      assert Agent.get(counter, & &1) == 1
+    end
+
+    test "triggers while paused do not dispatch" do
+      pid = start(paused: true)
+
+      send(pid, {:task_lifecycle, :closed, %{id: "bd-2"}})
+      send(pid, {:event, %{topic: "worker_done"}})
+
+      refute_receive {:dispatched, _}, 200
+    end
+
+    test "a trigger during an in-flight dispatch queues one re-plan for when it completes" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      # The first attempt fails (not a success) so the only thing that can
+      # cause a second, automatic attempt is the trigger queued while it was
+      # in flight — a successful dispatch's own immediate follow-up (tested
+      # separately) is deliberately ruled out here.
+      dispatch_fun = fn id ->
+        case Agent.get_and_update(counter, &{&1, &1 + 1}) do
+          0 ->
+            send(test, {:dispatch_started, id, self()})
+            assert_receive :release, 2_000
+            send(test, {:dispatched, id})
+            {:error, :boom}
+
+          _ ->
+            send(test, {:dispatched, id})
+            {:ok, %{task_id: id}}
+        end
+      end
+
+      pid = start(paused: false, dispatch: dispatch_fun)
+
+      spawn_link(fn -> Autopilot.tick(pid, 5_000) end)
+      assert_receive {:dispatch_started, "bd-1", task}
+
+      # This trigger lands mid-dispatch, when a fresh pass would just read
+      # {:busy, "bd-1"} — it must not be dropped.
+      send(pid, {:task_lifecycle, :closed, %{id: "bd-2"}})
+      refute_receive {:dispatched, _}, 100
+
+      send(task, :release)
+
+      # The first (failed) attempt completes...
+      assert_receive {:dispatched, "bd-1"}, 500
+      # ...and the queued re-plan from the trigger above runs once it does,
+      # with no further external trigger or explicit tick.
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a successful dispatch runs an immediate follow-up pass while cards remain" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      snapshot_fun = fn opts ->
+        promote =
+          case Agent.get(counter, & &1) do
+            0 -> "bd-1"
+            1 -> "bd-2"
+            _ -> nil
+          end
+
+        board(promote, opts[:paused])
+      end
+
+      dispatch_fun = fn id ->
+        Agent.update(counter, &(&1 + 1))
+        send(test, {:dispatched, id})
+        {:ok, %{task_id: id}}
+      end
+
+      pid = start(paused: false, snapshot: snapshot_fun, dispatch: dispatch_fun)
+
+      assert {:ok, "bd-1"} = Autopilot.tick(pid)
+
+      # No second `tick/2` call: the successful dispatch above should have
+      # scheduled its own follow-up pass, which finds "bd-2" still Ready.
+      assert_receive {:dispatched, "bd-2"}, 500
+    end
+
+    test "a pass that dispatches nothing does not reschedule itself" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      pid =
+        start(
+          paused: false,
+          snapshot: fn _ -> board(nil) end,
+          dispatch: fn id ->
+            Agent.update(counter, &(&1 + 1))
+            send(test, {:dispatched, id})
+            {:ok, %{task_id: id}}
+          end
+        )
+
+      assert :idle = Autopilot.tick(pid)
+
+      refute_receive {:dispatched, _}, 300
+      assert Agent.get(counter, & &1) == 0
+    end
+
+    test "a failed dispatch with no pending trigger does not reschedule itself" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn id ->
+            Agent.update(counter, &(&1 + 1))
+            send(test, {:dispatched, id})
+            {:error, :boom}
+          end
+        )
+
+      assert {:error, :boom} = Autopilot.tick(pid)
+      assert_receive {:dispatched, "bd-1"}
+
+      refute_receive {:dispatched, _}, 300
+      assert Agent.get(counter, & &1) == 1
     end
   end
 end

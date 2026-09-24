@@ -751,6 +751,14 @@ defmodule Arbiter.Worker.ReviewGate do
       # that landed on the target AFTER the branch was cut are never attributed
       # to the branch. nil when no worktree / git is unavailable.
       base_sha: nil,
+      # P7 (bd-60r6wp / #1738, §4.5): the covered commit this gate's review is
+      # scoped FROM, when the head descends from one — the post-approval
+      # fix-pass shape. Resolved once, at reviewer spawn, by
+      # `with_delta_scope/1`; nil means an ordinary whole-branch review. Only
+      # the reviewer prompt reads it: the coverage row an APPROVE writes still
+      # fingerprints the whole `diff_range/1`, because that row has to describe
+      # everything the PR would merge.
+      delta_base_sha: nil,
       # bd-6r8caj: the findings still open against this work, carried across
       # rounds with stable `F<round>.<n>` ids. A round that rejects appends its
       # own findings and drops the ones the round dispositioned as addressed or
@@ -891,7 +899,7 @@ defmodule Arbiter.Worker.ReviewGate do
         escalate_pre_review(state, reason, :empty_diff)
 
       :ok ->
-        launch_first_reviewer(state)
+        state |> with_delta_scope() |> launch_first_reviewer()
     end
   end
 
@@ -1217,9 +1225,16 @@ defmodule Arbiter.Worker.ReviewGate do
   # A stale exit from an worker we've moved on from.
   def handle_info({:worker_exited, _other, _status}, state), do: {:noreply, state}
 
-  # Timeouts are tagged with the attempt that scheduled them so a stale timer
-  # from a prior pass can't escalate a pass that has already advanced.
-  def handle_info({:timeout, _attempt}, %{reported?: true} = state), do: {:noreply, state}
+  # Timeouts are tagged with the {round, attempt} pair that scheduled them so
+  # a stale timer from a prior pass can't escalate a pass that has already
+  # advanced. `attempt` alone is not enough (bd-28u8v4): it resets to 0 at the
+  # start of every round (bd-bgeo6i, so reprompt budgets start fresh), so
+  # round N's implementer and round N+1's implementer are both launched as the
+  # same attempt number and a timer armed for the former would otherwise be
+  # accepted as belonging to the latter. `round` never repeats within a gate's
+  # lifetime, so the pair is unique for as long as the gate runs.
+  def handle_info({:timeout, _round, _attempt}, %{reported?: true} = state),
+    do: {:noreply, state}
 
   # A reviewing pass hit the ceiling. Before escalating as timed-out, retry the
   # pass once with a fresh reviewer mind (bd-78vg4v): a hung / overloaded session
@@ -1227,8 +1242,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # attempt converges where the first stalled. Only the reviewing phase is
   # retried — a revising (implementer) pass still escalates on timeout below.
   def handle_info(
-        {:timeout, attempt},
-        %{attempt: attempt, phase: :reviewing, timeout_retries_left: budget} = state
+        {:timeout, round, attempt},
+        %{round: round, attempt: attempt, phase: :reviewing, timeout_retries_left: budget} =
+          state
       )
       when budget > 0 and is_binary(state.current_prompt) do
     Logger.warning(
@@ -1258,7 +1274,7 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  def handle_info({:timeout, attempt}, %{attempt: attempt} = state) do
+  def handle_info({:timeout, round, attempt}, %{round: round, attempt: attempt} = state) do
     Logger.warning(
       "ReviewGate: #{state.phase} pass timed out for task=#{state.task_id} (round #{state.round})"
     )
@@ -1266,7 +1282,7 @@ defmodule Arbiter.Worker.ReviewGate do
     escalate_timeout(state)
   end
 
-  def handle_info({:timeout, _stale}, state), do: {:noreply, state}
+  def handle_info({:timeout, _stale_round, _stale_attempt}, state), do: {:noreply, state}
 
   # Author died before we could report — nothing to do.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{author: pid} = state) do
@@ -1397,10 +1413,7 @@ defmodule Arbiter.Worker.ReviewGate do
         run_verdict_guard(:missing_criteria, state, findings)
 
       true ->
-        record_round(state, :review, :approve, findings, converged: true)
-        stamp_reviewed_head(state)
-        record_review_coverage(state)
-        {:done, finish(state, verdict)}
+        finalize_approval(state, verdict, findings)
     end
   end
 
@@ -1421,6 +1434,67 @@ defmodule Arbiter.Worker.ReviewGate do
         handle_reject(state, findings)
     end
   end
+
+  # bd-aq81qz / G20: an APPROVE whose net diff against the target branch is
+  # empty must not proceed to merge. This is the shape `empty_diff_guard/1`
+  # (G2) does NOT catch: the branch has real commits ahead of the target
+  # (`head_sha != base_sha`), most often because those commits were already
+  # squashed onto the target independently and this branch then merged the
+  # target back in — `base_sha..HEAD` nets to nothing even though HEAD moved.
+  #
+  # `NetDiff.local_diff_blank?/2` runs the same `git diff` the coverage write
+  # would fingerprint, but answers `{:ok, blank?}` only when git actually ran
+  # — unlike `coverage_net_diff_id/1` (built on `fingerprint_local/2`), whose
+  # `nil`/`{:error, :no_net_diff}` also covers a git failure (a `base_sha` not
+  # present in the worktree, a lock or index error). Reusing that broader
+  # signal here would misread a transient git failure as proof of emptiness
+  # and park a legitimate APPROVE; only a confirmed `{:ok, true}` parks.
+  #
+  # Gated on `worktree_on_expected_branch?/1` for the same reason
+  # `reviewer_commit_check/1` and `commit_gate/1` already are: some test
+  # setups (notably ReviewGateTest) reuse the repo itself as the "worktree"
+  # with HEAD left on `target_branch`, not on the task branch. There the
+  # local diff is *always* empty regardless of the branch's real content — a
+  # fixture artifact, not evidence of nothing to merge — so treating it as
+  # G20 would misfire on every such test. Production worktrees provisioned
+  # via `Worktree.create/3` are always checked out on the per-task branch, so
+  # the guard is fully live there.
+  defp finalize_approval(state, verdict, findings) do
+    empty_net_diff? =
+      worktree_on_expected_branch?(state) and
+        match?(
+          {:ok, true},
+          NetDiff.local_diff_blank?(Map.get(state, :worktree_path), diff_range(state))
+        )
+
+    if empty_net_diff? do
+      Logger.warning(
+        "ReviewGate: task=#{state.task_id} APPROVE nets to an empty diff against " <>
+          "the target branch (commits exist but contribute nothing); parking " <>
+          "`:empty_net_diff` instead of merging"
+      )
+
+      record_round(state, :review, :request_changes, findings, converged: false)
+      {:done, finish(state, {:parked, :empty_net_diff, findings})}
+    else
+      record_round(state, :review, :approve, findings, converged: true)
+      stamp_reviewed_head(state)
+      record_review_coverage(state)
+      {:done, finish(state, verdict)}
+    end
+  end
+
+  # Mirrors `reviewer_commit_check/1`'s and `Worker.commit_gate/1`'s branch
+  # guard: only trust the local diff when the worktree is actually checked out
+  # on the task's own branch. Some test setups reuse the repo itself as the
+  # "worktree" with HEAD left on `target_branch`, where the local diff is
+  # empty regardless of the branch's real content.
+  defp worktree_on_expected_branch?(%{worktree_path: wt, branch: branch})
+       when is_binary(wt) and is_binary(branch) do
+    match?({:ok, ^branch}, Arbiter.Worker.Worktree.current_branch(wt))
+  end
+
+  defp worktree_on_expected_branch?(_state), do: false
 
   # bd-4te55l: whether the reviewer's own findings disclose that it abandoned
   # verification (e.g. gave up waiting on a test run) before finalizing. A
@@ -3812,7 +3886,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     case spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
-        Process.send_after(self(), {:timeout, attempt}, timeout_ms)
+        Process.send_after(self(), {:timeout, state.round, attempt}, timeout_ms)
 
         {:ok,
          %{
@@ -4414,7 +4488,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
     #{head_sha_instruction(state)}
-    #{pr_review_block(state)}#{diff_guidance(state)}
+    #{scope_guidance(state)}
     Judge the change against the acceptance criteria AND for correctness,
     regressions, and obvious defects.
 
@@ -4751,6 +4825,156 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp work_so_far_briefing(_state), do: ""
+
+  # What the reviewer is told to read: the delta since the covered commit when
+  # this gate is scoped to one (P7), otherwise the whole branch — through the
+  # PR when one is open (bd-129xh4), and against the merge-base (bd-ased52).
+  defp scope_guidance(%{delta_base_sha: covered} = state) when is_binary(covered),
+    do: delta_guidance(state, covered)
+
+  defp scope_guidance(state), do: pr_review_block(state) <> diff_guidance(state)
+
+  # ---- P7: delta-scoped re-review (bd-60r6wp / #1738, §4.5) ----------------
+  #
+  # A head that DESCENDS from a commit the PR already has coverage for — the
+  # approved commit, then a CI fix pass's credo/dialyzer/test commit on top —
+  # was reviewed up to that commit. What no review has seen is the delta, so
+  # that is what this round reviews: the same new-diff-only compare ReviewPatrol
+  # re-reviews use, and a small round rather than a full re-review. §4.5 is
+  # explicit that the round is the right cost to pay: the alternative is fleet-
+  # authored content merging unreviewed (#1702, #1723, #1725).
+  #
+  # Scoped only when it is provably a delta, and every doubt resolves to the
+  # whole-branch review this gate always did (more review, never less):
+  #
+  #   * no coverage on the PR — a first review, or a fix round before any
+  #     approval (only an APPROVE writes coverage);
+  #   * the head is itself covered — nothing new to scope to;
+  #   * no covered commit is an ancestor of the head — a conflict resolver's
+  #     rebase rewrote history, so there is no commit range that is "the
+  #     delta", and a two-dot diff across it would show the target's changes;
+  #   * the range holds no commit of the branch's own (only merges from the
+  #     target, which carry no authored content — the Watchdog merges those on
+  #     a `:mechanical` row and never routes them here).
+  defp with_delta_scope(%{worktree_path: wt} = state) when is_binary(wt) do
+    case delta_base(state, wt) do
+      covered when is_binary(covered) ->
+        Logger.info(
+          "ReviewGate: task=#{state.task_id} head descends from covered commit " <>
+            "#{covered}; scoping this review to the delta #{covered}..HEAD"
+        )
+
+        %{state | delta_base_sha: covered}
+
+      nil ->
+        state
+    end
+  end
+
+  defp with_delta_scope(state), do: state
+
+  defp delta_base(state, wt) do
+    with [_ | _] = covered <- Coverage.covered_heads(coverage_mr_ref(state)),
+         {:ok, head} <- git_out(wt, ["rev-parse", "HEAD"]),
+         false <- head in covered,
+         base when is_binary(base) <- Enum.find(covered, &ancestor?(wt, &1, "HEAD")),
+         [_ | _] <- delta_commits(wt, base) do
+      base
+    else
+      _ -> nil
+    end
+  end
+
+  # The branch's own commits since `covered`: `--first-parent` keeps the
+  # target's commits that a merge brought in (the gate's own
+  # `update_from_target/2`, or an update-branch) out of the list, and
+  # `--no-merges` drops those merge commits themselves.
+  defp delta_commits(wt, covered) do
+    case git_out(wt, [
+           "log",
+           "--first-parent",
+           "--no-merges",
+           "--format=%h %s",
+           delta_range(covered)
+         ]) do
+      {:ok, out} -> String.split(out, "\n", trim: true)
+      :error -> []
+    end
+  end
+
+  defp delta_patch(wt, covered) do
+    case git_out(wt, [
+           "log",
+           "--first-parent",
+           "--no-merges",
+           "-p",
+           "--format=commit %h %s",
+           delta_range(covered)
+         ]) do
+      {:ok, patch} -> patch
+      :error -> ""
+    end
+  end
+
+  defp delta_range(covered), do: "#{covered}..HEAD"
+
+  # Larger than any lint/dialyzer/test fix; a delta past it is listed but not
+  # inlined, and the reviewer reads it with the command instead.
+  @delta_inline_limit 60_000
+
+  defp delta_guidance(state, covered) do
+    wt = Map.get(state, :worktree_path)
+    commits = if is_binary(wt), do: delta_commits(wt, covered), else: []
+    patch = if is_binary(wt), do: delta_patch(wt, covered), else: ""
+
+    commit_list =
+      case commits do
+        [] -> "    (could not list them — use the command below)"
+        list -> Enum.map_join(list, "\n", &("    " <> &1))
+      end
+
+    """
+    SCOPE — DELTA REVIEW. This branch was already reviewed and APPROVED at commit
+    `#{covered}`, and that approval is on record. After it, the branch advanced
+    with new commits — typically a CI fix pass (a credo, dialyzer or test fix) or
+    another change made after the approval. No review has seen those commits yet,
+    and they are the ONLY thing under review here. Do not re-review the work up to
+    `#{covered}` and do not raise findings against it unless the new commits
+    break it.
+
+    The commits under review (this branch's own since `#{covered}`; merges from
+    `#{state.target_branch}` excluded):
+
+    #{commit_list}
+
+    Read them with:
+
+        git log --first-parent --no-merges -p #{delta_range(covered)}
+
+    #{inline_delta(patch)}
+    Judge whether the delta is correct, whether it regresses or undermines the
+    approved work, and whether it is only what it claims to be — a lint or type
+    fix that changes behaviour is a finding. For any CRITERIA breakdown, a
+    criterion these commits do not touch stands as approved at `#{covered}`: mark
+    it [MET] unless the delta breaks it.
+    """
+  end
+
+  defp inline_delta(""), do: ""
+
+  defp inline_delta(patch) when byte_size(patch) > @delta_inline_limit do
+    "(The delta is #{byte_size(patch)} bytes — too large to inline; read it with the command above.)\n"
+  end
+
+  defp inline_delta(patch) do
+    """
+    The delta, as of this review's dispatch:
+
+    ```diff
+    #{patch}
+    ```
+    """
+  end
 
   # bd-ased52: tell the reviewer to diff against the merge-base (the fork point),
   # NOT the moving target tip. When `base_sha` is known (the normal path, after

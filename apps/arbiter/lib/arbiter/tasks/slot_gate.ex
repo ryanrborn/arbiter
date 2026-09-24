@@ -58,6 +58,42 @@ defmodule Arbiter.Tasks.SlotGate do
   behaviour back when quota loosens:
 
       config :arbiter, conductor_slot_basis: :issues
+
+  ## A slot is a task, not an agent (bd-45pwo1)
+
+  `occupies_slot?/2` / `occupied/2` above answer "is an agent burning quota
+  right now" — useful for the `agents live: X of N` header, and left alone.
+  They are **not** what gates a new dispatch any more.
+
+  The operator's rule (2026-09-21, restated 2026-09-22): "another slot
+  doesn't open until the issue occupying it is merged." A slot belongs to
+  the **task**, from dispatch until its PR merges (or it closes, fails,
+  stops, or parks for a human) — not to whichever agent happens to be live
+  for it at the moment the board is drawn. Under the agent-liveness rule
+  alone, a task sitting between ReviewGate rounds (no agent live, but not
+  done either) held no slot, and the fleet ran three author tasks at once
+  against a cap of two.
+
+  `occupied_tasks/2` counts this instead: one slot per distinct task whose
+  `Arbiter.Worker.Phase` is not released. A phase is released only at
+  `:done` (the worker completed — merged, closed, or otherwise finalized) or
+  `:waiting_on_you` (the worker asked a question, or parked failed — a human
+  might take arbitrarily long to answer, so a slot must not pin on that).
+  Every other phase — `:implementing`, `:in_review`, `:addressing_review`,
+  `:fixing_ci`, `:resolving_conflict`, `:waiting_ci_merge`, and
+  `:handing_off` (the gap between rounds) — still holds the slot. A worker
+  explicitly stopped drops out of the registry entirely, so it stops being
+  counted the same way a card would stop being rendered.
+
+  `occupied_tasks/2` takes the worker list already annotated with `:phase`
+  (`Arbiter.Worker.Phase.annotate/1`) rather than computing it itself:
+  `Phase` already aliases this module, so the reverse dependency would be
+  circular, and the board already annotates the list for its cards anyway.
+
+  Exactly one slot per task regardless of how many subordinate rounds
+  (reviewer, implementer, fix pass, conflict resolver) are live for it: only
+  the task's own author row is consulted, because `Phase.of/2` already folds
+  every sibling's liveness into that row's phase.
   """
 
   @typedoc "How a slot is counted."
@@ -175,7 +211,71 @@ defmodule Arbiter.Tasks.SlotGate do
     end
   end
 
+  # Phases that release a task's slot early. See the moduledoc's "A slot is
+  # a task, not an agent" section for why only these two.
+  @released_phases [:done, :waiting_on_you]
+
+  # A reviewer / implementer / fix pass / conflict resolver never holds a
+  # second slot for the task it belongs to — `occupied_tasks/2` counts from
+  # each task's own author row only.
+  @subordinate_roles [:reviewer, :implementer, :fix_pass, :conflict_resolver]
+
+  @doc """
+  Does this phase still hold a task's slot? False only at `:done` or
+  `:waiting_on_you` — see the moduledoc.
+  """
+  @spec task_occupies_slot?(atom()) :: boolean()
+  def task_occupies_slot?(phase) when is_atom(phase), do: phase not in @released_phases
+
+  @doc """
+  How many distinct tasks occupy a slot, given `annotated_workers` — the full
+  worker list with `:phase` already stamped
+  (`Arbiter.Worker.Phase.annotate/1`).
+
+  Under `:agents` (the default), one slot per task whose phase is not
+  released (`task_occupies_slot?/1`), read off the task's own author row —
+  a live reviewer, implementer, fix pass or conflict resolver never adds a
+  second slot for the same task. Under `:issues`, falls back to the
+  pre-bd-aw2cyt per-record rule (`record_slot?/1`), deduplicated by task id
+  so a fix pass or conflict resolver sharing its author's task id does not
+  double-count either.
+  """
+  @spec occupied_tasks([map()], basis() | nil) :: non_neg_integer()
+  def occupied_tasks(annotated_workers, basis \\ nil) when is_list(annotated_workers) do
+    case normalize_basis(basis) do
+      :issues -> issues_task_count(annotated_workers)
+      :agents -> phase_task_count(annotated_workers)
+    end
+  end
+
+  @doc """
+  Task slots left out of `total`, mirroring `free/3` but for task occupancy
+  (`occupied_tasks/2`) rather than agent-session occupancy. Never negative,
+  for the same reason `free/3` never is.
+  """
+  @spec task_free(non_neg_integer(), [map()], basis() | nil) :: non_neg_integer()
+  def task_free(total, annotated_workers, basis \\ nil)
+      when is_integer(total) and is_list(annotated_workers) do
+    max(total - occupied_tasks(annotated_workers, basis), 0)
+  end
+
   # ---- internals ------------------------------------------------------------
+
+  defp phase_task_count(workers) do
+    workers
+    |> Enum.filter(&author_row?/1)
+    |> Enum.uniq_by(&Map.get(&1, :task_id))
+    |> Enum.count(&task_occupies_slot?(Map.get(&1, :phase)))
+  end
+
+  defp issues_task_count(workers) do
+    workers
+    |> Enum.filter(&record_slot?/1)
+    |> Enum.uniq_by(&Map.get(&1, :task_id))
+    |> length()
+  end
+
+  defp author_row?(worker), do: role_of(worker) not in @subordinate_roles
 
   defp agent_slot?(worker) do
     case agent_live(worker) do

@@ -346,8 +346,16 @@ defmodule Arbiter.Board.SnapshotTest do
       assert board.slots_free == 1
     end
 
-    test "a worker parked on its merge request is not holding a slot" do
+    test "a worker parked on its merge request still holds its task's slot" do
+      # bd-45pwo1: an open MR is not a merge — the task's slot stays held
+      # until it actually merges, closes, fails, or parks for a human.
       board = derive(slots_total: 2, workers: [worker("bd-1", :awaiting_review)])
+
+      assert board.slots_free == 1
+    end
+
+    test "a merged (:completed) worker frees its task's slot" do
+      board = derive(slots_total: 2, workers: [worker("bd-1", :completed)])
 
       assert board.slots_free == 2
     end

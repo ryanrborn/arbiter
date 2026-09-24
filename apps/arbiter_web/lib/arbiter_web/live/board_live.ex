@@ -559,6 +559,17 @@ defmodule ArbiterWeb.BoardLive do
   defp agents_live(board),
     do: Map.get(board, :agents_live) || length(Map.get(board, :running, []))
 
+  # bd-45pwo1: what the dispatch cap actually measures — one per task not
+  # yet done or parked for a human, not one per live agent. Differs from
+  # `agents_live/1` whenever a task sits between rounds or waits on CI/merge
+  # with no agent live for it right now; an older board map without the key
+  # falls back to `slots_total - slots_free`, which is what `slots_free` was
+  # already computed from.
+  defp slots_used(board) do
+    Map.get(board, :slots_used) ||
+      max(Map.get(board, :slots_total, 0) - Map.get(board, :slots_free, 0), 0)
+  end
+
   # The card's own line under the title: the phase it is in, which is what an
   # operator wants once the main agent has exited, falling back to the
   # workflow step for a card that has no phase (an older snapshot).
@@ -679,7 +690,7 @@ defmodule ArbiterWeb.BoardLive do
                 id="board-slots"
                 class="hidden sm:inline text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
               >
-                agents live: {agents_live(@board)} of {@board.slots_total} · {@board.slots_free} slots free
+                agents live: {agents_live(@board)} · slots used: {slots_used(@board)} of {@board.slots_total} · {@board.slots_free} slots free
               </span>
 
               <button

@@ -34,6 +34,32 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ ~s(aria-label="Copy issue id #{task.id}")
     end
 
+    test "both quota bars carry the provider's hue, not just the first (bd-gukyy1)", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [
+          {"anthropic-ratelimit-unified-5h-utilization", "0.24"},
+          {"anthropic-ratelimit-unified-7d-utilization", "0.1"}
+        ])
+
+      {:ok, task} = Ash.create(Issue, %{title: "pd-quota", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      fills =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query("main [data-quota-bar] [data-quota-fill]")
+        |> LazyHTML.attribute("style")
+
+      hue = ArbiterWeb.QuotaHelpers.quota_provider_hue("claude")
+      assert length(fills) == 2
+      assert Enum.all?(fills, &(&1 =~ "background-color: #{hue};"))
+    end
+
     test "tells the user when no worker is registered", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/workers/no-such-task")
       assert html =~ "No worker registered"

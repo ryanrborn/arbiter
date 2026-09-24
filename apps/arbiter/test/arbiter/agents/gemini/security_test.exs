@@ -17,15 +17,27 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       assert Security.permission_argv(mode("auto")) == []
     end
 
-    test "strict -> --sandbox" do
-      assert Security.permission_argv(mode("strict")) == ["--sandbox"]
+    test "strict -> no flag (bd-25ivqe: --sandbox drops the allowlist gate, see moduledoc)" do
+      assert Security.permission_argv(mode("strict")) == []
     end
   end
 
   describe "tool_permission/1 — the agy `toolPermission` value" do
     test "strict never resolves to always-proceed (bd-7s29yq AC1)" do
       refute Security.tool_permission(mode("strict")) == "always-proceed"
-      assert Security.tool_permission(mode("strict")) == "strict"
+    end
+
+    test "strict resolves to proceed-in-sandbox, not agy's own `strict` value (bd-25ivqe)" do
+      # agy's `toolPermission: "strict"` auto-denies every tool call in headless
+      # mode regardless of `permissions.allow` content — confirmed live against
+      # the installed agy 1.2.8: a bare `command(arb)`, a wildcard `command(*)`,
+      # and even the literal full command string all still came back
+      # `permission check failed for unsandboxed ...` under `"strict"`.
+      # `"proceed-in-sandbox"` is the value that actually consults
+      # `permissions.allow` headlessly (confirmed live the same way: the exact
+      # same settings document, only `toolPermission` changed, let an
+      # allow-listed command through and denied a non-allow-listed one).
+      assert Security.tool_permission(mode("strict")) == "proceed-in-sandbox"
     end
 
     test "auto and bypass are always-proceed — headless cannot answer a prompt" do
@@ -44,10 +56,10 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       assert settings["permissions"]["deny"] != []
     end
 
-    test "strict mode reports toolPermission strict, not the inherited always-proceed" do
+    test "strict mode reports toolPermission proceed-in-sandbox, not the inherited always-proceed" do
       settings = Security.settings(mode("strict"))
 
-      assert settings["toolPermission"] == "strict"
+      assert settings["toolPermission"] == "proceed-in-sandbox"
       assert settings["permissions"]["deny"] != []
     end
 
@@ -214,22 +226,31 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
     test "is pretty-printed, decodable JSON" do
       json = Security.settings_json(mode("strict"))
       assert {:ok, decoded} = Jason.decode(json)
-      assert decoded["toolPermission"] == "strict"
+      assert decoded["toolPermission"] == "proceed-in-sandbox"
     end
   end
 
-  # bd-7s29yq AC1. Both fixtures are REAL `init` events captured from the
-  # installed `agy` while implementing this ticket, one line of
-  # `agy -p ... --output-format stream-json`:
+  # bd-7s29yq / bd-25ivqe. All fixtures below are REAL events captured from
+  # the installed `agy` (1.2.8), one line of
+  # `agy -p ... --output-format stream-json`, against a `HOME` whose
+  # `settings.json` is `Security.settings_json/2`'s own output verbatim:
   #
-  #   * agy_init_strict.json    — HOME seeded by `Gemini.ConfigDir.ensure/1`
-  #     with a `:strict` policy (so `settings.json` came out of
-  #     `Security.settings_json/2` verbatim), spawned with `--sandbox`.
-  #   * agy_init_inherited.json — the pre-fix posture: HOME carrying the
+  #   * agy_init_strict.json          — the `init` event for a `:strict`
+  #     policy, argv WITHOUT `--sandbox` (this ticket's fix).
+  #   * agy_init_inherited.json       — the pre-fix posture: HOME carrying the
   #     operator's own `~/.gemini/antigravity-cli/settings.json`.
+  #   * agy_run_command_allowed.json  — `run_command("arb --version")`
+  #     against the bootstrap allow baseline: `state: "DONE"`, real output.
+  #   * agy_run_command_denied.json   — `run_command("mix test")`, NOT on the
+  #     allow list: `state: "ERROR"`, agy's real denial wording.
   #
-  # The second one is the control. It is what every agy worker reported before
-  # this change, and it is why the first assertion below is not vacuous.
+  # `agy_init_inherited.json` is the control: it is what every agy worker
+  # reported before bd-7s29yq, and it is why the first assertion below is not
+  # vacuous. The `run_command` pair is what closes bd-25ivqe's post-merge
+  # verification gap — the original fix asserted only on the *generated
+  # settings document*, never on agy's actual matching behavior, and that
+  # gap is exactly what let a non-functional `toolPermission: "strict"`
+  # merge and fail live.
   describe "AC1 — captured agy `init` events" do
     test "a :strict spawn against our generated settings does not report always-proceed" do
       event = fixture("agy_init_strict.json")
@@ -249,6 +270,26 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       |> Path.expand()
       |> File.read!()
       |> Jason.decode!()
+    end
+  end
+
+  describe "AC6 (post-merge verification gap) — captured `run_command` matching against the generated allow list" do
+    test "a bootstrap-allowed command (`arb`) actually runs, not just parses as allowed" do
+      event = fixture("agy_run_command_allowed.json")
+      step = event["step_update"]
+
+      assert step["state"] == "DONE"
+      assert step["tool_name"] == "run_command"
+      assert step["tool_info"]["parameters"]["CommandLine"] == "arb --version"
+      assert step["tool_info"]["output"] =~ "arb"
+    end
+
+    test "a command outside the allow list is auto-denied, not silently permitted" do
+      event = fixture("agy_run_command_denied.json")
+      step = event["step_update"]
+
+      assert step["state"] == "ERROR"
+      assert step["tool_info"]["error"]["message"] =~ "permission check failed"
     end
   end
 end

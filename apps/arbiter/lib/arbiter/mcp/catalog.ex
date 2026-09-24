@@ -76,7 +76,7 @@ defmodule Arbiter.MCP.Catalog do
   | `ci_mark_external` | worker, coordinator | `Arbiter.Worker.Watchdog.mark_ci_external/2` (bd-5mzzww) |
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
-  | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.status/1` |
+  | `scheduler_status` | coordinator | `Arbiter.Board.Drain.status/1` |
   | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
@@ -1009,7 +1009,12 @@ defmodule Arbiter.MCP.Catalog do
           "running while the primary is parked awaiting its merge. Check resumable before " <>
           "attempting to stop/resume: false indicates the task is blocked (e.g. awaiting " <>
           "merge queue or review gate) and cannot be safely touched. Never operate on a " <>
-          "subordinate row (role is not null) — the merge queue owns those passes.",
+          "subordinate row (role is not null) — the merge queue owns those passes. The " <>
+          "response always includes `workspace_id`: the workspace this call actually scoped " <>
+          "to (the `workspace` arg if given, else the caller's bound workspace, else the " <>
+          "installation default). An empty `workers: []` means no live workers in THAT " <>
+          "workspace, not that nothing is running anywhere — check `workspace_id` before " <>
+          "reading a zero count as \"everything died\".",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.worker_list/2
     },
@@ -1963,8 +1968,11 @@ defmodule Arbiter.MCP.Catalog do
       name: "scheduler_status",
       tiers: @coordinator,
       description:
-        "Return the current pause state of the board scheduler (autopilot). " <>
-          "Coordinator only.",
+        "Return the board scheduler's drain state: `state` is running, draining or " <>
+          "quiescent; `safe_to_restart` is true only when paused AND nothing is in flight; " <>
+          "`in_flight` lists every live piece of work — fix passes, conflict resolvers, " <>
+          "review rounds and dispatches keep running while paused. Check it before a " <>
+          "server restart. Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.scheduler_status/2
     },

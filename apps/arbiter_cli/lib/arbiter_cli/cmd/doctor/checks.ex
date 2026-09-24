@@ -5,7 +5,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   "green" has one definition everywhere.
   """
 
-  alias ArbiterCli.{Client, Workspace}
+  alias ArbiterCli.{Client, SchedulerState, Workspace}
 
   defmodule Result do
     @moduledoc false
@@ -33,7 +33,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_repos(),
       check_versions(),
       check_migrations(),
-      check_bind_address()
+      check_bind_address(),
+      check_restart_safety()
     ]
   end
 
@@ -567,5 +568,52 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
     end
+  end
+
+  # bd-9fgg04: "is it safe to restart?" is the question doctor is reached for.
+  # Informational like the bind-address check — never fatal, never blocks
+  # readiness (a deploy's own wait must not hang on a drain) — but a paused
+  # scheduler still draining is a [fail]: a restart now kills live work. A
+  # running scheduler is normal operation, so [ ok ], with the caveat spelled
+  # out. Only an unreadable state falls back to green, as the other
+  # informational checks do.
+  defp check_restart_safety do
+    case SchedulerState.fetch() do
+      {:ok, body} -> restart_safety_result(SchedulerState.state(body), body)
+      {:error, _} -> restart_safety(:ok, "could not determine — skipping", nil)
+    end
+  end
+
+  defp restart_safety_result("draining", body) do
+    lines = Enum.map(SchedulerState.entry_lines(body), &("\n          " <> &1))
+
+    restart_safety(
+      :fail,
+      "scheduler " <> SchedulerState.headline(body) <> Enum.join(lines),
+      "Wait for it to drain: `arb scheduler wait`, then restart promptly."
+    )
+  end
+
+  defp restart_safety_result("running", body) do
+    restart_safety(
+      :ok,
+      "scheduler #{SchedulerState.headline(body)} — to restart: " <>
+        "`arb scheduler pause && arb scheduler wait`",
+      nil
+    )
+  end
+
+  defp restart_safety_result(_state, body),
+    do: restart_safety(:ok, "scheduler " <> SchedulerState.headline(body), nil)
+
+  defp restart_safety(status, detail, hint) do
+    %Result{
+      name: "safe to restart",
+      status: status,
+      detail: detail,
+      hint: hint,
+      fatal: false,
+      blocks_readiness: false
+    }
   end
 end
