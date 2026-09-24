@@ -3234,9 +3234,25 @@ defmodule Arbiter.Worker.Watchdog do
   # requires the prior worker to be in a terminal state before it re-attaches).
   # What changes is what happens next — a bounded auto-resume, or, once that
   # budget is spent, an escalation that names the spent budget explicitly.
+  #
+  # bd-92mx1m: the failure is a hand-off (`slot_handoff: true`), not a park —
+  # the task keeps its slot so the auto-resume re-enters it uncapped, exactly
+  # as it would a fix round. Every arm that gives up on the resume drops the
+  # hand-off (`release_slot_handoff/1`) before paging, and only then is the
+  # worker parked for a human.
   defp handle_review_timeout(state, cap) do
-    safe(fn -> Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}) end)
+    safe(fn ->
+      Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}, slot_handoff: true)
+    end)
+
     attempt_auto_resume(state)
+  end
+
+  # The worker may already be gone — a deferred retry's own resume stops it —
+  # in which case there is nothing left holding the slot to release.
+  defp release_slot_handoff(state) do
+    safe(fn -> Worker.clear_slot_handoff(state.worker_pid) end)
+    :ok
   end
 
   # bd-di4t6d: one auto-resume decision, reachable twice — once from the poll
@@ -3573,6 +3589,8 @@ defmodule Arbiter.Worker.Watchdog do
   # "awaiting_review is stuck" notification is deliberately NOT also sent here,
   # because the whole point of this arm is one actionable message.
   defp park_and_escalate_resume_block(state, attempts, reason) do
+    release_slot_handoff(state)
+
     case safe(fn -> Arbiter.Tasks.ReviewPark.park(state.task_id, :resume_blocked) end) do
       {:ok, :already_parked, _issue} ->
         Logger.info(
@@ -3615,6 +3633,8 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp escalate_auto_resume_give_up(state, snap, attempts, reason) do
+    release_slot_handoff(state)
+
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} not auto-resumed " <>
         "(#{inspect(reason)}, #{attempts}/#{state.max_auto_resumes} attempts used); " <>
