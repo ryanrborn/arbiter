@@ -48,6 +48,7 @@ defmodule Arbiter.Workers.Reconciler do
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.PRPatrolSupervisor
@@ -240,10 +241,23 @@ defmodule Arbiter.Workers.Reconciler do
       |> Ash.Query.filter(status == :in_progress and is_nil(pr_ref))
       |> Ash.read!()
       |> Enum.reject(&(live_worker_for_issue?(&1) or review_only?(&1)))
+      # bd-92mx1m: work the restart cut off mid-flight still holds its slot and
+      # re-enters uncapped, so resume it first. A task that had parked or
+      # stopped before the restart then competes for whatever is left, and is
+      # deferred to the scheduler if nothing is.
+      |> Enum.sort_by(&(not ResumeSlot.cut_off_by_restart?(&1.id)))
 
     {resumed, escalated} =
       Enum.reduce(stuck, {0, 0}, fn issue, {res, esc} ->
         case resume_fun.(issue) do
+          {:ok, %{deferred: true}} ->
+            Logger.info(
+              "Workers.Reconciler: task #{issue.id} released its slot before the restart; " <>
+                "its resume is deferred until a worker slot frees"
+            )
+
+            {res + 1, esc}
+
           {:ok, _result} ->
             Logger.info(
               "Workers.Reconciler: resumed mid-flight task #{issue.id} from its preserved worktree"
@@ -330,7 +344,11 @@ defmodule Arbiter.Workers.Reconciler do
   defp patrol_established?({:error, {:already_started, _pid}}), do: true
   defp patrol_established?(_), do: false
 
-  defp default_resume(%Issue{id: task_id}), do: Dispatch.resume(task_id)
+  # bd-92mx1m: automatic. A task cut off mid-flight by the restart held its
+  # slot and passes `ResumeSlot` uncapped; one that had parked or stopped before
+  # the restart released it, and at a full cap is deferred to the scheduler.
+  defp default_resume(%Issue{id: task_id}),
+    do: Dispatch.resume(task_id, resume_origin: :automatic)
 
   defp escalate_stuck_issue(%Issue{} = issue, reason) do
     %Issue{id: task_id, pr_ref: pr_ref, workspace_id: workspace_id} = issue

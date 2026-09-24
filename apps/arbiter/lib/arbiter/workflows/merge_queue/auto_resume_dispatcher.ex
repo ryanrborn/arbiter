@@ -150,7 +150,16 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
           opts
       end
 
-    Dispatch.resume(task_id, Keyword.put(opts, :awaiting_review_resume_attempts, attempt))
+    # bd-92mx1m: an automatic resume. The Watchdog failed the worker as a slot
+    # hand-off, so this normally passes `ResumeSlot` uncapped; if the task has
+    # released its slot meanwhile and the cap is full, it is deferred to the
+    # scheduler rather than refused or let over the cap.
+    Dispatch.resume(
+      task_id,
+      opts
+      |> Keyword.put(:awaiting_review_resume_attempts, attempt)
+      |> Keyword.put(:resume_origin, :automatic)
+    )
   rescue
     e -> {:error, Exception.message(e)}
   catch

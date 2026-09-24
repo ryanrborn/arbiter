@@ -523,6 +523,14 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # `:arbiter, :resume_deferrer` — a module with `defer_resume/3`. The board
+  # autopilot everywhere but the test env, which records instead (see
+  # config/test.exs).
+  defp configured_deferrer do
+    module = Application.get_env(:arbiter, :resume_deferrer, Autopilot)
+    &module.defer_resume/3
+  end
+
   # An automatic resume at a full cap waits for a slot rather than failing or
   # going over: the board autopilot replays it with the caller's own options
   # the moment one frees, ahead of any new Ready dispatch. A scheduler that
@@ -530,7 +538,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp defer_resume(%Issue{id: task_id}, kind, opts, info) do
     require Logger
 
-    defer = Keyword.get(opts, :defer_resume, &Autopilot.defer_resume/3)
+    defer = Keyword.get_lazy(opts, :defer_resume, &configured_deferrer/0)
 
     case defer.(task_id, kind, Keyword.delete(opts, :defer_resume)) do
       :ok ->

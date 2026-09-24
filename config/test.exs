@@ -88,6 +88,13 @@ config :arbiter,
        :review_gate_fix_round_dispatcher,
        Arbiter.Test.StubFixRoundDispatcher
 
+# bd-92mx1m: an automatic resume of a task that released its slot, arriving at
+# a full cap, is deferred to `Arbiter.Board.Autopilot` — which would replay it
+# as a real `Dispatch.resume/2` whenever some later test frees a slot. Record
+# the deferral instead; tests that care assert against
+# `Arbiter.Test.StubResumeDeferrer`.
+config :arbiter, :resume_deferrer, Arbiter.Test.StubResumeDeferrer
+
 # bd-8y1i58: the app-wide limiter singleton outlives every individual test, and
 # a secondary-limit trip parks background traffic for a *wall-clock* cooldown.
 # One test stubbing a 403-with-headroom therefore poisoned every later test that

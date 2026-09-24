@@ -93,6 +93,10 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
       |> maybe_put(:repo, Map.get(args, :repo))
       |> maybe_put(:claude_command, Map.get(args, :claude_command))
       |> Keyword.put(:start_claude, Map.get(args, :start_claude, true))
+      # bd-92mx1m: automatic — a task whose worker already finished released
+      # its slot, so at a full cap the revise waits for one (deferred to the
+      # scheduler, `{:ok, %{deferred: true}}`) instead of going over the cap.
+      |> Keyword.put(:resume_origin, :automatic)
 
     case Dispatch.resume(task_id, resume_opts) do
       {:ok, info} -> {:ok, info}

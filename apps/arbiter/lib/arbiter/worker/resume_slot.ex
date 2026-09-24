@@ -149,7 +149,13 @@ defmodule Arbiter.Worker.ResumeSlot do
       ]
   end
 
-  defp cut_off_by_restart?(task_id) do
+  @doc """
+  Was `task_id`'s latest main run cut off by a restart rather than ended on its
+  own terms? What a task with no registered worker is judged by: such a task
+  was in flight, and still holds its slot.
+  """
+  @spec cut_off_by_restart?(String.t()) :: boolean()
+  def cut_off_by_restart?(task_id) do
     Run
     |> Ash.Query.filter(task_id == ^task_id and worker_type == :main)
     |> Ash.Query.sort(started_at: :desc)

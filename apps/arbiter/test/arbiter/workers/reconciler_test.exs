@@ -615,6 +615,44 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
+  # bd-92mx1m: a task the restart cut off mid-flight still holds its slot and
+  # re-enters uncapped, so it goes first; a task that had parked before the
+  # restart released its slot and competes for what is left.
+  test "resume sweep resumes restart-interrupted work before tasks that had parked" do
+    ws = create_workspace()
+    parked = create_issue(ws.id, %{status: :in_progress})
+    interrupted = create_issue(ws.id, %{status: :in_progress})
+
+    for {issue, attrs} <- [
+          {parked, %{status: :failed, failure_reason: ":review_gate_rejected"}},
+          {interrupted, %{status: :failed, failure_reason: "server restarted"}}
+        ] do
+      {:ok, _} =
+        Ash.create(
+          Run,
+          Map.merge(
+            %{task_id: issue.id, repo: "arbiter", workspace_id: ws.id, started_at: DateTime.utc_now()},
+            attrs
+          )
+        )
+    end
+
+    test_pid = self()
+
+    resume = fn %Issue{id: id} ->
+      send(test_pid, {:resumed, id})
+      if id == parked.id, do: {:ok, %{deferred: true, task_id: id}}, else: {:ok, %{task_id: id}}
+    end
+
+    assert {:ok, %{resumed: 2, escalated: 0}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+    # The mailbox is in call order.
+    assert_received {:resumed, first}
+    assert_received {:resumed, second}
+    assert [first, second] == [interrupted.id, parked.id]
+  end
+
   test "resume sweep skips when primary?: false" do
     ws = create_workspace()
     _issue = create_issue(ws.id, %{status: :in_progress})

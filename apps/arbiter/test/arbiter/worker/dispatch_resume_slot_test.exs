@@ -12,7 +12,11 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
+  alias Arbiter.Test.StubResumeDeferrer
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Workers.Reconciler
+  alias Arbiter.Workflows.MergeQueue.{AutoResumeDispatcher, ReviseDispatcher}
+  alias Arbiter.Workflows.ReviewGateFixRoundDispatcher
 
   require Ash.Query
 
@@ -61,6 +65,8 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
       restore(:conductor_system_max_concurrent, prior_cap)
       File.rm_rf!(tmp)
     end)
+
+    StubResumeDeferrer.reset()
 
     {:ok, a} = Ash.create(Issue, %{title: "task A (parked)", workspace_id: ws.id})
     {:ok, b} = Ash.create(Issue, %{title: "task B (admitted)", workspace_id: ws.id})
@@ -182,6 +188,61 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
                  defer_resume: fn _, _, _ -> {:error, :no_scheduler} end,
                  start_driver: false
                )
+    end
+  end
+
+  # Acceptance 3 / the PR's caller list: every automatic path tags its resume
+  # `:automatic`, so a slot-released task at a full cap is deferred to the
+  # scheduler (`:resume_deferrer`, a recording stub under test) — never
+  # refused like a human's, never let over the cap.
+  describe "every automatic caller defers at a full cap" do
+    setup %{ws: ws, a: a, b: b} do
+      first = park_a(a)
+      admit_b(ws, b)
+      %{first: first}
+    end
+
+    defp assert_deferred(result, task_id) do
+      assert {:ok, %{deferred: true, task_id: ^task_id}} = result
+      assert [{^task_id, :resume, opts}] = StubResumeDeferrer.deferrals()
+      assert opts[:resume_origin] == :automatic
+      opts
+    end
+
+    test "MergeQueue revise", %{a: a, first: first} do
+      a.id
+      |> then(&ReviseDispatcher.dispatch(%{task_id: &1, feedback: [], start_claude: false}))
+      |> assert_deferred(a.id)
+
+      assert Worker.whereis(a.id) == first.worker_pid
+    end
+
+    test "Watchdog auto-resume", %{a: a} do
+      opts =
+        %{task_id: a.id, attempt: 2}
+        |> AutoResumeDispatcher.resume()
+        |> assert_deferred(a.id)
+
+      # The attempt counter rides the replay, so the budget still binds.
+      assert opts[:awaiting_review_resume_attempts] == 2
+    end
+
+    test "ReviewGate fix round (when its hand-off was already given up)", %{a: a} do
+      %{task_id: a.id, attempt: 1, verdict: :request_changes, findings: "x"}
+      |> ReviewGateFixRoundDispatcher.dispatch()
+      |> assert_deferred(a.id)
+    end
+
+    test "the boot reconciler", %{a: a, first: first} do
+      # After a reboot nothing is registered for A, and its last run ended on
+      # its own terms (parked), so it released its slot.
+      Worker.stop(a.id, :normal)
+      refute Process.alive?(first.worker_pid)
+
+      assert {:ok, %{resumed: 1, escalated: 0}} = Reconciler.reconcile_resumable_tasks()
+      assert [{task_id, :resume, opts}] = StubResumeDeferrer.deferrals()
+      assert task_id == a.id
+      assert opts[:resume_origin] == :automatic
     end
   end
 
