@@ -58,6 +58,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Drain
   alias Arbiter.CircuitBreaker
   alias Arbiter.MCP.AgentConfig.Codex
@@ -77,6 +78,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
+  alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
@@ -104,8 +106,25 @@ defmodule Arbiter.Worker.Dispatch do
           security_mode: String.t() | atom() | nil,
           preflight: boolean(),
           agent_adapter: module() | nil,
-          depth: non_neg_integer()
+          depth: non_neg_integer(),
+          # bd-92mx1m, resume/2 and resume_session/2 only — see ResumeSlot.
+          resume_origin: :human | :automatic,
+          force_slot: boolean(),
+          slot_override_actor: String.t() | nil,
+          slot_admitted: boolean(),
+          defer_resume: (String.t(), :resume | :resume_session, keyword() -> :ok | term())
         ]
+
+  @typedoc """
+  What `resume/2` / `resume_session/2` return in place of a dispatch result
+  when an automatic resume was deferred until a slot frees (bd-92mx1m).
+  """
+  @type deferred_result :: %{
+          deferred: true,
+          task_id: String.t(),
+          cap: non_neg_integer(),
+          holders: [String.t()]
+        }
 
   @type dispatch_result :: %{
           task: Issue.t(),
@@ -298,7 +317,8 @@ defmodule Arbiter.Worker.Dispatch do
   `dispatch/2`. Resume-specific errors: `{:error, :no_outpost}`,
   `{:error, {:worker_active, status}}`, `{:error, :repo_unknown}`.
   """
-  @spec resume(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
+  @spec resume(String.t(), dispatch_opts()) ::
+          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
   def resume(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
@@ -312,7 +332,8 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
          target_branch <- resolve_target_branch(task, Keyword.put(opts, :repo, repo)),
-         {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch) do
+         {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch),
+         {:ok, opts} <- resume_slot(task, :resume, opts) do
       prior_run_id = latest_run_id(task_id)
 
       # bd-95lsjb: an auto-revise dispatch passes `:revise_feedback` — the
@@ -343,6 +364,9 @@ defmodule Arbiter.Worker.Dispatch do
 
       # Already inside this resume's Drain.track — skip dispatch/2's own.
       do_dispatch(task_id, resume_opts)
+    else
+      {:deferred, result} -> {:ok, result}
+      other -> other
     end
   end
 
@@ -395,7 +419,7 @@ defmodule Arbiter.Worker.Dispatch do
   `{:error, :repo_unknown}`.
   """
   @spec resume_session(String.t(), dispatch_opts()) ::
-          {:ok, dispatch_result()} | {:error, term()}
+          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
   def resume_session(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
@@ -408,7 +432,8 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
-         {:ok, session_id, session_provider} <- latest_session_id(task_id) do
+         {:ok, session_id, session_provider} <- latest_session_id(task_id),
+         {:ok, opts} <- resume_slot(task, :resume_session, opts) do
       prior_run_id = latest_run_id(task_id)
 
       # Free the registry slot the same way resume/2 does: a stopped worker
@@ -471,6 +496,58 @@ defmodule Arbiter.Worker.Dispatch do
 
       # Already inside this resume's Drain.track — skip dispatch/2's own.
       do_dispatch(task_id, resume_opts)
+    else
+      {:deferred, result} -> {:ok, result}
+      other -> other
+    end
+  end
+
+  # bd-92mx1m: may this resume re-enter the task at all, given the cap? Asked
+  # after every check that could refuse the resume on its own merits (a missing
+  # worktree is a better answer than a full cap) and before the prior worker is
+  # stopped, so a refusal or a deferral leaves the task exactly as it was. See
+  # `Arbiter.Worker.ResumeSlot` for the rule.
+  defp resume_slot(%Issue{} = task, kind, opts) do
+    admit_opts = [
+      origin: Keyword.get(opts, :resume_origin, :human),
+      force: Keyword.get(opts, :force_slot) == true,
+      actor: Keyword.get(opts, :slot_override_actor),
+      slot_admitted: Keyword.get(opts, :slot_admitted) == true
+    ]
+
+    case ResumeSlot.admit(task, admit_opts) do
+      {:ok, :forced} -> {:ok, Keyword.put(opts, :slot_cap_override, true)}
+      {:ok, _admitted} -> {:ok, opts}
+      {:defer, info} -> defer_resume(task, kind, opts, info)
+      {:error, _} = error -> error
+    end
+  end
+
+  # An automatic resume at a full cap waits for a slot rather than failing or
+  # going over: the board autopilot replays it with the caller's own options
+  # the moment one frees, ahead of any new Ready dispatch. A scheduler that
+  # cannot take it is a refusal — never a bypass.
+  defp defer_resume(%Issue{id: task_id}, kind, opts, info) do
+    require Logger
+
+    defer = Keyword.get(opts, :defer_resume, &Autopilot.defer_resume/3)
+
+    case defer.(task_id, kind, Keyword.delete(opts, :defer_resume)) do
+      :ok ->
+        Logger.info(
+          "Dispatch: deferred #{kind} of #{task_id} until a worker slot frees " <>
+            "(cap #{info.cap}, held by #{inspect(info.holders)})"
+        )
+
+        {:deferred, Map.put(info, :deferred, true)}
+
+      other ->
+        Logger.warning(
+          "Dispatch: could not defer #{kind} of #{task_id} (#{inspect(other)}); refusing it " <>
+            "at the full cap instead"
+        )
+
+        {:error, {:slot_cap_full, info}}
     end
   end
 
@@ -1287,6 +1364,10 @@ defmodule Arbiter.Worker.Dispatch do
           :review_gate_findings_digest,
           Keyword.get(opts, :review_gate_findings_digest)
         )
+        # bd-92mx1m: this resume went over a full concurrency cap by an
+        # explicit `force` (also written to the audit log as a
+        # `slot_cap_override` event by `ResumeSlot`).
+        |> put_if_present(:slot_cap_override, Keyword.get(opts, :slot_cap_override))
 
       _ ->
         base

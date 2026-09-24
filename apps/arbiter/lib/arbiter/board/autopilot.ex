@@ -61,6 +61,30 @@ defmodule Arbiter.Board.Autopilot do
   `scheduler paused` rather than a queue position, because a position implies
   a queue that is moving.
 
+  ## Deferred resumes go first (bd-92mx1m)
+
+  A task that released its slot — parked for a human, completed, stopped — and
+  is then resumed must re-acquire one (`Arbiter.Worker.ResumeSlot`). When an
+  *automatic* resume (the boot reconciler, a Watchdog auto-resume, a
+  MergeQueue revise) finds the cap full, `Arbiter.Worker.Dispatch` neither
+  fails it nor lets it go over: it hands it here with `defer_resume/4`, and
+  this process replays it — `Dispatch.resume/2` or `resume_session/2` with the
+  caller's own options plus `slot_admitted: true` — on the first pass that
+  sees a free slot.
+
+  A deferred resume is work already in progress, so it goes **ahead of** every
+  Ready card: while one is queued, no Ready card is promoted. For the same
+  reason a pause does not hold it back — a pause stops *new* board dispatches
+  and nothing else (`Arbiter.Board.Drain`). Queued resumes drain in arrival
+  order, one per pass like a promotion; a second deferral of the same task
+  replaces the options but keeps its place. A replay that finds the task
+  already resumed, closed or gone is dropped quietly; any other failure is
+  escalated once and dropped — the queue never retries it on its own.
+
+  The queue is in memory. A restart loses it, which is the same thing the
+  restart does to everything else in flight: the boot reconciler re-resumes
+  mid-flight tasks, and the patrols re-watch open PRs.
+
   ## A dispatch that keeps failing gets escalated (bd-a40f4q)
 
   `finish_dispatch/3`'s log-and-move-on above is right for a card's *first*
@@ -206,6 +230,7 @@ defmodule Arbiter.Board.Autopilot do
           | :paused
           | {:busy, String.t()}
           | {:held, String.t(), DateTime.t()}
+          | {:resumed, String.t()}
 
   @doc """
   The PubSub topic carrying `{:board_dispatched, task_id}` and
@@ -249,6 +274,9 @@ defmodule Arbiter.Board.Autopilot do
       pre-bd-axgpec behaviour it is asserting against.
     * `:snapshot` / `:dispatch` — seams for tests; default to
       `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/1`.
+    * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
+      replays a deferred resume. Defaults to `Dispatch.resume/2` /
+      `resume_session/2` (bd-92mx1m).
     * `:escalate` — seam for tests; defaults to `default_escalate/3`, which
       posts through `Arbiter.Messages.CoordinatorNotifier.dispatch_stuck/3`.
   """
@@ -303,14 +331,39 @@ defmodule Arbiter.Board.Autopilot do
   `dispatching` is the id of a promotion still in flight, or `nil`. A pause
   does not cancel one already under way — it runs to completion and starts a
   worker — so `Arbiter.Board.Drain` counts it as live work (bd-9fgg04).
+
+  `deferred_resumes` lists the task ids waiting for a slot, in the order they
+  will be resumed (bd-92mx1m).
   """
   @spec status(GenServer.server(), timeout()) :: %{
           paused?: boolean(),
           changed_at: DateTime.t() | nil,
           changed_by: String.t() | nil,
-          dispatching: String.t() | nil
+          dispatching: String.t() | nil,
+          deferred_resumes: [String.t()]
         }
   def status(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :status, timeout)
+
+  @doc """
+  Queue an automatic resume of `task_id` until a worker slot frees
+  (bd-92mx1m). `kind` is the `Arbiter.Worker.Dispatch` function to replay —
+  `:resume` or `:resume_session` — and `opts` the options it was called with.
+  See "Deferred resumes go first" above.
+
+  `{:error, :not_running}` when there is no scheduler to take it: the caller
+  must refuse the resume rather than bypass the cap.
+  """
+  @spec defer_resume(GenServer.server(), String.t(), :resume | :resume_session, keyword()) ::
+          :ok | {:error, term()}
+  def defer_resume(server \\ __MODULE__, task_id, kind, opts)
+      when is_binary(task_id) and kind in [:resume, :resume_session] and is_list(opts) do
+    case GenServer.whereis(server) do
+      nil -> {:error, :not_running}
+      _pid -> GenServer.call(server, {:defer_resume, task_id, kind, opts})
+    end
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
 
   @doc """
   Whether this install runs the autopilot at all. A board talking to a
@@ -347,6 +400,7 @@ defmodule Arbiter.Board.Autopilot do
       follow_up?: Keyword.get(opts, :follow_up, true),
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
+      resume: Keyword.get(opts, :resume, &default_resume/3),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
       # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
@@ -361,7 +415,10 @@ defmodule Arbiter.Board.Autopilot do
       # id => %{count:, shape:, escalated?:, retry_not_before:}.
       # See "A dispatch that keeps failing gets escalated" above, and
       # "A quota-exhausted pre-flight failure is held, not retried" below.
-      failures: %{}
+      failures: %{},
+      # bd-92mx1m: automatic resumes waiting for a free slot, oldest first:
+      # [%{task_id:, kind:, opts:}]. See "Deferred resumes go first" above.
+      deferred_resumes: []
     }
 
     schedule(interval)
@@ -391,8 +448,20 @@ defmodule Arbiter.Board.Autopilot do
        paused?: state.paused?,
        changed_at: state.paused_changed_at,
        changed_by: state.paused_changed_by,
-       dispatching: dispatching_id(state)
+       dispatching: dispatching_id(state),
+       deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id)
      }, state}
+  end
+
+  def handle_call({:defer_resume, task_id, kind, opts}, _from, state) do
+    entry = %{task_id: task_id, kind: kind, opts: opts}
+
+    deferred =
+      if Enum.any?(state.deferred_resumes, &(&1.task_id == task_id)),
+        do: Enum.map(state.deferred_resumes, &if(&1.task_id == task_id, do: entry, else: &1)),
+        else: state.deferred_resumes ++ [entry]
+
+    {:reply, :ok, request_plan(%{state | deferred_resumes: deferred})}
   end
 
   def handle_call({:paused, paused?, by}, _from, state) do
@@ -437,13 +506,22 @@ defmodule Arbiter.Board.Autopilot do
     {:noreply, request_plan(state)}
   end
 
+  # bd-92mx1m: a task parking for a human releases its slot without finishing
+  # or failing (a `worker_phase` to `waiting_on_you`), and so does a dropped
+  # slot hand-off. Only worth a pass while a deferred resume is waiting on
+  # exactly that.
+  def handle_info({:event, %{topic: "worker_phase", phase: phase}}, %{deferred_resumes: [_ | _]} = state)
+      when phase in ["waiting_on_you", "done"] do
+    {:noreply, request_plan(state)}
+  end
+
   # The dispatch task's result. Everything the old synchronous path did on the
   # way out of `dispatch/2` happens here instead — announce, log, answer the
   # ticks that were waiting on it.
   def handle_info({ref, result}, %{dispatching: %{ref: ref} = in_flight} = state)
       when is_reference(ref) do
     Process.demonitor(ref, [:flush])
-    {outcome, state} = finish_dispatch(state, in_flight.id, result)
+    {outcome, state} = finish(state, in_flight, result)
     reply_all(in_flight.waiters, outcome)
     state = %{state | dispatching: nil}
     {:noreply, after_dispatch(state, outcome)}
@@ -458,7 +536,12 @@ defmodule Arbiter.Board.Autopilot do
       ) do
     Logger.warning("board autopilot: dispatch of #{in_flight.id} died: #{inspect(reason)}")
 
-    state = record_failure(state, in_flight.id, {:exit, reason})
+    state =
+      case in_flight do
+        %{resume: _} -> finish_resume(state, in_flight.id, {:error, {:exit, reason}}) |> elem(1)
+        _ -> record_failure(state, in_flight.id, {:exit, reason})
+      end
+
     reply_all(in_flight.waiters, {:error, {:exit, reason}})
     state = %{state | dispatching: nil}
     {:noreply, after_dispatch(state, {:error, {:exit, reason}})}
@@ -473,7 +556,7 @@ defmodule Arbiter.Board.Autopilot do
   # runs on the next real trigger or the fallback tick anyway. Busy: don't
   # start a timer, just make sure the in-flight dispatch's completion runs
   # one more pass once it reports back.
-  defp request_plan(%{paused?: true} = state), do: state
+  defp request_plan(%{paused?: true, deferred_resumes: []} = state), do: state
 
   defp request_plan(%{dispatching: dispatching} = state) when not is_nil(dispatching),
     do: %{state | replan_after_dispatch: true}
@@ -505,8 +588,9 @@ defmodule Arbiter.Board.Autopilot do
   # trigger landed while this dispatch was in flight — a pass that dispatched
   # nothing must never reschedule itself, or a quiet board would tick itself
   # forever at debounce speed.
-  defp after_dispatch(%{follow_up?: true} = state, {:ok, _}),
-    do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
+  defp after_dispatch(%{follow_up?: true} = state, {result, _})
+       when result in [:ok, :resumed],
+       do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
 
   defp after_dispatch(%{replan_after_dispatch: true} = state, _outcome),
     do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
@@ -528,7 +612,9 @@ defmodule Arbiter.Board.Autopilot do
 
   # ---- one cycle -----------------------------------------------------------
 
-  defp promote(%{paused?: true} = state), do: {:paused, state}
+  # A pause holds back Ready cards only — never a deferred resume (see
+  # "Deferred resumes go first").
+  defp promote(%{paused?: true, deferred_resumes: []} = state), do: {:paused, state}
 
   # One promotion at a time. Not even the board read happens while a dispatch
   # is in flight: the world it would read is the one the running dispatch is
@@ -539,10 +625,43 @@ defmodule Arbiter.Board.Autopilot do
     {read_status, snapshot} = read_board(state, [])
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
-    case snapshot do
-      %{promote: id} when is_binary(id) -> promote_or_hold(state, id)
-      _ -> {:idle, state}
+    cond do
+      state.deferred_resumes != [] -> resume_or_wait(state, read_status, snapshot)
+      state.paused? -> {:paused, state}
+      is_binary(Map.get(snapshot, :promote)) -> promote_or_hold(state, snapshot.promote)
+      true -> {:idle, state}
     end
+  end
+
+  # bd-92mx1m: the oldest deferred resume takes the first free slot. Until one
+  # frees, nothing Ready is promoted either — the resumed task is already in
+  # progress and goes first. An unreadable board is not a free slot.
+  defp resume_or_wait(%{deferred_resumes: [next | rest]} = state, :ok, snapshot) do
+    if Map.get(snapshot, :slots_free, 0) > 0 do
+      {:started, start_resume(%{state | deferred_resumes: rest}, next)}
+    else
+      waiting(state)
+    end
+  end
+
+  defp resume_or_wait(state, _read_status, _snapshot), do: waiting(state)
+
+  defp waiting(%{paused?: true} = state), do: {:paused, state}
+  defp waiting(state), do: {:idle, state}
+
+  defp start_resume(state, %{task_id: id, kind: kind, opts: opts} = entry) do
+    fun = fn ->
+      try do
+        state.resume.(id, kind, Keyword.put(opts, :slot_admitted, true))
+      rescue
+        e -> {:error, e}
+      catch
+        :exit, reason -> {:error, {:exit, reason}}
+      end
+    end
+
+    task = spawn_dispatch(fun)
+    %{state | dispatching: %{ref: task.ref, id: id, waiters: [], resume: entry}}
   end
 
   # A quota-exhausted failure (bd-8lnnnt) is not transient the way a network
@@ -609,6 +728,32 @@ defmodule Arbiter.Board.Autopilot do
       _ -> Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fun)
     end
   end
+
+  defp finish(state, %{resume: _, id: id}, result), do: finish_resume(state, id, result)
+  defp finish(state, %{id: id}, result), do: finish_dispatch(state, id, result)
+
+  # The replay's outcome is final: a deferred resume is never re-queued by this
+  # process. Losing the race to another resume, or to a close, is not a
+  # failure — the task is already where the resume would have put it.
+  @benign_resume_errors [:worker_active, :task_closed, :task_not_found]
+
+  defp finish_resume(state, id, {:ok, _}) do
+    announce({:board_resumed, id})
+    {{:resumed, id}, state}
+  end
+
+  defp finish_resume(state, id, {:error, reason} = error) do
+    if error_shape(reason) in @benign_resume_errors do
+      Logger.info("board autopilot: deferred resume of #{id} dropped: #{inspect(reason)}")
+    else
+      Logger.warning("board autopilot: deferred resume of #{id} failed: #{inspect(reason)}")
+      state.escalate.(id, {:deferred_resume_failed, reason}, 1)
+    end
+
+    {error, state}
+  end
+
+  defp finish_resume(state, id, other), do: finish_resume(state, id, {:error, other})
 
   defp finish_dispatch(state, id, {:ok, _}) do
     announce({:board_dispatched, id})
@@ -723,6 +868,13 @@ defmodule Arbiter.Board.Autopilot do
   # board dispatch as one (bd-9fgg04), not just as "a dispatch".
   defp default_dispatch(id),
     do: Arbiter.Worker.Dispatch.dispatch(id, start_claude: true, dispatched_by: "autopilot")
+
+  # bd-92mx1m: the scheduler has just admitted this resume into a free slot,
+  # and the caller put `slot_admitted: true` on `opts` to say so.
+  defp default_resume(task_id, :resume, opts), do: Arbiter.Worker.Dispatch.resume(task_id, opts)
+
+  defp default_resume(task_id, :resume_session, opts),
+    do: Arbiter.Worker.Dispatch.resume_session(task_id, opts)
 
   defp dispatching_id(%{dispatching: %{id: id}}), do: id
   defp dispatching_id(_), do: nil
