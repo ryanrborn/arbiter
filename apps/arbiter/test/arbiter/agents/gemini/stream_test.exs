@@ -346,6 +346,14 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
     end
 
+    # `tool_info.error` is an object here — `%{"type" => ..., "message" => ...}`
+    # — matching the real shape captured live against the installed agy
+    # (1.2.8) while re-verifying bd-25ivqe's post-merge failure. An earlier
+    # version of this fixture guessed a bare string for `error` (agy's ERROR
+    # state was never captured live at the time); that guess is why the
+    # original bd-25ivqe fix passed every unit test yet still lost the
+    # denial detail (and never matched `permission_denial?/1`) against a
+    # real run — `tool_step_error_reason/1` unwraps this object shape.
     @error_tool_event %{
       "event" => "step_update",
       "step_update" => %{
@@ -356,7 +364,10 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
         "tool_info" => %{
           "name" => "run_command",
           "parameters" => %{"CommandLine" => "arb inbox bd-ci0y74"},
-          "error" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+          "error" => %{
+            "type" => "TOOL_ERROR",
+            "message" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+          }
         }
       }
     }
@@ -369,6 +380,14 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert {"⏴ run_command denied/failed", false} in lines
       assert Enum.any?(lines, fn {line, _} -> line =~ "permission check failed" end)
       assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
+    end
+
+    test "tool_step_error_reason also accepts a bare string (older/other build shape)" do
+      bare_string_event =
+        put_in(@error_tool_event, ["step_update", "tool_info", "error"], "boom")
+
+      lines = Stream.format_event(bare_string_event)
+      assert Enum.any?(lines, fn {line, _} -> line =~ "boom" end)
     end
 
     test "ERROR tool step activity names the denied command" do

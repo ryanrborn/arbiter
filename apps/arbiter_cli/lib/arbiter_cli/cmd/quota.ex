@@ -8,8 +8,9 @@ defmodule ArbiterCli.Cmd.Quota do
 
   * Claude: OAuth polling of Anthropic's `/api/oauth/usage` endpoint plus
     `anthropic-ratelimit-unified-*` headers captured from worker responses.
-    Stores the latest snapshot per workspace, including per-model weekly
-    breakdown and `extra_usage` overage (bd-8tpha6, bd-b0zody).
+    Stores the latest snapshot per account (P5, `docs/provider-account-design.md`
+    §6), including per-model weekly breakdown and `extra_usage` overage
+    (bd-8tpha6, bd-b0zody).
   * Codex: OpenAI session + weekly windows, refreshed by the quota probe using
     the `codex` CLI's stored token. Shows a short message until a snapshot has
     been captured (i.e. the CLI isn't authenticated on this host).
@@ -40,9 +41,16 @@ defmodule ArbiterCli.Cmd.Quota do
   and muscle memory keep working. `--json` gains `account` / `workspaces`
   keys and retains `workspace_id` for one release as a deprecated alias.
 
+  `--account` (P10, `docs/provider-account-design.md` §8) goes straight to
+  the account instead of through a workspace — a UUID, a `provider:slug`
+  ref, or a bare unambiguous slug (`arb account list` for slugs). Shows that
+  account's own total plus its per-workspace breakdown, with no workspace
+  lookup involved. `--workspace` and `--account` are mutually exclusive;
+  `--account` wins if both are given.
+
   Usage:
 
-      arb quota [--workspace <id|name>] [--json]
+      arb quota [--workspace <id|name> | --account <id|provider:slug|slug>] [--json]
 
   Defaults to the installation's default workspace. With `--json` emits the
   machine-readable snapshot; otherwise a short human-readable summary.
@@ -60,18 +68,32 @@ defmodule ArbiterCli.Cmd.Quota do
       rest = Output.drop_json(argv)
 
       {opts, _rest, _bad} =
-        OptionParser.parse(rest, switches: [workspace: :string], aliases: [w: :workspace])
+        OptionParser.parse(rest,
+          switches: [workspace: :string, account: :string],
+          aliases: [w: :workspace, a: :account]
+        )
 
-      params =
-        case Keyword.get(opts, :workspace) do
-          ws when is_binary(ws) and ws != "" -> [workspace: ws]
-          _ -> []
-        end
+      params = quota_params(opts)
 
       case Client.get("/api/quota", params) do
         {:ok, %{"data" => data}} -> emit(data, mode, params)
         {:error, err} -> Output.die(err)
       end
+    end
+  end
+
+  # `--account` bypasses the workspace lookup entirely, so it wins over
+  # `--workspace` when both are given rather than silently picking one.
+  defp quota_params(opts) do
+    case Keyword.get(opts, :account) do
+      acct when is_binary(acct) and acct != "" ->
+        [account: acct]
+
+      _ ->
+        case Keyword.get(opts, :workspace) do
+          ws when is_binary(ws) and ws != "" -> [workspace: ws]
+          _ -> []
+        end
     end
   end
 
@@ -84,8 +106,20 @@ defmodule ArbiterCli.Cmd.Quota do
     emit_claude(data)
     IO.puts("")
     emit_codex(data)
-    emit_google(data["gemini"], "Gemini CLI", provider_cost(data, "gemini_cli"))
-    emit_google(data["antigravity"], "Antigravity", provider_cost(data, "antigravity"))
+
+    emit_google(
+      data["gemini"],
+      "Gemini CLI",
+      provider_cost(data, "gemini_cli"),
+      data["gemini_credentials_expired"] == true
+    )
+
+    emit_google(
+      data["antigravity"],
+      "Antigravity",
+      provider_cost(data, "antigravity"),
+      data["gemini_credentials_expired"] == true
+    )
   end
 
   # §6: `--workspace` is a lookup shorthand for "the account this workspace
@@ -234,6 +268,17 @@ defmodule ArbiterCli.Cmd.Quota do
 
   defp emit_credentials_expired(_q), do: :ok
 
+  # bd-1fpjgx: same unmissable line as `emit_credentials_expired/1` above,
+  # generalised to Codex / Gemini CLI / Antigravity — each reads
+  # `CredentialWatchdog`'s live state via its own `*_credentials_expired`
+  # field rather than a per-row column, so it shows regardless of whether a
+  # quota snapshot has landed yet.
+  defp emit_credentials_expired_line(true, login_hint) do
+    IO.puts("  ⚠️  CREDENTIALS EXPIRED — re-authenticate: #{login_hint}")
+  end
+
+  defp emit_credentials_expired_line(_expired, _login_hint), do: :ok
+
   # bd-b7umwj: staleness is scoped per window, and the two windows go
   # opposite ways — say which is which rather than the old blanket
   # "dispatches may be incorrectly held", which was backwards for both.
@@ -273,11 +318,13 @@ defmodule ArbiterCli.Cmd.Quota do
   # Codex (OpenAI): windows already normalized to a 0..100 used-percent.
   defp emit_codex(%{"codex" => nil} = data) do
     IO.puts("Codex quota (#{scope_label(data, "codex")}):")
+    emit_credentials_expired_line(data["codex_credentials_expired"], "codex login")
     IO.puts("  #{data["codex_message"] || "(no Codex quota available)"}")
   end
 
   defp emit_codex(%{"codex" => c} = data) do
     IO.puts("Codex quota (#{scope_label(data, "codex")}):")
+    emit_credentials_expired_line(data["codex_credentials_expired"], "codex login")
     IO.puts("  plan:        #{c["plan"] || "—"}")
     IO.puts("  captured at: #{c["captured_at"] || "—"}")
     IO.puts("")
@@ -293,15 +340,16 @@ defmodule ArbiterCli.Cmd.Quota do
 
   # Live Cloud Code Assist snapshots (Gemini CLI / Antigravity). `nil` means
   # that CLI isn't authenticated on this host — stay quiet rather than noisy.
-  defp emit_google(nil, _label, _cost), do: :ok
+  defp emit_google(nil, _label, _cost, _credentials_expired), do: :ok
 
   # Pre-existing complexity 10 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp emit_google(snap, label, cost) do
+  defp emit_google(snap, label, cost, credentials_expired) do
     IO.puts("")
     IO.puts("#{label} quota (plan: #{snap["plan"] || "—"}):")
+    if credentials_expired, do: emit_credentials_expired_line(true, "agy (sign in again)")
 
     case snap["message"] do
       msg when is_binary(msg) and msg != "" -> IO.puts("  #{msg}")

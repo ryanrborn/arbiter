@@ -335,7 +335,8 @@ defmodule Arbiter.Test.StubMerger do
 
     Agent.get_and_update(@name, fn s ->
       s = Map.update(s, :diff_calls, [{ref, base, head}], &[{ref, base, head} | &1])
-      {{:ok, Map.get(Map.get(s, :diffs, %{}), {ref, head}, "")}, s}
+      default = "diff --git a/STUB b/STUB\n+unregistered get_diff for #{inspect({ref, head})}\n"
+      {{:ok, Map.get(Map.get(s, :diffs, %{}), {ref, head}, default)}, s}
     end)
   end
 

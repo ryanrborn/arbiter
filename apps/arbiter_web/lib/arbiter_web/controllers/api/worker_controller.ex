@@ -322,9 +322,8 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   def index(conn, _params) do
     children = Worker.list_children()
-    task_ids = Enum.map(children, & &1.task_id)
-    costs = Arbiter.Worker.Stats.task_costs_usd(task_ids)
-    render(conn, :index, children: children, costs: costs)
+    # bd-8vnuy3: settled + in-flight spend, per task — the issue page's figure.
+    render(conn, :index, children: children, costs: worker_costs(children))
   end
 
   def show(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
@@ -335,7 +334,13 @@ defmodule ArbiterWeb.Api.WorkerController do
       pid ->
         case Worker.state(pid) do
           %{} = snap ->
-            render(conn, :show, snapshot: Map.put(snap, :pid, pid))
+            # bd-aw2cyt: the task's other live rounds decide this row's phase.
+            snap = Map.put(snap, :pid, pid)
+
+            render(conn, :show,
+              snapshot: Map.put(snap, :phase, worker_phase(snap)),
+              cost: task_cost(task_id)
+            )
 
           _ ->
             show_historical(conn, task_id)
@@ -345,12 +350,36 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   def show(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
+  # Best-effort, like the ledger read it replaced: a failed cost read costs the
+  # listing its cost fields, not the listing.
+  defp worker_costs(children) do
+    Arbiter.Usage.LiveSpend.by_worker_task(children)
+  rescue
+    _ -> %{}
+  end
+
+  defp task_cost(task_id) do
+    task_id |> Arbiter.Usage.Estimate.fold_task_id() |> Arbiter.Usage.LiveSpend.for_task()
+  rescue
+    _ -> nil
+  end
+
+  # Best-effort sibling read: an unreadable supervisor just means the phase is
+  # derived from this row alone.
+  defp worker_phase(snap) do
+    Arbiter.Worker.Phase.of(snap, Worker.list_children())
+  rescue
+    _ -> Arbiter.Worker.Phase.of(snap, [])
+  catch
+    :exit, _ -> Arbiter.Worker.Phase.of(snap, [])
+  end
+
   # No live worker for this task — fall back to the most recent durable
   # `Run` row so a finished/exited run is still inspectable. 404 only when no
   # run was ever recorded.
   defp show_historical(conn, task_id) do
     case latest_run(task_id) do
-      %Run{} = run -> render(conn, :show, run: run)
+      %Run{} = run -> render(conn, :show, run: run, cost: task_cost(task_id))
       nil -> {:error, :not_found}
     end
   end

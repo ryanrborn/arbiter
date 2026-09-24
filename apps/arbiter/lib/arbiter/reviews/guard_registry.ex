@@ -318,6 +318,29 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "diff, so a provider that timed out on the previous one starts even again."
     },
     %{
+      id: :empty_net_diff_approval,
+      doc_ref: "G20",
+      class: :b,
+      class_source: :inferred,
+      class_note:
+        "Same shape as G2, which §5.3 classes `b`: the target has already absorbed the " <>
+          "branch's contribution, so the park is an honest completion, not a misfire — " <>
+          "only the detection differs (content emptiness, not SHA equality).",
+      bound: {:evaluations, 1},
+      episode: {:task, :review_id, :round},
+      terminal: :parked,
+      sites: [
+        {ReviewGate, :finalize_approval, 3}
+      ],
+      anchors: ["finalize_approval", "coverage_net_diff_id(state)"],
+      summary:
+        "bd-aq81qz: an APPROVE whose net diff against the target is empty — commits " <>
+          "exist (head_sha != base_sha, so G2 does not fire) but contribute nothing, e.g. " <>
+          "already-squashed commits plus a merge of the target back in. Reuses " <>
+          "`coverage_net_diff_id/1`'s `{:error, :no_net_diff}` answer (the same check the " <>
+          "coverage row itself would fail on) rather than deriving emptiness twice"
+    },
+    %{
       id: :verdict_parse,
       doc_ref: "G5",
       class: :c,
@@ -839,6 +862,40 @@ defmodule Arbiter.Reviews.GuardRegistry do
       sites: [{Watchdog, :park_heartbeat_due?, 1}],
       anchors: ["@default_park_heartbeat_polls"],
       summary: "one heartbeat re-page for a long park, not silence and not a storm"
+    },
+    %{
+      id: :orphaned_merge_retry,
+      doc_ref: "W21",
+      class: :e,
+      class_source: :inferred,
+      class_note:
+        "bd-a370ak / #2002. Not in §5.3's table. It is remediation of a stranded approved " <>
+          "merge — W12's terminal made real for the case where the worker is already gone — " <>
+          "and it has class E's shape: fail open, bounded retries, one escalation. The merge " <>
+          "decision it runs is W1–W5 and the zero-net-diff guard unchanged; only the " <>
+          "retry-and-give-up wrapped around it is new.",
+      bound: {:retries, {:config, :retry_transient_failure_limit}},
+      episode: {:task, :mr_ref},
+      terminal: :escalated_once,
+      sites: [
+        {Watchdog, :detached_outcome, 3},
+        {Watchdog, :detached_attempt_merge, 2},
+        {Watchdog, :handle_retry_merge_failure, 2},
+        {Watchdog, :retry_still_owed, 1},
+        {Watchdog, :detached_wait, 2},
+        {Watchdog, :give_up_retry, 2}
+      ],
+      anchors: [
+        "@retry_transient_failure_limit",
+        "@default_retry_max_wait_ms",
+        "wait_exhausted",
+        "merge_fail_notify_threshold",
+        "orphaned_merge_abandoned",
+        "mark_escalated"
+      ],
+      summary:
+        "a worker-less retry of an approved merge whose worker exited: waits out transient " <>
+          "blockers, merges through W1–W5, else pages once and latches the stamp escalated"
     }
   ]
 
@@ -856,13 +913,14 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {MergeQueue, :merge_guarded, 2},
+        {MergeQueue, :legacy_merge_decision, 3},
         {MergeQueue, :apply_legacy_decision, 3},
         {MergeQueue, :apply_coverage_decision, 4}
       ],
       anchors: [":stale_reviewed_sha", "coverage_enabled?"],
       summary:
         "the queue's merge refusal: `decide/3` under `merge.coverage_enabled`, else the " <>
-          "reviewed-SHA guard — with none of W2–W6's recovery either way"
+          "reviewed-SHA guard plus W5's content check (P7) — none of W2–W4/W6's recovery"
     },
     %{
       id: :coverage_unknown_wait,

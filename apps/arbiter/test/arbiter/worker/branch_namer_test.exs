@@ -111,6 +111,41 @@ defmodule Arbiter.Worker.BranchNamerTest do
 
       assert branch == "feature/gte-010-branch-namer-module"
     end
+
+    # #1973: a context-only child of a tracked story carries the story's key so
+    # Jira links the branch, plus its own id so sibling slices never share a
+    # branch (and so a worktree).
+    test "uses tracker_context_ref plus the task id when tracker_ref is blank" do
+      branch =
+        BranchNamer.derive(
+          issue(
+            id: "lt-59tbre",
+            issue_type: :feature,
+            tracker_ref: nil,
+            tracker_context_type: :jira,
+            tracker_context_ref: "VR-19083",
+            title: "Slice one"
+          )
+        )
+
+      assert branch == "feature/VR-19083-lt-59tbre-slice-one"
+    end
+
+    test "tracker_ref outranks tracker_context_ref" do
+      branch =
+        BranchNamer.derive(
+          issue(
+            issue_type: :feature,
+            tracker_type: :jira,
+            tracker_ref: "VR-30000",
+            tracker_context_type: :jira,
+            tracker_context_ref: "VR-19083",
+            title: "Slice one"
+          )
+        )
+
+      assert branch == "feature/VR-30000-slice-one"
+    end
   end
 
   describe "derive/1 slug derivation" do

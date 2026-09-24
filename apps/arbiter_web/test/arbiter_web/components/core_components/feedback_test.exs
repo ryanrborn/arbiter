@@ -63,7 +63,7 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
       assert html =~ "—"
     end
 
-    test "de-emphasizes a non-binding window via quota_binding_class/2" do
+    test "de-emphasizes a non-binding window via quota_binding_class/2 and carries explanatory title" do
       html =
         render_component(&quota_bar/1, %{
           window: "7d",
@@ -73,9 +73,23 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
         })
 
       assert html =~ "opacity-50"
+      assert html =~ "not the binding window — Anthropic is currently limiting on 5h"
     end
 
-    test "the binding window is not de-emphasized" do
+    test "dimmed 5h bar explains that 7d is binding" do
+      html =
+        render_component(&quota_bar/1, %{
+          window: "5h",
+          utilization: 0.1,
+          reset_at: nil,
+          representative_claim: "seven_day"
+        })
+
+      assert html =~ "opacity-50"
+      assert html =~ "not the binding window — Anthropic is currently limiting on 7d"
+    end
+
+    test "the binding window is not de-emphasized and carries no non-binding explanation" do
       html =
         render_component(&quota_bar/1, %{
           window: "5h",
@@ -85,6 +99,314 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
         })
 
       refute html =~ "opacity-50"
+      refute html =~ "not the binding window"
+    end
+  end
+
+  # bd-gukyy1: the fill carries the provider's hue, and only a `:red` pace state
+  # (which `in_overage` folds into) overrides it. The finer gradations live in
+  # the note and the title.
+  describe "quota_bar/1 provider hue and pace note" do
+    # A 5h reset `minutes_left` minutes away: 150 leaves the window half elapsed
+    # (paced ceiling 0.50), 290 leaves it 10 minutes in — under the 5%
+    # sampling floor, where the 0.35 paced floor is the ceiling.
+    defp reset_in(minutes_left),
+      do: DateTime.add(DateTime.utc_now(), minutes_left * 60, :second)
+
+    # The pace a bar with no `gate_policy` renders from (the install default).
+    defp pace_of(provider, u, reset_at) do
+      ArbiterWeb.QuotaHelpers.quota_pace(
+        %{provider: provider, window: "5h", utilization: u, reset_at: reset_at},
+        nil
+      )
+    end
+
+    defp label_of(provider, u, reset_at) do
+      ArbiterWeb.QuotaHelpers.quota_pace_label(
+        %{provider: provider, utilization: u},
+        pace_of(provider, u, reset_at),
+        :throttle
+      )
+    end
+
+    defp color_of(provider, u, reset_at),
+      do: ArbiterWeb.QuotaHelpers.quota_note_color(pace_of(provider, u, reset_at).state, false)
+
+    defp bar(attrs) do
+      render_component(&quota_bar/1, Map.merge(%{window: "5h", reset_at: nil}, attrs))
+      |> LazyHTML.from_fragment()
+    end
+
+    defp fill(doc),
+      do: doc |> LazyHTML.query("[data-quota-fill]") |> LazyHTML.attribute("style") |> hd()
+
+    defp note(doc), do: doc |> LazyHTML.query("[data-quota-note]")
+
+    defp title(doc),
+      do: doc |> LazyHTML.query("[data-quota-bar]") |> LazyHTML.attribute("title") |> hd()
+
+    test "claude and antigravity map to distinct --arb-* hues, with a documented fallback" do
+      claude = ArbiterWeb.QuotaHelpers.quota_provider_hue("claude")
+      antigravity = ArbiterWeb.QuotaHelpers.quota_provider_hue("antigravity")
+      fallback = ArbiterWeb.QuotaHelpers.quota_provider_hue("somebody_else")
+
+      for hue <- [claude, antigravity, fallback], do: assert(hue =~ ~r/^var\(--arb-[a-z-]+\)$/)
+
+      assert claude != antigravity
+      assert ArbiterWeb.QuotaHelpers.quota_provider_hue(nil) == fallback
+    end
+
+    test "a claude bar at 20% and one at 60% carry the same provider fill" do
+      hue = ArbiterWeb.QuotaHelpers.quota_provider_hue("claude")
+      low = bar(%{provider: "claude", utilization: 0.2})
+      high = bar(%{provider: "claude", utilization: 0.6})
+
+      assert fill(low) =~ "background-color: #{hue};"
+      assert fill(high) =~ "background-color: #{hue};"
+    end
+
+    test "an amber-state bar carries the same provider fill as a green one" do
+      reset_at = reset_in(150)
+      assert pace_of("claude", 0.45, reset_at).state == :amber
+      assert pace_of("claude", 0.2, reset_at).state == :green
+
+      amber = bar(%{provider: "claude", utilization: 0.45, reset_at: reset_at})
+      green = bar(%{provider: "claude", utilization: 0.2, reset_at: reset_at})
+
+      hue = ArbiterWeb.QuotaHelpers.quota_provider_hue("claude")
+      assert fill(amber) =~ "background-color: #{hue};"
+      assert fill(green) =~ "background-color: #{hue};"
+    end
+
+    test "a :red-state bar and an in_overage bar both carry the red fill" do
+      reset_at = reset_in(150)
+      assert pace_of("claude", 0.8, reset_at).state == :red
+
+      red = bar(%{provider: "claude", utilization: 0.8, reset_at: reset_at})
+      overage = bar(%{provider: "claude", utilization: 0.3, overage_status: "in_overage"})
+
+      assert fill(red) =~ "background-color: var(--arb-fail);"
+      assert fill(overage) =~ "background-color: var(--arb-fail);"
+    end
+
+    test "amber on pace: the note carries a warning glyph plus the pace label, coloured by state" do
+      reset_at = reset_in(150)
+      label = label_of("claude", 0.45, reset_at)
+      color = color_of("claude", 0.45, reset_at)
+      assert label
+      assert color == "var(--arb-attention)"
+
+      doc =
+        bar(%{
+          provider: "claude",
+          utilization: 0.45,
+          reset_at: reset_at,
+          on_exhaustion: :throttle
+        })
+
+      assert LazyHTML.text(note(doc)) =~ label
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 1
+      assert note(doc) |> LazyHTML.attribute("style") |> hd() =~ "color: #{color};"
+    end
+
+    test "red on pace: the note carries the glyph and the red pace label" do
+      reset_at = reset_in(150)
+      label = label_of("claude", 0.8, reset_at)
+      color = color_of("claude", 0.8, reset_at)
+      assert color == "var(--arb-fail)"
+
+      doc =
+        bar(%{provider: "claude", utilization: 0.8, reset_at: reset_at, on_exhaustion: :throttle})
+
+      assert LazyHTML.text(note(doc)) =~ label
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 1
+      assert note(doc) |> LazyHTML.attribute("style") |> hd() =~ "color: #{color};"
+    end
+
+    test "sampling: the note says sampling, without a warning glyph" do
+      reset_at = reset_in(290)
+      assert pace_of("claude", 0.2, reset_at).state == :grey
+
+      doc = bar(%{provider: "claude", utilization: 0.2, reset_at: reset_at})
+
+      assert LazyHTML.text(note(doc)) =~ "sampling"
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 0
+      assert fill(doc) =~ ArbiterWeb.QuotaHelpers.quota_provider_hue("claude")
+    end
+
+    test "sampling at 8% used / 3% elapsed has grey state and neutral note, never amber or red" do
+      # 5h = 300m. 3% elapsed = 9m elapsed, so 291m remaining.
+      # Utilization is 8% (0.08). 8% used > 3% elapsed, but it is far under the
+      # 0.35 paced floor and elapsed is below the 5% sampling floor, so state
+      # is :grey. The note must remain neutral.
+      reset_at = reset_in(291)
+
+      assert pace_of("antigravity", 0.08, reset_at).state == :grey
+
+      doc = bar(%{provider: "antigravity", utilization: 0.08, reset_at: reset_at})
+
+      html =
+        render_component(&quota_bar/1, %{
+          provider: "antigravity",
+          window: "5h",
+          utilization: 0.08,
+          reset_at: reset_at
+        })
+
+      assert doc
+             |> LazyHTML.query("[data-quota-bar]")
+             |> LazyHTML.attribute("data-quota-state")
+             |> hd() == "grey"
+
+      assert LazyHTML.text(note(doc)) =~ "sampling"
+      assert note(doc) |> LazyHTML.attribute("class") |> hd() =~ "text-[var(--text-label)]"
+      refute note(doc) |> LazyHTML.attribute("class") |> hd() =~ "text-[var(--arb-attention)]"
+      refute note(doc) |> LazyHTML.attribute("class") |> hd() =~ "text-[var(--arb-fail)]"
+      refute (note(doc) |> LazyHTML.attribute("style") |> hd() || "") =~ "color:"
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 0
+      refute html =~ "var(--arb-attention)"
+      refute html =~ "var(--arb-fail)"
+    end
+
+    test "no raw hex colours appear in rendered HTML" do
+      reset_at = reset_in(150)
+
+      for u <- [0.08, 0.2, 0.6, 0.8, 0.95] do
+        html =
+          render_component(&quota_bar/1, %{
+            provider: "claude",
+            window: "5h",
+            utilization: u,
+            reset_at: reset_at,
+            on_exhaustion: :throttle
+          })
+
+        refute html =~ "#ef4444"
+        refute html =~ "#f59e0b"
+        refute html =~ "#22c55e"
+        refute html =~ "#9ca3af"
+      end
+    end
+
+    test "red bar without pace label has red countdown note" do
+      doc = bar(%{provider: "codex", utilization: 0.95})
+
+      assert doc
+             |> LazyHTML.query("[data-quota-bar]")
+             |> LazyHTML.attribute("data-quota-state")
+             |> hd() == "red"
+
+      assert note(doc) |> LazyHTML.attribute("style") |> hd() =~ "color: var(--arb-fail);"
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 0
+    end
+
+    test "quiet: with no pace label the note is quota_reset_label/1" do
+      reset_at = reset_in(150)
+      doc = bar(%{provider: "claude", utilization: 0.2, reset_at: reset_at})
+
+      assert LazyHTML.text(note(doc)) =~ ArbiterWeb.QuotaHelpers.quota_reset_label(reset_at)
+      assert note(doc) |> LazyHTML.query("[data-quota-glyph]") |> Enum.count() == 0
+    end
+
+    test "an amber on-pace bar's title carries utilization, elapsed window, and the pace label" do
+      reset_at = reset_in(150)
+      label = label_of("claude", 0.45, reset_at)
+
+      doc =
+        bar(%{
+          provider: "claude",
+          utilization: 0.45,
+          reset_at: reset_at,
+          on_exhaustion: :throttle
+        })
+
+      assert title(doc) =~ "45% quota used"
+      assert title(doc) =~ "of window elapsed"
+      assert title(doc) =~ "approaching paced ceiling 50%"
+      assert title(doc) =~ label
+    end
+
+    # bd-clzkvp AC5: the bar colours by the paced thresholds even where the
+    # gate isn't enforcing them, and says which of the two it is.
+    test "a red bar says whether the gate is holding or only would hold" do
+      reset_at = reset_in(150)
+      paced = %Arbiter.Accounts.ProviderAccount{quota_config: %{"threshold_mode" => "paced"}}
+      flat = %Arbiter.Accounts.ProviderAccount{quota_config: %{}}
+
+      holding =
+        bar(%{
+          provider: "claude",
+          utilization: 0.6,
+          reset_at: reset_at,
+          gate_policy: %{policy: {paced, nil}, enforcing?: true}
+        })
+
+      would_hold =
+        bar(%{
+          provider: "claude",
+          utilization: 0.6,
+          reset_at: reset_at,
+          gate_policy: %{policy: {flat, nil}, enforcing?: true}
+        })
+
+      continue =
+        bar(%{
+          provider: "claude",
+          utilization: 0.6,
+          reset_at: reset_at,
+          gate_policy: %{policy: {paced, nil}, enforcing?: false}
+        })
+
+      for doc <- [holding, would_hold, continue] do
+        assert doc |> LazyHTML.query("[data-quota-bar][data-quota-state=red]") |> Enum.count() ==
+                 1
+
+        assert fill(doc) =~ "background-color: var(--arb-fail);"
+      end
+
+      assert holding |> LazyHTML.query("[data-quota-hold=enforcing]") |> Enum.count() == 1
+      assert title(holding) =~ "holding dispatch — 60% used ≥ paced ceiling 50%"
+      refute title(holding) =~ "gate not enforcing"
+
+      for doc <- [would_hold, continue] do
+        assert doc |> LazyHTML.query("[data-quota-hold=not_enforcing]") |> Enum.count() == 1
+        assert title(doc) =~ "would hold — 60% used ≥ paced ceiling 50% (gate not enforcing)"
+      end
+    end
+
+    test "a bar under the ceiling carries no hold marker" do
+      doc = bar(%{provider: "claude", utilization: 0.2, reset_at: reset_in(150)})
+      assert doc |> LazyHTML.query("[data-quota-hold]") |> Enum.count() == 0
+    end
+
+    test "the window label is caller-supplied, the window only picks the pace math" do
+      doc = bar(%{provider: "antigravity", window: "7d", label: "weekly", utilization: 0.1})
+
+      assert doc |> LazyHTML.query("[data-quota-label]") |> LazyHTML.text() |> String.trim() ==
+               "weekly"
+
+      doc = bar(%{provider: "claude", window: "7d", utilization: 0.1})
+
+      assert doc |> LazyHTML.query("[data-quota-label]") |> LazyHTML.text() |> String.trim() ==
+               "7d"
+    end
+
+    test "a stale reading is muted, says so, and carries the message in its title" do
+      message = "Antigravity CLI (agy) is not installed on this host"
+
+      doc =
+        bar(%{
+          provider: "antigravity",
+          utilization: 0.95,
+          reset_at: reset_in(150),
+          stale_message: message
+        })
+
+      assert doc |> LazyHTML.query("[data-quota-bar][data-quota-stale]") |> Enum.count() == 1
+      assert LazyHTML.text(note(doc)) =~ "stale"
+      assert title(doc) =~ message
+      refute fill(doc) =~ "var(--arb-fail)"
+      refute fill(doc) =~ ArbiterWeb.QuotaHelpers.quota_provider_hue("antigravity")
     end
   end
 

@@ -139,6 +139,33 @@ defmodule ArbiterCli.Cmd.BreakerTest do
     end
   end
 
+  describe "arb breaker list auth holds (bd-21bmdh)" do
+    test "prints every open auth hold with its reset command" do
+      stub_get("/api/breakers", %{
+        "breakers" => [],
+        "open_count" => 0,
+        "call_sites" => @call_sites,
+        "auth_holds" => [
+          %{
+            "provider" => "claude",
+            "open" => true,
+            "probation" => false,
+            "deaths" => 2,
+            "threshold" => 2,
+            "opened_at" => "2026-09-22T12:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Breaker.run(["list"]) end)
+
+      assert code == 0
+      assert out =~ "AUTH HOLDS"
+      assert out =~ "[OPEN] claude"
+      assert out =~ "arb breaker reset --auth-hold claude"
+    end
+  end
+
   describe "arb breaker reset" do
     test "closes one breaker by signature" do
       stub_post("/api/breakers/reset", %{"reset" => 1, "signature" => @open["signature"]}, 200)
@@ -157,6 +184,29 @@ defmodule ArbiterCli.Cmd.BreakerTest do
 
       assert code == 0
       assert out =~ "Closed 4 circuit breaker(s)."
+    end
+
+    test "--auth-hold <provider> clears that provider's auth hold (bd-21bmdh)" do
+      test_pid = self()
+
+      stub_routes([
+        {{"post", "/api/breakers/reset"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:body, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"reset" => 1, "auth_hold" => "claude"})
+         end}
+      ])
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Breaker.run(["reset", "--auth-hold", "claude"]) end)
+
+      assert code == 0
+      assert_received {:body, %{"provider" => "claude"}}
+      assert out =~ "Cleared the claude auth hold."
     end
 
     test "refuses to reset with no target rather than guessing" do

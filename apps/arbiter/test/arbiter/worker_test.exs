@@ -45,6 +45,21 @@ defmodule Arbiter.WorkerTest do
       assert snap.meta == %{}
     end
 
+    # bd-aw2cyt: slot accounting and the phase model both read this off the
+    # snapshot, so every consumer gets the same answer without a second call.
+    test "the snapshot reports whether an agent subprocess is live" do
+      {pid, task_id} = start_worker()
+
+      snap = Worker.state(pid)
+      assert snap.agent_live == false
+      assert snap.agent_live == Worker.agent_session_live?(task_id)
+
+      assert Enum.any?(
+               Worker.list_children(),
+               &(&1.task_id == task_id and &1.agent_live == false)
+             )
+    end
+
     test "state/1 accepts task_id strings" do
       {_pid, task_id} = start_worker()
       assert %{task_id: ^task_id} = Worker.state(task_id)
@@ -331,6 +346,126 @@ defmodule Arbiter.WorkerTest do
 
       for key <- [:task_id, :workspace_id, :repo, :current_step, :status, :started_at, :meta] do
         assert Map.has_key?(entry, key), "missing #{inspect(key)} in #{inspect(entry)}"
+      end
+    end
+
+    # bd-45tkhq: `worker_list` (and `arb worker list` / `arb prime`) read
+    # straight off `list_children/0`. Its `safe_snapshot/1` gives a live
+    # worker only 500ms to answer `:snapshot` before treating it the same as
+    # a crashed child — silently dropping it from the list. A genuinely alive
+    # worker mid-burst (e.g. draining a flood of `mix test` output lines
+    # through its mailbox) can easily miss a 500ms window without being dead
+    # or even unusually slow; `Worker.state/1` (what `worker_show` /
+    # `worker_runs` use) has no such tight budget, which is exactly why those
+    # kept reporting the worker as running at the same instant `worker_list`
+    # reported zero.
+    test "a live worker that is briefly slow to answer :snapshot is not dropped" do
+      {pid, task_id} = start_worker()
+
+      :sys.suspend(pid)
+
+      spawn(fn ->
+        Process.sleep(700)
+        :sys.resume(pid)
+      end)
+
+      try do
+        ids = Worker.list_children() |> Enum.map(& &1.task_id)
+        assert task_id in ids
+      after
+        :sys.resume(pid)
+      end
+    end
+
+    # bd-45tkhq: raising the probe budget only narrows the window a live
+    # worker can miss it in — it does not remove the window. A worker that is
+    # still alive but does not answer :snapshot even within the new (5s)
+    # budget must degrade rather than vanish, the same way `active_sibling/2`
+    # treats an unresponsive-but-alive sibling as busy, not gone.
+    test "a live worker that never answers :snapshot is degraded, not dropped" do
+      {pid, task_id} = start_worker()
+      :sys.suspend(pid)
+
+      try do
+        [entry] = Worker.list_children() |> Enum.filter(&(&1.task_id == task_id))
+        assert entry.status == :unknown
+        assert entry.meta.stale_probe == true
+        assert entry.pid == pid
+      after
+        :sys.resume(pid)
+      end
+    end
+
+    # Mirrors the second observation in bd-45tkhq: the worker had already
+    # been through `worker_stop` + `worker_resume` (which, at the `Worker`
+    # level, is `stop/2` followed by a fresh `start/1` under the same
+    # `task_id`) before it vanished from an unfiltered list. Same mechanism
+    # as above — resume isn't special, any live worker can lose the race.
+    test "a resumed worker (stopped, then restarted under the same task_id) is not dropped" do
+      {pid, task_id} = start_worker()
+      ref = Process.monitor(pid)
+      :ok = Worker.stop(task_id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {resumed_pid, ^task_id} = start_worker(task_id: task_id)
+
+      :sys.suspend(resumed_pid)
+
+      spawn(fn ->
+        Process.sleep(700)
+        :sys.resume(resumed_pid)
+      end)
+
+      try do
+        ids = Worker.list_children() |> Enum.map(& &1.task_id)
+        assert task_id in ids
+      after
+        :sys.resume(resumed_pid)
+      end
+    end
+
+    # bd-45tkhq round 2: a merge-queue subordinate pass (FixPassDispatcher,
+    # ConflictResolver) registers under `<task_id>:fixpass` / `<task_id>:conflict`
+    # while its durable Arbiter.Workers.Run row is keyed on the plain
+    # `task_id`. degraded_snapshot/2 must strip the suffix before looking up
+    # the run, or it falls into the no-run branch: workspace_id: nil, which
+    # Tools.worker_list/2's workspace filter then silently drops — the exact
+    # "live worker invisible" bug this ticket exists to fix, relocated to
+    # subordinate workers.
+    test "a wedged subordinate (suffixed registry key) still resolves the primary task's run" do
+      # This module otherwise avoids the DB (see the plain `ExUnit.Case`
+      # above), but this case needs `record_run_started/1`'s write to
+      # actually land so `degraded_snapshot/2` has a Run row to resolve.
+      # Shared mode so the separately-spawned Worker GenServer can use the
+      # connection too.
+      owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: true)
+      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(owner) end)
+
+      task_id = new_task_id()
+
+      {pid, ^task_id} =
+        start_worker(
+          task_id: task_id,
+          workspace_id: "ws-probe",
+          registry_key: task_id <> ":fixpass",
+          meta: %{role: :fix_pass}
+        )
+
+      :sys.suspend(pid)
+
+      try do
+        [entry] = Worker.list_children() |> Enum.filter(&(&1.pid == pid))
+        assert entry.registry_key == task_id <> ":fixpass"
+        assert entry.task_id == task_id
+        assert entry.workspace_id == "ws-probe"
+        assert entry.status == :unknown
+        # bd-45tkhq round 3 (self-review after rebasing onto bd-aw2cyt/#1969):
+        # Arbiter.Worker.Phase.of/2 classifies a subordinate by its top-level
+        # `:role`; without it a degraded fix-pass entry falls through to
+        # author_phase/2 and is misread as the task's own primary worker.
+        assert entry.role == :fix_pass
+      after
+        :sys.resume(pid)
       end
     end
   end

@@ -51,7 +51,6 @@
   {"lib/arbiter/agents/gemini/stream.ex", :pattern_match_cov},
   {"lib/arbiter/agents/security_policy.ex", :pattern_match_cov},
   {"lib/arbiter/mcp/tools/task.ex", :pattern_match_cov},
-  {"lib/arbiter/reviews/external_review.ex", :pattern_match_cov},
   {"lib/arbiter/skills/selection.ex", :pattern_match_cov},
   {"lib/arbiter/tasks/claim.ex", :pattern_match_cov},
   {"lib/arbiter/worker.ex", :pattern_match_cov},

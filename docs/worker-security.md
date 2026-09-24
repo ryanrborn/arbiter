@@ -245,7 +245,13 @@ has two halves that must agree:
 | --------- | --------------------------------- | -------------------------- | -------------- |
 | `:bypass` | `--dangerously-skip-permissions`  | `always-proceed`           | **yes**        |
 | `:auto`   | *(none)*                          | `always-proceed`           | **yes**        |
-| `:strict` | `--sandbox`                       | `strict`                   | **yes** — and unallowed ⇒ blocked |
+| `:strict` | *(none)*                          | `proceed-in-sandbox`       | **yes** — and unallowed ⇒ blocked |
+
+`:strict` deliberately maps onto agy's own `"proceed-in-sandbox"` value, not
+its `"strict"` value, and omits the `--sandbox` argv flag — see bd-25ivqe
+below; both were probed live and the obvious-looking alternative (agy
+`toolPermission: "strict"` + `--sandbox`) turned out to auto-deny every tool
+call in headless mode regardless of `permissions.allow`.
 
 `Arbiter.Agents.Gemini.ConfigDir` supplies the `$HOME` the settings document
 lands in: one directory per worktree under `~/.cache/arbiter/worker-agy/`,
@@ -284,26 +290,48 @@ throwaway `$HOME`:
 * The generated `settings.json` **is** read in place of the operator's, and
   `toolPermission` is echoed verbatim as `init.permission_mode` on the
   stream-json `init` event. `apps/arbiter/test/fixtures/agy_init_strict.json`
-  is a real captured event (`permission_mode: "strict"`);
+  is a real captured event (`permission_mode: "proceed-in-sandbox"`);
   `agy_init_inherited.json` is the pre-fix control (`"always-proceed"`).
 * `permissions.deny` is a **hard block in every mode**, including under
   `--dangerously-skip-permissions`: with `deny: ["command(rm)"]`, a
   `rm ./inside.txt` came back `permission check failed for unsandboxed ...` and
   the file survived. This is why `security_enforced?/0` can answer `true`.
-* Under `strict`, headless mode cannot prompt, so anything not matched by
-  `permissions.allow` is **auto-denied** (agy reports `denied_actions` on the
-  `result` event). It does not hang to the print timeout. `:strict` is
-  therefore genuinely allowlist-only on agy: a `:strict` agy worker gets no
-  shell at all unless the workspace policy names the commands it may run.
+* **`toolPermission: "strict"` is a dead end for headless use (bd-25ivqe).**
+  This was the original mapping for Arbiter's `:strict` mode, and it looked
+  right in review and in unit tests that only asserted on the generated
+  settings document — but live, `permissions.allow` is never consulted under
+  agy's own `"strict"` value in headless/print mode. A bare `command(arb)`, a
+  wildcard `command(*)`, and even the literal full command string all still
+  came back auto-denied. Only `always-proceed` (`--dangerously-skip-permissions`)
+  let anything through. `apps/arbiter/test/fixtures/agy_run_command_denied.json`
+  and `agy_run_command_allowed.json` are real captured `run_command` steps
+  pinning the *working* mapping below.
+* **`toolPermission: "proceed-in-sandbox"` is the value that actually
+  enforces an allowlist headlessly.** Same settings document, only
+  `toolPermission` changed: an allow-listed command ran, and a command with
+  no matching allow rule was denied with agy's own
+  `permission check failed for unsandboxed ...` wording — reported on
+  stderr and via `denied_actions` on the `result` event, and it does not hang
+  to the print timeout. `:strict` maps onto this value, not agy's own
+  `"strict"`, and is genuinely allowlist-only as a result: a `:strict` agy
+  worker gets no shell at all unless the workspace policy names the commands
+  it may run.
 * **`allowNonWorkspaceAccess: false` does not work.** With it set, a
   `touch <outside-the-worktree>/marker` via `run_command` still succeeded, and
   so did a `view_file` read of a file outside the workspace. The key is still
   emitted (it is the documented switch and costs nothing), but the load-bearing
   out-of-worktree guard is the `write_file(...)` deny list plus `:strict`'s
-  allowlist-only shell — not that flag.
-* **`--sandbox` does not change `init.permission_mode`,** and on a host with no
-  sandbox backend agy falls back to a permission check
-  (`permission check failed for unsandboxed ...`) rather than a kernel jail.
+  allowlist-only shell — not that flag. Note `write_file` itself is
+  deny-list-gated, not allowlist-gated, under every `toolPermission` probed:
+  an out-of-worktree `write_to_file` with *no* matching allow rule at all
+  still succeeded under `"proceed-in-sandbox"`.
+* **`--sandbox` disables the allowlist gate under `"proceed-in-sandbox"`
+  (bd-25ivqe).** With `--sandbox` on argv, agy runs the command inside a real
+  `bwrap` jail and *auto-proceeds* there regardless of `permissions.allow` —
+  a command with no matching allow rule that was denied without `--sandbox`
+  succeeded with it. Only `permissions.deny` still gated it. `--sandbox` is
+  therefore omitted from `:strict`'s argv entirely; the original mapping
+  (`--sandbox` + `toolPermission: "strict"`) predates this finding.
 
 As on the Claude side these are *permission-layer* guards inside the agent, not
 OS isolation.

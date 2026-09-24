@@ -65,6 +65,12 @@ defmodule ArbiterCli.Cmd.Create do
   and can auto-close. Like `--deps`, the task is durable even if the attach
   fails — the failure is surfaced and arb exits non-zero.
 
+  If that parent is linked to a tracker ticket, the child does **not** mint its
+  own by default (#1973): it stays local with the parent's ticket as read-only
+  context (`tracker_context_ref`), so its branch and PR title still carry the
+  parent's key. The workspace's `tracker.child_policy` governs this
+  (`context_only` default, `inherit_parent`, `mint`).
+
   When the workspace has a tracker configured (`config["tracker"]["type"] !=
   none`), the server **also creates a corresponding upstream issue** and
   writes the returned ref back into `tracker_ref`. To opt out of that:
@@ -240,6 +246,10 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("tracker_ref", opts[:tracker_ref])
       |> maybe_put("target_branch", opts[:target_branch])
       |> maybe_put("repo", opts[:repo])
+      # #1973: the parent rides along with the create so the server can default a
+      # child of a tracker-linked parent to context-only instead of minting a
+      # ticket. The `parent_of` edge itself is still attached below.
+      |> maybe_put("parent_id", opts[:parent])
       |> maybe_put_flag("auto_close", opts[:auto_close] == true)
       |> maybe_put_flag("verify_after_deploy", opts[:verify_after_deploy] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)

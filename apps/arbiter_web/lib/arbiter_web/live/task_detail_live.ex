@@ -74,6 +74,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Usage
   alias Arbiter.Usage.Budget
   alias Arbiter.Usage.Event, as: UsageEvent
+  alias Arbiter.Usage.LiveSpend
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ReviewGate
@@ -226,6 +227,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:messages, [])
      |> assign(:messages_topic, nil)
      |> assign(:expanded_messages, MapSet.new())
+     |> assign(:live_spend_timer, nil)
      |> refresh_all()}
   end
 
@@ -312,6 +314,17 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   def handle_info({:mailbox_cleared, _workspace_id}, socket) do
     {:noreply, refresh_messages(socket)}
+  end
+
+  # bd-8vnuy3: re-read the in-flight spend while a pass is running. Only the
+  # spend and its threshold state move; the estimate it is read against was
+  # computed on the last full refresh and does not change mid-pass.
+  def handle_info(:refresh_live_spend, socket) do
+    {:noreply,
+     socket
+     |> assign(:live_spend_timer, nil)
+     |> refresh_live_spend()
+     |> schedule_live_spend()}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -925,11 +938,68 @@ defmodule ArbiterWeb.TaskDetailLive do
     assign(socket, :budget, assess_budget(task, fn -> Budget.assess_epic(task) end))
   end
 
+  # A task's figure includes whatever its running passes have spent so far
+  # (`Arbiter.Usage.LiveSpend`, bd-8vnuy3); an epic's stays the settled rollup.
   defp refresh_budget(%{assigns: %{task: %Issue{} = task}} = socket) do
-    assign(socket, :budget, assess_budget(task, fn -> Budget.assess(task) end))
+    socket
+    |> assign(:budget, assess_budget(task, fn -> assess_live(task) end))
+    |> schedule_live_spend()
   end
 
   defp refresh_budget(socket), do: assign(socket, :budget, nil)
+
+  defp assess_live(%Issue{} = task) do
+    live = LiveSpend.for_task(task.id)
+
+    task
+    |> Budget.assess(spend: live.total_usd || 0.0)
+    |> Map.put(:live, live)
+  end
+
+  defp refresh_live_spend(
+         %{assigns: %{task: %Issue{} = task, budget: %{live: _} = budget}} = socket
+       ) do
+    live = LiveSpend.for_task(task.id)
+    spend = live.total_usd || 0.0
+    state = Budget.state(spend, budget.estimate)
+
+    assign(socket, :budget, %{
+      budget
+      | spend: spend,
+        state: state,
+        over_budget?: state == :over_budget,
+        live: live
+    })
+  rescue
+    e ->
+      Logger.warning("Failed to refresh live spend for #{socket.assigns.task_id}: #{inspect(e)}")
+      socket
+  end
+
+  defp refresh_live_spend(socket), do: socket
+
+  # Poll only while a pass is in flight and someone is looking. The worker
+  # lifecycle broadcast already re-runs `refresh_budget/1` when a pass starts
+  # or ends, which is what (re)arms or retires this tick. One timer at a time.
+  defp schedule_live_spend(%{assigns: %{live_spend_timer: ref}} = socket) when is_reference(ref),
+    do: socket
+
+  defp schedule_live_spend(%{assigns: %{budget: %{live: %{live?: true}}}} = socket) do
+    if connected?(socket) do
+      ref = Process.send_after(self(), :refresh_live_spend, live_spend_refresh_ms())
+      assign(socket, :live_spend_timer, ref)
+    else
+      socket
+    end
+  end
+
+  defp schedule_live_spend(socket), do: socket
+
+  # 10 s: a session-file read is ~7 ms at the p90 size (~110 ms for the largest
+  # on the host), happens only for a task with a live agent, and only while
+  # this page is open — and a turn rarely lands faster than that anyway.
+  defp live_spend_refresh_ms,
+    do: Application.get_env(:arbiter_web, :live_spend_refresh_ms, :timer.seconds(10))
 
   defp assess_budget(task, fun) do
     fun.()
@@ -1950,15 +2020,55 @@ defmodule ArbiterWeb.TaskDetailLive do
             id="task-spend"
             class="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1.5 text-[11px] font-[family-name:var(--font-mono)]"
           >
+            <%!-- bd-8vnuy3: an in-flight estimate never renders like a settled
+                 total — "≈", italic, the live accent, and the pulsing badge
+                 beside it splitting settled from in flight. A figure nothing
+                 priced (agy/antigravity) reads "n/a", never $0.00. --%>
             <span
               id="task-spend-figure"
               title={spend_figure_title(@task.issue_type)}
+              data-live={spend_live?(@budget)}
               class="text-[var(--text-label)]"
             >
               worker spend
-              <span class="tabular-nums font-medium text-[var(--text-title)]">
-                {money(@budget.spend)}
+              <span class={[
+                "tabular-nums font-medium transition-colors duration-300",
+                if(spend_live?(@budget),
+                  do: "italic text-[var(--arb-live)]",
+                  else: "text-[var(--text-title)]"
+                )
+              ]}>
+                {spend_label(@budget)}
               </span>
+            </span>
+            <span
+              :if={spend_live?(@budget)}
+              id="task-spend-live"
+              title={live_spend_title()}
+              class="inline-flex items-center gap-1.5 px-[7px] py-[1px] rounded-[var(--radius-chip)] border border-dashed border-[var(--arb-live-edge)] bg-[var(--arb-live-wash)] text-[var(--arb-live)] tabular-nums"
+            >
+              <span
+                class="size-1.5 rounded-full bg-[var(--arb-live)] animate-pulse"
+                aria-hidden="true"
+              >
+              </span>
+              live · {money(@budget.live.settled_usd)} settled + {money(@budget.live.live_usd)} in flight
+            </span>
+            <span
+              :if={@budget[:live] && @budget.live.degraded?}
+              id="task-spend-degraded"
+              title="A running session's file could not be read cleanly (missing, or a torn / half-written line). Its spend is left out rather than guessed; the figure is the settled ledger plus any session that did read."
+              class="px-[7px] py-[1px] rounded-[var(--radius-chip)] border border-solid border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] text-[var(--arb-attention)]"
+            >
+              live read incomplete
+            </span>
+            <span
+              :if={@budget[:live] && @budget.live.unpriced? && is_number(@budget.live.total_usd)}
+              id="task-spend-unpriced"
+              title="Part of this spend has no price: agy/antigravity report no cost (bd-481sz7). The figure is a floor."
+              class="text-[var(--text-label)]"
+            >
+              + unpriced (n/a)
             </span>
             <span id="task-spend-estimate" class="text-[var(--text-label)] tabular-nums">
               {estimate_label(@budget.estimate)}
@@ -3712,6 +3822,20 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
   defp money(_n), do: "$?"
 
+  defp spend_live?(%{live: %{live?: true}}), do: true
+  defp spend_live?(_budget), do: false
+
+  # Nothing priced at all (an agy/antigravity-only task) is "n/a", not $0.00.
+  defp spend_label(%{live: %{total_usd: nil}}), do: "n/a"
+  defp spend_label(%{live: %{live?: true}, spend: spend}), do: "\u2248" <> money(spend)
+  defp spend_label(%{spend: spend}), do: money(spend)
+
+  defp live_spend_title do
+    "Includes a pass still running: its session file's tokens priced at list rates " <>
+      "(an estimate, not billing). It settles to the CLI's own figure when the pass " <>
+      "ends. Refreshes every #{div(live_spend_refresh_ms(), 1000)}s while a pass runs."
+  end
+
   defp difficulty_label(nil), do: "—"
   defp difficulty_label(d) when is_integer(d) and d in 0..5, do: "D#{d}"
   defp difficulty_label(_), do: "—"
@@ -3869,6 +3993,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp run_worker_label(_), do: "—"
 
   defp run_failed?(%Run{status: :failed}), do: true
+  # bd-aje6fj: shut down with the server. The agent usually took systemd's
+  # SIGTERM too (exit 143), which is not the run failing.
+  defp run_failed?(%Run{status: :interrupted}), do: false
   defp run_failed?(%Run{exit_code: code}) when is_integer(code) and code != 0, do: true
   defp run_failed?(_), do: false
 
@@ -3899,8 +4026,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   # NON-failures, so `run_failed?/1` (correctly) says no about both — but the
   # recorded reason is still the only thing worth showing in this column: the
   # run itself produced nothing new to count, and "why is this sitting still"
-  # is exactly what an operator is scanning for.
-  @outcome_reason_statuses [:review_not_started, :review_parked]
+  # is exactly what an operator is scanning for. bd-aje6fj `:interrupted` (shut
+  # down with the server) is the same shape.
+  @outcome_reason_statuses [:review_not_started, :review_parked, :interrupted]
 
   defp outcome_reason?(%Run{} = run) do
     (run_failed?(run) or run.status in @outcome_reason_statuses) and run_failure_line(run) != ""

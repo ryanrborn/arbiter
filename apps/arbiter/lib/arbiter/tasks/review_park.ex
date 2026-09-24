@@ -67,6 +67,7 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :commit_gate_no_changes_after_non_file_fix
           | :commit_gate_uncommitted
           | :empty_diff
+          | :empty_net_diff
           | :head_not_pushed
           | :resume_blocked
           | :review_rerun
@@ -90,6 +91,9 @@ defmodule Arbiter.Tasks.ReviewPark do
     commit_gate_uncommitted:
       "the implementer left uncommitted work and HEAD did not move, twice (G15/G16)",
     empty_diff: "the target branch has already absorbed this branch's commits (G2)",
+    empty_net_diff:
+      "the branch has commits ahead of the target but they contribute no net change — " <>
+        "most often already-squashed commits plus a merge of the target back in (G20)",
     head_not_pushed:
       "the head to be reviewed is not on the remote branch the merge request points at, " <>
         "and could not be pushed there — reviewing it would judge code the MR does not " <>
@@ -117,6 +121,7 @@ defmodule Arbiter.Tasks.ReviewPark do
       "fix round produced no changes after resolving findings without a file change",
     commit_gate_uncommitted: "implementer left uncommitted work",
     empty_diff: "the target branch already absorbed these commits",
+    empty_net_diff: "the branch's commits contribute no net change against the target",
     head_not_pushed: "the branch is not pushed and could not be",
     resume_blocked: "auto-resume is blocked by another pass on the same task"
   }

@@ -58,6 +58,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Board.Drain
   alias Arbiter.CircuitBreaker
   alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiMCP
@@ -123,6 +124,14 @@ defmodule Arbiter.Worker.Dispatch do
 
   @spec dispatch(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def dispatch(task_id, opts \\ []) when is_binary(task_id) do
+    # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
+    # invisible to the worker supervisor — track it so a drain report sees it.
+    # This covers every caller: `arb dispatch`, the Conductor's DispatchQueue,
+    # Watchdog auto-resume and the autopilot's promotion task.
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_dispatch(task_id, opts) end)
+  end
+
+  defp do_dispatch(task_id, opts) do
     opts = normalize_opts(opts)
 
     with {:ok, task} <- load_task(task_id),
@@ -291,6 +300,12 @@ defmodule Arbiter.Worker.Dispatch do
   """
   @spec resume(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def resume(task_id, opts \\ []) when is_binary(task_id) do
+    # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
+    # invisible to the worker supervisor — track it so a drain report sees it.
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume(task_id, opts) end)
+  end
+
+  defp do_resume(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_active(task_id),
@@ -326,7 +341,8 @@ defmodule Arbiter.Worker.Dispatch do
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
-      dispatch(task_id, resume_opts)
+      # Already inside this resume's Drain.track — skip dispatch/2's own.
+      do_dispatch(task_id, resume_opts)
     end
   end
 
@@ -381,6 +397,12 @@ defmodule Arbiter.Worker.Dispatch do
   @spec resume_session(String.t(), dispatch_opts()) ::
           {:ok, dispatch_result()} | {:error, term()}
   def resume_session(task_id, opts \\ []) when is_binary(task_id) do
+    # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
+    # invisible to the worker supervisor — track it so a drain report sees it.
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume_session(task_id, opts) end)
+  end
+
+  defp do_resume_session(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_active(task_id),
@@ -447,7 +469,8 @@ defmodule Arbiter.Worker.Dispatch do
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
-      dispatch(task_id, resume_opts)
+      # Already inside this resume's Drain.track — skip dispatch/2's own.
+      do_dispatch(task_id, resume_opts)
     end
   end
 
@@ -1205,6 +1228,9 @@ defmodule Arbiter.Worker.Dispatch do
         Keyword.get(opts, :agent_type) && to_string(Keyword.get(opts, :agent_type))
       )
       |> put_if_present(:provider_fallback, Keyword.get(opts, :provider_fallback))
+      # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
+      # "autopilot"), so a drain report can name a board dispatch as one.
+      |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))
 
     base = maybe_put_resume_meta(base, opts)
 
@@ -1313,6 +1339,14 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # First hit wins. This lets workspaces override the global default
   # without changing application config.
+  #
+  # `resume/2` and `resume_session/2` both always set `:resume` to `true`
+  # before delegating to `dispatch/2` (`resume_session_id` is only set on top
+  # of that, never on its own) — so `:resume` alone is a reliable signal that
+  # this dispatch is re-attaching to a preserved worktree rather than cutting
+  # a fresh one.
+  defp resuming?(opts), do: Keyword.get(opts, :resume) == true
+
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -1341,27 +1375,62 @@ defmodule Arbiter.Worker.Dispatch do
             branch = BranchNamer.derive(task)
             target_branch = resolve_target_branch(task, opts)
 
-            case Worktree.create(repo_path, branch, target_branch) do
-              {:ok, path} ->
-                {:ok, path}
+            # bd-8ssxap: a redispatch can find its OLD per-task branch still on
+            # disk with commits that are already merged upstream (a prior round
+            # verified-failed post-merge, or was simply reopened after merge).
+            # `create/3` alone would reuse that branch as-is — the worker gets
+            # nothing new to add and can submit an empty PR. Reset it to current
+            # upstream first; a branch with genuine unmerged work is left alone.
+            #
+            # `force: true` when the task's last transition was a failed
+            # verification: this repo's default GitHub merge method is squash
+            # (`lib/arbiter/mergers/github/config.ex`), which produces a brand
+            # new commit on the base branch that the old per-task branch tip is
+            # NEVER an ancestor of — plain merge-base ancestry (still used for
+            # every other redispatch) would never catch that case, which is
+            # exactly the bd-96mn8i incident this exists to prevent.
+            #
+            # A resume (`opts[:resume]`) skips this reset entirely rather than
+            # passing `force: true` through: `Dispatch.resume/2` exists to
+            # preserve a stopped worker's committed *and* uncommitted worktree
+            # state, and this branch's whole point on a resume is continuity,
+            # not a clean slate.
+            reset_result =
+              if resuming?(opts) do
+                {:ok, :kept}
+              else
+                Worktree.reset_if_merged(repo_path, branch, target_branch,
+                  force: task.verification_outcome == :failed
+                )
+              end
 
-              {:error, {:git_failed, msg}} when is_binary(msg) ->
-                cond do
-                  String.contains?(msg, "already exists") ->
-                    # Pre-existing nesting 5 — baselined when bd-4x2yhq first
-                    # wired Credo up. Thresholds stay at the tool's own default so new
-                    # code is held to it; see the note in .credo.exs.
-                    # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-                    case Worktree.attach(repo_path, branch) do
-                      {:ok, path} -> {:ok, path}
-                      {:error, reason} -> {:error, {:worktree_failed, reason}}
+            case reset_result do
+              {:ok, _} ->
+                case Worktree.create(repo_path, branch, target_branch) do
+                  {:ok, path} ->
+                    {:ok, path}
+
+                  {:error, {:git_failed, msg}} when is_binary(msg) ->
+                    cond do
+                      String.contains?(msg, "already exists") ->
+                        # Pre-existing nesting 5 — baselined when bd-4x2yhq first
+                        # wired Credo up. Thresholds stay at the tool's own default so new
+                        # code is held to it; see the note in .credo.exs.
+                        # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+                        case Worktree.attach(repo_path, branch) do
+                          {:ok, path} -> {:ok, path}
+                          {:error, reason} -> {:error, {:worktree_failed, reason}}
+                        end
+
+                      String.contains?(msg, "different branch") ->
+                        recover_from_detached_worktree(repo_path, branch, target_branch, msg)
+
+                      true ->
+                        {:error, {:worktree_failed, {:git_failed, msg}}}
                     end
 
-                  String.contains?(msg, "different branch") ->
-                    recover_from_detached_worktree(repo_path, branch, target_branch, msg)
-
-                  true ->
-                    {:error, {:worktree_failed, {:git_failed, msg}}}
+                  {:error, reason} ->
+                    {:error, {:worktree_failed, reason}}
                 end
 
               {:error, reason} ->
@@ -1639,10 +1708,11 @@ defmodule Arbiter.Worker.Dispatch do
   # the cheaper policy is: dispatch, and let a dead credential fail fast. What
   # still has to be bounded is a *wave* of those fast failures against the same
   # dead credential — that is what this guard does, for free, off state
-  # `Arbiter.Worker.fail_stopped/2` already writes via `CredentialWatchdog.mark_expired/2`
-  # when a worker dies with `:auth_expired`. See `Arbiter.Agents.CredentialWatchdog`'s
-  # moduledoc for the full posture, including how (and whether) an expired mark
-  # ever clears without a live probe.
+  # `Arbiter.Worker.fail_stopped/2` already writes: each `:auth_expired` death
+  # feeds `Arbiter.Agents.AuthHold`, which opens (and marks the
+  # CredentialWatchdog) after N consecutive deaths (bd-21bmdh). See both
+  # moduledocs for the full posture, including how an open hold and an expired
+  # mark clear without a live probe.
   #
   # Only runs on the real-agent path: skipped unless `start_claude: true`.
   # Opt out entirely with `preflight: false`.
@@ -1663,16 +1733,43 @@ defmodule Arbiter.Worker.Dispatch do
     workspace = load_workspace(task)
     adapter = preflight_adapter(task, workspace, opts)
 
+    # bd-21bmdh: an open `AuthHold` (N consecutive auth deaths on this
+    # provider) refuses first. Its read is fail-closed — an unreadable hold
+    # refuses too — and it is pure bookkeeping, so it never blocks.
+    #
     # bd-5wchp1: if the CredentialWatchdog already knows this adapter's creds are
     # expired, refuse immediately — a plain state lookup, no process spawn. The
     # guard is skipped when the watchdog isn't running (returns false by default).
-    if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
-      reason = known_expired_stop_reason()
-      escalate_preflight_failure(preflight_snapshot(task, opts), reason)
-      {:error, {:auth_check_failed, reason}}
-    else
-      :ok
+    cond do
+      Arbiter.Agents.AuthHold.open?(adapter) ->
+        refuse_known_expired(task, opts, auth_hold_stop_reason(adapter))
+
+      Arbiter.Agents.CredentialWatchdog.expired?(adapter) ->
+        refuse_known_expired(task, opts, known_expired_stop_reason())
+
+      true ->
+        :ok
     end
+  end
+
+  defp refuse_known_expired(task, opts, %StopReason{} = reason) do
+    escalate_preflight_failure(preflight_snapshot(task, opts), reason)
+    {:error, {:auth_check_failed, reason}}
+  end
+
+  defp auth_hold_stop_reason(adapter) do
+    provider = adapter |> Module.split() |> List.last()
+
+    %StopReason{
+      category: :auth_expired,
+      summary: "#{provider} dispatch is held: consecutive workers died on auth (AuthHold open)",
+      remediation:
+        "Re-authenticate the #{provider} CLI. The hold clears when the free credential " <>
+          "check or the CredentialWatchdog probe next passes; to clear it by hand, " <>
+          "`arb breaker reset --auth-hold <provider>`. Reopened tasks then dispatch again.",
+      exit_status: nil,
+      signal: nil
+    }
   end
 
   defp known_expired_stop_reason do

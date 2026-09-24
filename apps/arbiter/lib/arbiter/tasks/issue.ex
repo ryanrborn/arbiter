@@ -52,6 +52,16 @@ defmodule Arbiter.Tasks.Issue do
   falling back to `:none` if the workspace doesn't specify one. Override per-task by
   passing `tracker_type:` to the create action.
 
+  A task created with a `parent_id` whose parent is tracker-linked defaults from
+  the parent instead (#1973), per the workspace's `tracker.child_policy`: by
+  default it stays local (`tracker_type: :none`) and copies the parent's ticket
+  into `tracker_context_type`/`tracker_context_ref`, so no ticket is minted. See
+  `Arbiter.Tasks.Issue.Changes.InheritTrackerType`.
+
+  The ticket key a task's branch name and conventional-commit PR title carry is
+  `tracker_ref` when set, else `tracker_context_ref` (see
+  `Arbiter.Worker.BranchNamer` and `Arbiter.Mergers.PRTitle`).
+
   ## Audit
 
   Via `AshPaperTrail.Resource` extension. Every create / update / close / reopen
@@ -155,6 +165,21 @@ defmodule Arbiter.Tasks.Issue do
       # workspace has a tracker configured.
       argument :skip_upstream_create, :boolean, default: false
 
+      # #1973: the parent this task is being filed under. Informs the tracker
+      # default only — a child of a tracker-linked parent defaults from the
+      # parent's linkage instead of minting its own ticket (see
+      # `InheritTrackerType`). The caller still attaches the `parent_of` edge
+      # itself (`task_create`, `POST /api/dependencies`).
+      argument :parent_id, :string, allow_nil?: true
+
+      # #1973: overrides the workspace's `tracker.child_policy` for this create.
+      # A refine session passes `:context_only` — it is by definition
+      # decomposing an already-tracked issue.
+      argument :tracker_child_policy, :atom do
+        allow_nil? true
+        constraints one_of: [:context_only, :inherit_parent, :mint]
+      end
+
       change {Arbiter.Tasks.Issue.Changes.GenerateId, []}
       change {Arbiter.Tasks.Issue.Changes.InheritTrackerType, []}
 
@@ -197,6 +222,8 @@ defmodule Arbiter.Tasks.Issue do
         :tracker_context_ref,
         :pr_ref,
         :pr_body,
+        :pr_opened_notified_ref,
+        :pr_opened_transitioned_ref,
         :target_branch,
         :repo,
         :review_only,
@@ -274,6 +301,9 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:verification_outcome, nil)
       change set_attribute(:verification_evidence, nil)
 
+      # bd-a370ak: the PR merged, so there is no merge left to retry.
+      change set_attribute(:pending_merge, nil)
+
       # Same teardown as `:close`: the worker finished and its PR merged, so
       # leaving the agent + worktree alive for the whole verification window
       # would pin a slot and leak a checkout. All best-effort.
@@ -345,6 +375,14 @@ defmodule Arbiter.Tasks.Issue do
              end)
     end
 
+    # bd-a370ak / #2002: the durable pending-merge stamp. Written only through
+    # `Arbiter.Mergers.PendingMerge`; deliberately no lifecycle broadcast — the
+    # Watchdog writes it from its poll loop and nothing renders it live.
+    update :set_pending_merge do
+      require_atomic? false
+      accept [:pending_merge]
+    end
+
     update :close do
       require_atomic? false
       argument :reason, :string
@@ -369,6 +407,9 @@ defmodule Arbiter.Tasks.Issue do
       # keeps `arb prime`'s parked list free of tasks nobody needs to look at.
       change set_attribute(:review_park_reason, nil)
       change set_attribute(:review_parked_at, nil)
+
+      # bd-a370ak: a closed task has no merge left to retry.
+      change set_attribute(:pending_merge, nil)
 
       # bd-bsco7f: persist what this close meant upstream, so the drift check
       # can read the intent instead of guessing it from `pr_ref`. Mirrors the
@@ -447,6 +488,17 @@ defmodule Arbiter.Tasks.Issue do
       # dispatch opens a new PR and the finalizer never targets the wrong task.
       change set_attribute(:pr_ref, nil)
       change set_attribute(:source_pr, nil)
+
+      # bd-a370ak: the reopened task's old PR is not a merge to retry.
+      change set_attribute(:pending_merge, nil)
+
+      # bd-bqlwjo: a new PR opened after this reopen must still get its own
+      # "opened a pull request" comment even though the ticket row itself
+      # persists across the cycle — clear the last-announced ref alongside
+      # `pr_ref` rather than relying on the (very likely, but not guaranteed)
+      # new PR having a different URL.
+      change set_attribute(:pr_opened_notified_ref, nil)
+      change set_attribute(:pr_opened_transitioned_ref, nil)
 
       # bd-bsco7f: same reasoning for the recorded close intent — it describes a
       # close that no longer stands. The next close records its own.
@@ -700,7 +752,8 @@ defmodule Arbiter.Tasks.Issue do
       constraints one_of: @tracker_types
 
       description """
-      Tracker type for a context-only reference on a review task (e.g. `:jira`).
+      Tracker type for a context-only reference (e.g. `:jira`) — on a review
+      task, or on a child filed under a tracker-linked parent (#1973).
       Paired with `tracker_context_ref`. No claim semantics and never synced back
       to the tracker — used only to fetch acceptance criteria at dispatch time to
       give the reviewer the ticket's intent. Safe to use on coworker-owned tickets.
@@ -716,7 +769,10 @@ defmodule Arbiter.Tasks.Issue do
       Tracker issue ref for context-only use on a review task (e.g. \"AX-18004\").
       Paired with `tracker_context_type`. The referenced ticket's description is
       fetched at dispatch and injected into the reviewer's prompt. No assignment
-      check, no write-back (no status transition, no assignee change).
+      check, no write-back (no status transition, no assignee change). When
+      `tracker_ref` is blank it is also the ticket key in the branch name and
+      conventional-commit PR title (#1973), so a context-only child of
+      `VR-19083` still opens a `[VR-19083]` PR.
       """
     end
 
@@ -725,6 +781,43 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 255, trim?: true
 
       description "PR/MR number opened for this task (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
+    end
+
+    attribute :pr_opened_notified_ref, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 2048, trim?: true
+
+      description """
+      The PR/MR URL `Arbiter.Trackers.Sync` last posted the "Arbiter opened a
+      pull request for this ticket" comment for (bd-bqlwjo). A `:pr_opened`
+      lifecycle event whose `pr_url` matches this value is a repeat run on the
+      same PR — a ReviewGate implementation round, a `worker_resume`, or a
+      re-open of an already-linked PR — and both the status transition and the
+      comment/remote-link are skipped. Cleared implicitly by `reopen` clearing
+      `pr_ref`, so a new PR after `task_reopen` gets its own comment even
+      though the ticket itself is unchanged. Durable (not an ETS/process
+      cache) so idempotency survives a server restart.
+      """
+    end
+
+    attribute :pr_opened_transitioned_ref, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 2048, trim?: true
+
+      description """
+      The PR/MR URL `Arbiter.Trackers.Sync` last successfully drove the
+      `:pr_opened` status transition for (bd-bqlwjo). Tracked separately from
+      `pr_opened_notified_ref`: the comment/remote-link is posted at most once
+      per PR ref regardless of outcome (a repeat is a visible duplicate the
+      user is showing us), but the status transition itself must keep
+      retrying on the next run for the same PR ref until it actually lands —
+      e.g. after a gated-fields escalation (blank qa_notes/deployment_notes)
+      or a transient tracker failure on the first attempt. Set only when
+      `transition_event/2` returns `:ok` for `:pr_opened`. Cleared alongside
+      `pr_opened_notified_ref` by `reopen`.
+      """
     end
 
     attribute :source_pr, :string do
@@ -1146,6 +1239,24 @@ defmodule Arbiter.Tasks.Issue do
       default %{}
 
       description "Per-task skill selection override (opt_out/only/add/remove/activation); the task layer of layered skill selection."
+    end
+
+    # ---- pending merge (bd-a370ak / #2002) ----------------------------------
+
+    attribute :pending_merge, :map do
+      allow_nil? true
+      public? false
+
+      description """
+      An approved merge the Watchdog deferred or could not complete — CI still
+      running, a draft PR, a transient forge refusal — recorded durably so it
+      outlives the worker that owned it. `nil` when no merge is pending.
+
+      Written and read only through `Arbiter.Mergers.PendingMerge`, which owns
+      the shape. `Arbiter.Workflows.PendingMergeSweeper` re-arms a worker-less
+      retry for any stamp nobody owns any more. Cleared by `:close`,
+      `:await_verification`, a merge, or a closed PR.
+      """
     end
 
     create_timestamp :created_at

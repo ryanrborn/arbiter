@@ -59,8 +59,15 @@ defmodule Arbiter.Application do
       Arbiter.CircuitBreaker,
       Arbiter.GitHub.Limiter,
       Arbiter.Agents.ProviderPool,
+      # bd-21bmdh: the auth-shaped dispatch hold. Pure bookkeeping (no probes,
+      # no I/O), so the dispatch guard's fail-closed read of it never blocks.
+      Arbiter.Agents.AuthHold,
       Arbiter.Agents.CredentialWatchdog,
       {Registry, keys: :unique, name: Arbiter.Worker.Registry},
+      # bd-9fgg04: live agent work that runs outside Arbiter.Worker.Supervisor
+      # (a dispatch still provisioning, a PR review/reply shelling out to the
+      # agent CLI) registers here for its duration — see Arbiter.Board.Drain.
+      {Registry, keys: :unique, name: Arbiter.Board.Drain.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
       {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},
@@ -81,6 +88,13 @@ defmodule Arbiter.Application do
       # :running forever and external_review_list(status: "running") overstates
       # what's actually in flight. See Arbiter.Reviews.StaleReviewReaper.
       Arbiter.Reviews.StaleReviewReaper,
+      # Re-arms the merge of approved PRs whose owning worker exited while the
+      # merge was waiting on CI / a draft / a transient forge refusal
+      # (bd-a370ak / #2002). Reads the durable `issues.pending_merge` stamp, so
+      # its first sweep after boot is also what picks a pending merge back up
+      # across a restart. Primary-instance only; disabled in test. See
+      # Arbiter.Workflows.PendingMergeSweeper.
+      Arbiter.Workflows.PendingMergeSweeper,
       # Owns the ETS table backing P3 shadow mode's since-boot counters and
       # its report-once dedup set (#1635 §6.3). Inert until
       # `Arbiter.Reviews.CoverageShadow.observe/1` is called from a merge

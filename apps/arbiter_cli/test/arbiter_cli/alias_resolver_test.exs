@@ -53,4 +53,32 @@ defmodule ArbiterCli.AliasResolverTest do
       assert AliasResolver.suggest("anything", []) == []
     end
   end
+
+  describe "consistency — every dispatched verb is resolvable" do
+    test "every verb in Main.dispatch_known/2 is in @known_verbs" do
+      # Extract all verbs handled by dispatch_known/2 from the Main module's
+      # source. This ensures the test itself cannot drift: adding a new
+      # dispatch_known clause will automatically fail the test if the verb
+      # is not in @known_verbs.
+      main_source_path = Path.join([__DIR__, "..", "..", "lib", "arbiter_cli", "main.ex"])
+      main_source = File.read!(main_source_path)
+
+      verb_pattern = ~r/defp dispatch_known\("([^"]+)"/
+
+      dispatch_verbs =
+        verb_pattern
+        |> Regex.scan(main_source, capture: :all_but_first)
+        |> Enum.map(&hd/1)
+        |> Enum.sort()
+        |> Enum.uniq()
+
+      known = AliasResolver.known_verbs()
+
+      for verb <- dispatch_verbs do
+        assert verb in known,
+               "dispatch_known(\"#{verb}\", ...) in Main is not in AliasResolver.@known_verbs; " <>
+                 "every dispatched verb must be resolvable before dispatch"
+      end
+    end
+  end
 end

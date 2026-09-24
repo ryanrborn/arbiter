@@ -96,13 +96,118 @@ defmodule Arbiter.Trackers.Sync do
   end
 
   defp do_lifecycle(issue, event, opts) do
-    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+    if event == :pr_opened and already_announced?(issue, opts) and
+         already_transitioned?(issue, opts) do
+      :ok
+    else
+      Trackers.prepare(issue, load_workspace(issue.workspace_id))
 
-    transition_event(issue, event)
+      if event == :pr_opened do
+        do_pr_opened(issue, opts)
+      else
+        transition_event(issue, event)
+        :ok
+      end
+    end
+  end
 
-    if event == :pr_opened, do: attach_pr_artifacts(issue, opts)
+  # bd-bqlwjo: `:pr_opened` fires on every worker run that finishes with a PR
+  # ref, not just the run that opened it — a ReviewGate implementation round,
+  # a `worker_resume`, or any later run that simply re-resolves the same
+  # already-open PR all take this path with an unchanged `pr_url`. The
+  # comment/remote-link and the status transition are tracked with *separate*
+  # watermarks (`pr_opened_notified_ref` / `pr_opened_transitioned_ref`)
+  # because they need different retry postures: the comment is a visible,
+  # non-idempotent write that must never repeat, but a transition that
+  # escalated on its first attempt (blank gated fields, a transient tracker
+  # failure) must still be retried on the next run for the same PR ref until
+  # it actually lands — silently dropping the retry would strand the ticket
+  # in its pre-review status for the life of that PR. Both columns are
+  # durable (not an ETS/process cache), so idempotency survives a server
+  # restart, and both are cleared by `reopen` alongside `pr_ref` so a
+  # genuinely new PR after `task_reopen` still gets its own comment and
+  # transition.
+  defp do_pr_opened(issue, opts) do
+    unless already_transitioned?(issue, opts) do
+      case transition_event(issue, :pr_opened) do
+        :ok -> record_pr_transitioned(issue, opts)
+        _ -> :ok
+      end
+    end
+
+    unless already_announced?(issue, opts) do
+      attach_pr_artifacts(issue, opts)
+      record_pr_announced(issue, opts)
+    end
 
     :ok
+  end
+
+  defp already_announced?(issue, opts) do
+    case Keyword.get(opts, :pr_url) do
+      url when is_binary(url) and url != "" -> url == issue.pr_opened_notified_ref
+      _ -> false
+    end
+  end
+
+  defp already_transitioned?(issue, opts) do
+    case Keyword.get(opts, :pr_url) do
+      url when is_binary(url) and url != "" -> url == issue.pr_opened_transitioned_ref
+      _ -> false
+    end
+  end
+
+  # Record the announced PR ref AFTER attempting the comment/link, regardless
+  # of its outcome — mirrors the existing "try once, never retry the comment
+  # on this same call" posture documented above for `add_comment/2`: a wire
+  # failure here already escalates loudly, and a next run for the *same* PR
+  # re-attempting is exactly the duplicate-comment bug this guard exists to
+  # close. A different PR (new `pr_url`) is unaffected — it is not yet the
+  # recorded ref, so it announces normally.
+  defp record_pr_announced(issue, opts) do
+    case Keyword.get(opts, :pr_url) do
+      url when is_binary(url) and url != "" ->
+        case Ash.update(issue, %{pr_opened_notified_ref: url}, action: :update) do
+          {:ok, _updated} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Trackers.Sync: failed to record pr_opened_notified_ref for task=#{issue.id}: " <>
+                inspect(reason)
+            )
+
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Record the transitioned PR ref ONLY when `transition_event/2` returned
+  # `:ok` (the caller already guards this) — unlike the comment watermark, a
+  # failed attempt must NOT be recorded, so the next run for the same PR ref
+  # retries the transition instead of silently giving up on it forever.
+  defp record_pr_transitioned(issue, opts) do
+    case Keyword.get(opts, :pr_url) do
+      url when is_binary(url) and url != "" ->
+        case Ash.update(issue, %{pr_opened_transitioned_ref: url}, action: :update) do
+          {:ok, _updated} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Trackers.Sync: failed to record pr_opened_transitioned_ref for task=#{issue.id}: " <>
+                inspect(reason)
+            )
+
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
   end
 
   @doc """
@@ -272,11 +377,19 @@ defmodule Arbiter.Trackers.Sync do
         sleep(wait_ms)
         do_transition(issue, event, attempt + 1, start_ms)
 
-      {:error, %{kind: :validation_failed} = reason} ->
+      {:error, %{kind: kind} = reason} when kind in [:validation_failed, :no_transition_path] ->
         # A validation_failed can be a race: e.g. GitHub auto-closed the issue via a
         # `Closes #N` keyword between our GET (which saw "open") and our PATCH. The
         # tracker rejects the redundant transition, but the desired end-state is already
         # reached. Re-fetch to confirm before escalating.
+        #
+        # no_transition_path is the same recovery, for a different cause: the BFS in
+        # `Jira.resolve_multi_hop/3` found no forward edge from the ticket's *current*
+        # status to the mapped target — e.g. a first-time `:pr_opened` on a ticket
+        # already past "In Code Review" (say "Code Complete"), which has no backward
+        # edge in `transition_graph`. That's not a wire failure, it's the ticket
+        # already being at-or-past where we'd have sent it, so the same
+        # already-at-target? recovery applies before escalating.
         if already_at_target?(issue, event) do
           Logger.debug(
             "Trackers.Sync: #{event} for task=#{issue.id} " <>

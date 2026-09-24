@@ -22,6 +22,26 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "arb done"
     end
 
+    test "shows the phase and agent liveness" do
+      stub_get("/api/workers/bd-002", %{
+        "task_id" => "bd-002",
+        "status" => "running",
+        "phase" => "in_review",
+        "phase_label" => "in review",
+        "agent_live" => false,
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => []
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-002"]) end)
+      assert exit_code == 0
+      assert out =~ "Phase:"
+      assert out =~ "in review"
+      assert out =~ "no live agent"
+    end
+
     test "missing task_id returns a friendly error" do
       {_out, _err, exit_code} = capture(fn -> Worker.run(["show"]) end)
       assert exit_code != 0
@@ -80,6 +100,38 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     end
   end
 
+  describe "worker show cost" do
+    test "prints the task's settled + in-flight worker spend" do
+      stub_get("/api/workers/bd-009", %{
+        "task_id" => "bd-009",
+        "status" => "running",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "cost_usd" => 3.75,
+        "cost_settled_usd" => 2.5,
+        "cost_live_usd" => 1.25,
+        "cost_live" => true
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-009"]) end)
+      assert out =~ "Spend:      ~$3.75 (incl. ~$1.25 in flight)"
+    end
+
+    test "an unpriced task prints n/a" do
+      stub_get("/api/workers/bd-010", %{
+        "task_id" => "bd-010",
+        "status" => "running",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "cost_usd" => nil,
+        "cost_unpriced" => true
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-010"]) end)
+      assert out =~ "Spend:      n/a"
+    end
+  end
+
   describe "worker runs" do
     test "lists historical runs newest-first with type, status, and model" do
       stub_get("/api/workers/history", %{
@@ -116,6 +168,28 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "summary: VERDICT: REQUEST_CHANGES — needs a guard"
       # Newest-first ordering is preserved from the API: review run before main.
       assert :binary.match(out, "run-2") < :binary.match(out, "run-1")
+    end
+
+    test "an interrupted run (shut down with the server) is not labelled a failure (bd-aje6fj)" do
+      stub_get("/api/workers/history", %{
+        "data" => [
+          %{
+            "id" => "run-3",
+            "task_id" => "bd-013",
+            "worker_type" => "main",
+            "status" => "interrupted",
+            "started_at" => "2026-09-18T14:00:00Z",
+            "completed_at" => "2026-09-18T14:30:00Z",
+            "failure_reason" => "server shutdown"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-013"]) end)
+      assert exit_code == 0
+      assert out =~ "status=interrupted"
+      assert out =~ "reason: server shutdown"
+      refute out =~ "failure:"
     end
 
     test "reports when no historical runs exist" do
@@ -161,6 +235,85 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "Active workers (1)"
       assert out =~ "bd-001"
       assert out =~ "status=running"
+    end
+
+    # bd-aw2cyt: a row whose agent has exited must not read as running work.
+    test "renders the phase, and marks a row with no live agent" do
+      stub_get("/api/workers", %{
+        "data" => [
+          %{
+            "task_id" => "bd-001",
+            "status" => "running",
+            "phase" => "waiting_ci_merge",
+            "phase_label" => "waiting on CI / merge",
+            "agent_live" => false,
+            "current_step" => "implement",
+            "repo" => "test/repo",
+            "started_at" => "2026-05-20T19:00:00Z"
+          },
+          %{
+            "task_id" => "bd-002",
+            "status" => "running",
+            "phase" => "implementing",
+            "phase_label" => "implementing",
+            "agent_live" => true,
+            "current_step" => "implement",
+            "repo" => "test/repo",
+            "started_at" => "2026-05-20T19:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["list"]) end)
+      assert exit_code == 0
+      assert out =~ "phase=waiting_ci_merge"
+      assert out =~ "phase=implementing"
+      # The dead row is called out; the live one is not.
+      [dead, live] = out |> String.split("\n") |> Enum.filter(&(&1 =~ "bd-00"))
+      assert dead =~ "no agent"
+      refute live =~ "no agent"
+    end
+
+    # bd-8vnuy3: the server now sends settled + in-flight spend. A live figure
+    # must read as an estimate, an unpriced one as n/a, never as $0.00.
+    test "renders live, settled, unpriced and degraded cost distinctly" do
+      row = %{
+        "status" => "running",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z"
+      }
+
+      stub_get("/api/workers", %{
+        "data" => [
+          Map.merge(row, %{
+            "task_id" => "bd-live",
+            "cost_usd" => 16.53,
+            "cost_live" => true,
+            "cost_live_usd" => 2.99
+          }),
+          Map.merge(row, %{"task_id" => "bd-settled", "cost_usd" => 13.54, "cost_live" => false}),
+          Map.merge(row, %{"task_id" => "bd-agy", "cost_usd" => nil, "cost_unpriced" => true}),
+          Map.merge(row, %{
+            "task_id" => "bd-torn",
+            "cost_usd" => 2.0,
+            "cost_live" => true,
+            "cost_live_usd" => 0.0,
+            "cost_degraded" => true
+          })
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["list"]) end)
+      [live, settled, agy, torn] = out |> String.split("\n") |> Enum.filter(&(&1 =~ "bd-"))
+
+      assert live =~ "cost=~$16.53 (incl. ~$2.99 in flight)"
+      assert settled =~ "cost=$13.54"
+      refute settled =~ "~"
+      assert agy =~ "cost=n/a"
+      refute agy =~ "$0.00"
+      assert torn =~ "cost=~$2.00"
+      assert torn =~ "live read incomplete"
     end
 
     test "(none) when no active workers" do

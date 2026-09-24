@@ -15,9 +15,13 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     * **Dispatch guard** — `Arbiter.Worker.Dispatch` calls `expired?/1` before
       dispatching a real worker. A known-expired adapter is refused immediately
       without re-running the probe, preventing a wave of identical 401 failures.
-    * **Early mark** — `Arbiter.Worker` calls `mark_expired/2` when a worker
-      dies with `:auth_expired`, so the Watchdog records the failure immediately
-      rather than waiting for the next periodic probe.
+    * **Auth hold** — a worker dying with `:auth_expired` no longer marks this
+      module directly. It feeds `Arbiter.Agents.AuthHold`'s per-provider streak
+      (bd-21bmdh), and the hold calls `mark_expired/3` once N consecutive deaths
+      open it — a single death is now a retry, not a fleet-wide refusal. In
+      return, every recovery here (a passing periodic probe, or
+      `mark_recovered/2`) is forwarded to `AuthHold.recovered/2`, which is what
+      clears an open hold automatically.
     * **Usage-poll mark** — `Arbiter.Quota.CloudProbe` also calls `mark_expired/3`
       for Claude after N consecutive `{:http_error, 401}` responses from the
       `/api/oauth/usage` poll (bd-1pmf9h, default N=2). This is a second,
@@ -45,7 +49,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   That makes this module's own periodic probe (below) the *only* live probe
   left anywhere in the fleet, and an entirely optional one: the dispatch
-  guard, `mark_expired/2` (from a dying worker) and `mark_recovered/2` (from
+  guard, `mark_expired/2` (from `AuthHold`, after N dying workers) and `mark_recovered/2` (from
   the usage-poll signal) all keep working off held state with **no probing at
   all**. Setting `:adapters` to `[]` — as already done for `gemini` here,
   cutting it from ~180 probes/day to 26 — is a supported, intentional
@@ -98,6 +102,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   require Logger
 
+  alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.Preflight
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Worker.StopReason
@@ -131,17 +136,54 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @doc """
+  Returns `true` if `adapter` has an outstanding credential-expiry escalation
+  recorded, from *any* source (`:periodic_probe`, `:worker_report`, or
+  `:usage_poll`).
+
+  This is not the dispatch gate — see `expired?/2` for that. The two diverge
+  for a `:usage_poll`-raised expiry (bd-6jjgk0 finding 1): `Arbiter.Quota
+  .CloudProbe`'s `/api/oauth/usage` poll reads a credential the worker CLI
+  never touches (#1875), so it raises/restates a mailbox escalation here
+  without ever closing the dispatch gate on its own. Safe to call from any
+  process; returns `false` if the Watchdog is not running.
+
+  Exposed for tests and diagnostics (asserting episode state without reaching
+  into the mailbox); no production caller depends on it.
+  """
+  @spec escalated?(module(), GenServer.server()) :: boolean()
+  def escalated?(adapter, server \\ __MODULE__) when is_atom(adapter) do
+    GenServer.call(server, {:escalated?, adapter}, 1_000)
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  @doc """
   Immediately mark `adapter` as credential-expired and raise coordinator escalations.
 
-  Called by `Arbiter.Worker.fail_stopped/2` when a worker dies with category
-  `:auth_expired`, so the Watchdog records the failure and blocks future dispatches
-  without waiting for the next periodic probe. Fire-and-forget; best-effort.
+  Called by `Arbiter.Agents.AuthHold` when N consecutive `:auth_expired` worker
+  deaths open its hold (bd-21bmdh), and by `Arbiter.Quota.CloudProbe`'s free
+  401-streak signals, so the Watchdog records the failure and blocks future
+  dispatches without waiting for the next periodic probe. Fire-and-forget; best-effort.
   Pass a `server` pid/name to target a specific instance (useful in tests).
+
+  `source` tags *which* signal raised this (`:worker_report` — the default,
+  covering `AuthHold` deaths — `:usage_poll`, or `:periodic_probe`) and is
+  remembered alongside the expiry. Only a recovery signal carrying the same
+  `source` is allowed to clear it (see `mark_recovered/3`) — this is what
+  keeps a `CloudProbe` usage-poll expiry from being wiped out by an unrelated
+  passing CLI probe mid-episode (bd-6jjgk0).
   """
-  @spec mark_expired(module(), StopReason.t(), GenServer.server()) :: :ok
-  def mark_expired(adapter, %StopReason{} = reason, server \\ __MODULE__)
-      when is_atom(adapter) do
-    GenServer.cast(server, {:mark_expired, adapter, reason})
+  @spec mark_expired(module(), StopReason.t(), GenServer.server(), atom()) :: :ok
+  def mark_expired(
+        adapter,
+        %StopReason{} = reason,
+        server \\ __MODULE__,
+        source \\ :worker_report
+      )
+      when is_atom(adapter) and is_atom(source) do
+    GenServer.cast(server, {:mark_expired, adapter, reason, source})
     :ok
   rescue
     _ -> :ok
@@ -153,20 +195,32 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   Clear `adapter`'s expired mark following an independent success signal.
 
   Called by `Arbiter.Quota.CloudProbe` when a `/api/oauth/usage` poll succeeds,
-  so a usage-poll-detected expiry (`mark_expired/3`) can also recover without
+  so a usage-poll-detected expiry (`mark_expired/4`) can also recover without
   waiting for the Watchdog's own periodic CLI probe — the symmetric
   counterpart to that signal (bd-1pmf9h). A no-op if `adapter` isn't marked
-  expired. Fire-and-forget; best-effort. Pass a `server` pid/name to target a
-  specific instance (useful in tests).
+  expired *by this same `source`* (bd-6jjgk0) — a periodic CLI probe passing
+  does not clear an expiry that a usage-poll streak raised, since that probe
+  reads a separately cached token (#1875) and its success says nothing about
+  the usage poll's own credential. Fire-and-forget; best-effort. Pass a
+  `server` pid/name to target a specific instance (useful in tests).
   """
-  @spec mark_recovered(module(), GenServer.server()) :: :ok
-  def mark_recovered(adapter, server \\ __MODULE__) when is_atom(adapter) do
-    GenServer.cast(server, {:mark_recovered, adapter})
+  @spec mark_recovered(module(), GenServer.server(), atom()) :: :ok
+  def mark_recovered(adapter, server \\ __MODULE__, source \\ :worker_report)
+      when is_atom(adapter) and is_atom(source) do
+    GenServer.cast(server, {:mark_recovered, adapter, source})
     :ok
   rescue
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  @doc false
+  # Point this instance's recovery forwarding at a specific `AuthHold` (tests
+  # pairing a private hold with a private watchdog).
+  @spec set_auth_hold(GenServer.server(), GenServer.server()) :: :ok
+  def set_auth_hold(auth_hold, server \\ __MODULE__) do
+    GenServer.call(server, {:set_auth_hold, auth_hold})
   end
 
   @doc """
@@ -216,9 +270,11 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     # per-adapter *expiry* state and persists across polls as before; seeding it
     # here is just an initial all-healthy snapshot.
     state = %{
-      adapters: Map.new(probe_adapters(opts), &{&1, :ok}),
+      adapters: %{},
+      gate: Map.new(probe_adapters(opts), &{&1, :ok}),
       opts: opts,
-      enabled: enabled
+      enabled: enabled,
+      auth_hold: Keyword.get(opts, :auth_hold, AuthHold)
     }
 
     if enabled do
@@ -230,27 +286,44 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   @impl true
   def handle_call({:expired?, adapter}, _from, state) do
-    {:reply, Map.get(state.adapters, adapter, :ok) != :ok, state}
+    {:reply, Map.get(state.gate, adapter, :ok) != :ok, state}
   end
+
+  @impl true
+  def handle_call({:escalated?, adapter}, _from, state) do
+    {:reply, adapter_escalated?(state, adapter), state}
+  end
+
+  def handle_call({:set_auth_hold, auth_hold}, _from, state),
+    do: {:reply, :ok, %{state | auth_hold: auth_hold}}
 
   @impl true
   def handle_call(:reset, _from, state) do
-    cleared = Map.new(state.adapters, fn {k, _} -> {k, :ok} end)
-    {:reply, :ok, %{state | adapters: cleared}}
+    cleared_gate = Map.new(state.gate, fn {k, _} -> {k, :ok} end)
+    {:reply, :ok, %{state | adapters: %{}, gate: cleared_gate}}
   end
 
   @impl true
-  def handle_cast({:mark_expired, adapter, reason}, state) do
-    if already_expired?(state, adapter) do
+  def handle_cast({:mark_expired, adapter, reason, source}, state) do
+    if already_expired?(state, adapter, source) do
+      # Still outstanding — don't touch `state.adapters`/`state.gate`, but do
+      # restate the existing escalation so a growing counter (e.g. CloudProbe's
+      # "N consecutive 401s") is visible on the one row instead of frozen at
+      # whatever N it happened to be when the episode opened (bd-6jjgk0 finding 1
+      # round 2). `credential_expired/5` already restates in place when a row is
+      # outstanding (see `restate_credential_escalation/2`), so this reuses that
+      # path rather than inserting anything new.
+      gate_closed? = Map.get(state.gate, adapter, :ok) != :ok
+      escalate_all(adapter, reason, source, gate_closed?)
       {:noreply, state}
     else
-      {:noreply, record_expiry(state, adapter, reason, :worker_report)}
+      {:noreply, record_expiry(state, adapter, reason, source)}
     end
   end
 
   @impl true
-  def handle_cast({:mark_recovered, adapter}, state) do
-    {:noreply, on_probe_ok(state, adapter, Map.get(state.adapters, adapter, :ok))}
+  def handle_cast({:mark_recovered, adapter, source}, state) do
+    {:noreply, on_probe_ok(state, adapter, source)}
   end
 
   @impl true
@@ -273,21 +346,19 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   # ---- internals ----------------------------------------------------------
 
   defp run_checks(state, adapters) do
-    Enum.reduce(adapters, state, fn adapter, acc ->
-      probe_one(acc, adapter, Map.get(acc.adapters, adapter, :ok))
-    end)
+    Enum.reduce(adapters, state, fn adapter, acc -> probe_one(acc, adapter) end)
   end
 
-  defp probe_one(state, adapter, current_status) do
+  defp probe_one(state, adapter) do
     case safe_check(adapter) do
       :ok ->
-        on_probe_ok(state, adapter, current_status)
+        on_probe_ok(state, adapter, :periodic_probe)
 
       :skipped ->
-        on_probe_ok(state, adapter, current_status)
+        on_probe_ok(state, adapter, :periodic_probe)
 
       {:error, %StopReason{category: :auth_expired} = reason} ->
-        if already_expired?(state, adapter) do
+        if already_expired?(state, adapter, :periodic_probe) do
           Logger.debug(
             "CredentialWatchdog: #{adapter_name(adapter)} still expired (periodic re-check)"
           )
@@ -318,40 +389,154 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     end
   end
 
-  defp on_probe_ok(state, adapter, {:expired, _}) do
-    Logger.info("CredentialWatchdog: #{adapter_name(adapter)} credentials recovered")
-    %{state | adapters: Map.put(state.adapters, adapter, :ok)}
+  # bd-21bmdh: every accepted recovery is also the `AuthHold` reset signal — a
+  # hold that N worker deaths opened marked this adapter expired, and this
+  # transition is how it clears without an operator.
+  #
+  # bd-6jjgk0: each adapter tracks one independent episode *per source* in
+  # `state.adapters` (`%{adapter => %{source => {:expired, reason_map}}}`),
+  # not one shared status. That is what lets a `:usage_poll` episode (raised
+  # by `Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll, which reads a
+  # separately cached token, #1875) stay open on its own row while a
+  # `:periodic_probe`/`:worker_report` expiry for the very same adapter is
+  # independently recorded, escalated, and closes the gate (finding 1 —
+  # sharing one row meant `already_expired?` silently dropped the second
+  # source's expiry entirely). `recovers?/2` decides, per outstanding source,
+  # whether *this* recovery signal is allowed to close that source's episode:
+  # `:usage_poll` only recovers `:usage_poll` (its cached token says nothing
+  # about the worker-facing credential and vice versa — finding 2), while
+  # `:periodic_probe` and `:worker_report` recover each other, since both
+  # read the credential workers actually dispatch with.
+  defp on_probe_ok(state, adapter, recovering_source) do
+    state = maybe_open_gate(state, adapter, recovering_source)
+    per_source = Map.get(state.adapters, adapter, %{})
+
+    {to_clear, remaining} =
+      Enum.split_with(per_source, fn {raised_source, status} ->
+        match?({:expired, _}, status) and recovers?(raised_source, recovering_source)
+      end)
+
+    if to_clear == [] do
+      state
+    else
+      Logger.info("CredentialWatchdog: #{adapter_name(adapter)} credentials recovered")
+      AuthHold.recovered(adapter, state.auth_hold)
+
+      Enum.each(to_clear, fn {raised_source, _status} -> recover_all(adapter, raised_source) end)
+
+      %{state | adapters: Map.put(state.adapters, adapter, Map.new(remaining))}
+    end
   end
 
-  defp on_probe_ok(state, _adapter, :ok), do: state
+  defp recovers?(:usage_poll, recovering_source), do: recovering_source == :usage_poll
+  defp recovers?(_raised_source, recovering_source), do: recovering_source != :usage_poll
+
+  # `:usage_poll` (`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage`-family poll)
+  # reads a credential the worker CLI never touches (#1875) — it must never
+  # close the dispatch gate, only raise/restate its own mailbox episode. Only
+  # a signal that reads what workers actually dispatch with — the Watchdog's
+  # own periodic CLI probe, or N worker deaths via `AuthHold` — is allowed to
+  # close (or reopen) it. Before this, both sources wrote the same map that
+  # both `expired?/1` and the escalation dedupe read, so a `:usage_poll`
+  # episode held the gate closed for its whole duration even while the CLI
+  # probe kept passing and workers kept dispatching fine (bd-6jjgk0 finding 1).
+  defp gate_source?(:usage_poll), do: false
+  defp gate_source?(_), do: true
+
+  defp maybe_open_gate(state, adapter, source) do
+    if gate_source?(source) do
+      %{state | gate: Map.put(state.gate, adapter, :ok)}
+    else
+      state
+    end
+  end
 
   defp record_expiry(state, adapter, reason, source) do
-    source_label = if source == :periodic_probe, do: "periodic probe", else: "worker report"
+    source_label = source_label(source)
 
     Logger.warning(
       "CredentialWatchdog: #{adapter_name(adapter)} credentials expired " <>
         "(detected via #{source_label}) — #{reason.summary}"
     )
 
-    escalate_all(adapter, reason)
-    %{state | adapters: Map.put(state.adapters, adapter, {:expired, StopReason.to_map(reason)})}
+    new_gate =
+      if gate_source?(source) do
+        Map.put(state.gate, adapter, {:expired, StopReason.to_map(reason)})
+      else
+        state.gate
+      end
+
+    gate_closed? = Map.get(new_gate, adapter, :ok) != :ok
+
+    escalate_all(adapter, reason, source, gate_closed?)
+
+    new_adapters =
+      Map.update(
+        state.adapters,
+        adapter,
+        %{source => {:expired, StopReason.to_map(reason)}},
+        &Map.put(&1, source, {:expired, StopReason.to_map(reason)})
+      )
+
+    %{state | adapters: new_adapters, gate: new_gate}
   end
 
-  defp already_expired?(state, adapter) do
-    case Map.get(state.adapters, adapter, :ok) do
+  defp source_label(:periodic_probe), do: "periodic probe"
+  defp source_label(:usage_poll), do: "usage poll"
+  defp source_label(_), do: "worker report"
+
+  defp already_expired?(state, adapter, source) do
+    case state.adapters |> Map.get(adapter, %{}) |> Map.get(source) do
       {:expired, _} -> true
       _ -> false
     end
   end
 
+  defp adapter_escalated?(state, adapter) do
+    state.adapters
+    |> Map.get(adapter, %{})
+    |> Map.values()
+    |> Enum.any?(&match?({:expired, _}, &1))
+  end
+
   # Send a coordinator escalation to every active workspace. Best-effort — a DB
   # hiccup or an empty workspace table must not crash the Watchdog.
-  defp escalate_all(adapter, %StopReason{} = reason) do
+  #
+  # `gate_closed?` is this adapter's *actual* dispatch-gate state right after
+  # this expiry was recorded (see `record_expiry/4` / `gate_source?/1`), not
+  # inferred from `source` — a `:usage_poll` expiry leaves it `false` unless a
+  # gate-source expiry also happens to be outstanding, so the escalation text
+  # never claims dispatches are suspended when they are not (bd-6jjgk0 finding 1).
+  defp escalate_all(adapter, %StopReason{} = reason, source, gate_closed?) do
     safe(fn ->
       workspaces = Ash.read!(Arbiter.Tasks.Workspace)
 
       Enum.each(workspaces, fn ws ->
-        CoordinatorNotifier.credential_expired(%{workspace_id: ws.id}, adapter, reason)
+        CoordinatorNotifier.credential_expired(
+          %{workspace_id: ws.id},
+          adapter,
+          reason,
+          source,
+          gate_closed?
+        )
+      end)
+    end)
+  end
+
+  # Mirrors `escalate_all/3`: tells every active workspace's coordinator
+  # mailbox that `adapter` recovered, clearing whatever `credential_expired/4`
+  # escalation is still outstanding for it (bd-6jjgk0) so the next expiry
+  # starts a fresh episode rather than looking like a continuation of this
+  # one. `source` is the one that actually recovered (and matched the one
+  # that raised it, per `on_probe_ok/4` above) — passed through so the
+  # cleared/restored message names the right episode. Best-effort, same as
+  # `escalate_all/3`.
+  defp recover_all(adapter, source) do
+    safe(fn ->
+      workspaces = Ash.read!(Arbiter.Tasks.Workspace)
+
+      Enum.each(workspaces, fn ws ->
+        CoordinatorNotifier.credential_restored(%{workspace_id: ws.id}, adapter, source)
       end)
     end)
   end
@@ -362,7 +547,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   # With no override configured the probe list is every adapter, so this is
   # identical to the previous whole-map check.
   defp next_interval(state, adapters) do
-    if Enum.any?(adapters, &(Map.get(state.adapters, &1, :ok) != :ok)) do
+    if Enum.any?(adapters, &(Map.get(state.gate, &1, :ok) != :ok)) do
       recovery_interval_ms(state.opts)
     else
       poll_interval_ms(state.opts)

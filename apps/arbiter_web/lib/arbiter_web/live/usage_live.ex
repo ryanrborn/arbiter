@@ -33,7 +33,7 @@ defmodule ArbiterWeb.UsageLive do
   require Ash.Query
 
   @ranges ~w(7d 30d all)
-  @tabs ~w(by_task by_model by_repo)
+  @tabs ~w(by_task by_model by_repo by_account)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -63,6 +63,7 @@ defmodule ArbiterWeb.UsageLive do
     task_rollup = summarize!(by: :task, since: since)
     model_rollup = summarize!(by: :model, since: since)
     repo_rollup = summarize!(by: :repo, since: since)
+    account_rollup = summarize!(by: :provider_account, since: since)
     work_sessions = load_work_sessions(since)
     titles = load_titles(task_rollup)
 
@@ -89,6 +90,7 @@ defmodule ArbiterWeb.UsageLive do
       bar_rows(model_rollup, grand_cost, &model_hue/2, &ModelDisplay.short/1)
     )
     |> assign(:repo_bars, bar_rows(repo_rollup, grand_cost, &repo_hue/2, &to_string/1))
+    |> assign(:account_bars, bar_rows(account_rollup, grand_cost, &repo_hue/2, &account_label/1))
     |> assign_overage()
   end
 
@@ -276,6 +278,18 @@ defmodule ArbiterWeb.UsageLive do
   defp repo_hue(_repo, 1), do: "var(--arb-info)"
   defp repo_hue(_repo, _index), do: "var(--arb-done)"
 
+  # `Usage.summarize(by: :provider_account)`'s group is an account id (or the
+  # `"(none)"` sentinel) — resolve it to the slug an operator recognizes,
+  # falling back to the raw id for an account that has since been deleted.
+  defp account_label("(none)"), do: "(none)"
+
+  defp account_label(account_id) do
+    case Arbiter.Accounts.Resolver.get(account_id) do
+      %{slug: slug} -> slug
+      nil -> account_id
+    end
+  end
+
   defp sum_cost(rollup),
     do: Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
 
@@ -344,7 +358,8 @@ defmodule ArbiterWeb.UsageLive do
               tabs={[
                 %{label: "By task", value: "by_task"},
                 %{label: "By model", value: "by_model"},
-                %{label: "By repo", value: "by_repo"}
+                %{label: "By repo", value: "by_repo"},
+                %{label: "By account", value: "by_account"}
               ]}
               active={@tab}
               event="tab"
@@ -414,37 +429,59 @@ defmodule ArbiterWeb.UsageLive do
                 No usage events yet.
               </Feedback.empty_state>
             </div>
+
+            <div :if={@tab == "by_account"} class="flex flex-col gap-[10px]">
+              <.usage_bar
+                :for={bar <- @account_bars}
+                label={bar.label}
+                value={bar.value}
+                pct={bar.pct}
+                hue={bar.hue}
+              />
+              <Feedback.empty_state :if={@account_bars == []} icon={nil}>
+                No usage events yet.
+              </Feedback.empty_state>
+            </div>
           </.panel>
 
           <div class="flex flex-col gap-4">
             <.panel title="Rate limits" meta="live">
               <div class="flex flex-col gap-3">
-                <div :for={quota <- @quotas} class="flex flex-col gap-[3px]">
+                <div
+                  :for={quota <- @quotas}
+                  id={"usage-quota-#{quota.provider}"}
+                  class="flex flex-col gap-[3px]"
+                >
                   <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
                     {quota_provider_label(quota.provider)}
                   </span>
-                  <div class="flex flex-col gap-[6px]">
-                    <Feedback.quota_bar
-                      provider={quota.provider}
-                      show_label={false}
-                      window="5h"
-                      utilization={quota.utilization_5h}
-                      reset_at={quota.reset_5h_at}
-                      overage_status={quota.overage_status}
-                      representative_claim={quota.representative_claim}
-                      width={170}
-                    />
-                    <Feedback.quota_bar
-                      provider={quota.provider}
-                      show_label={false}
-                      window="7d"
-                      utilization={quota.utilization_7d}
-                      reset_at={quota.reset_7d_at}
-                      overage_status={quota.overage_status}
-                      representative_claim={quota.representative_claim}
-                      width={170}
-                    />
-                  </div>
+                  <%!-- Antigravity's two bucket groups each get their own pair
+                        (bd-gukyy1); anything else — including an antigravity
+                        row with no parseable buckets — is the view's own
+                        primary/secondary windows. --%>
+                  <%= case usage_quota_groups(quota) do %>
+                    <% [] -> %>
+                      <div class="flex flex-col gap-[6px]">
+                        <.usage_quota_bar
+                          :for={w <- quota_windows(quota)}
+                          quota={quota}
+                          w={w}
+                        />
+                      </div>
+                    <% groups -> %>
+                      <div
+                        :for={group <- groups}
+                        id={"usage-quota-#{quota.provider}-#{group.group}"}
+                        class="flex flex-col gap-[4px] mt-[3px]"
+                      >
+                        <span class="text-[10px] leading-none text-[var(--text-secondary)] font-[family-name:var(--font-mono)]">
+                          {group.label}
+                        </span>
+                        <div class="flex flex-col gap-[6px]">
+                          <.usage_quota_bar :for={w <- group.windows} quota={quota} w={w} />
+                        </div>
+                      </div>
+                  <% end %>
                 </div>
                 <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
                   The hairline is elapsed time. Bar past the line means you are burning faster than the window.
@@ -497,6 +534,33 @@ defmodule ArbiterWeb.UsageLive do
     """
   end
 
+  # One rate-limit bar: `w` is a `QuotaHelpers.quota_windows/1` /
+  # `quota_antigravity_groups/1` window, `quota` the view it came from.
+  attr :quota, :map, required: true
+  attr :w, :map, required: true
+
+  defp usage_quota_bar(assigns) do
+    ~H"""
+    <Feedback.quota_bar
+      provider={@quota.provider}
+      show_label={false}
+      window={@w.window}
+      label={@w.label}
+      utilization={@w.utilization}
+      reset_at={@w.reset_at}
+      overage_status={@quota.overage_status}
+      representative_claim={@quota.representative_claim}
+      stale_message={@quota.message}
+      gate_policy={Map.get(@quota, :gate_policy)}
+      label_width={34}
+      width={150}
+    />
+    """
+  end
+
+  defp usage_quota_groups(%{provider: "antigravity"} = quota), do: quota_antigravity_groups(quota)
+  defp usage_quota_groups(_quota), do: []
+
   attr :label, :string, required: true
   attr :value, :string, required: true
   attr :pct, :integer, required: true
@@ -531,6 +595,7 @@ defmodule ArbiterWeb.UsageLive do
   defp tab_meta("by_task"), do: "by task"
   defp tab_meta("by_model"), do: "by model"
   defp tab_meta("by_repo"), do: "by repo"
+  defp tab_meta("by_account"), do: "by account"
 
   defp bucket_pct(_count, 0), do: 0
   defp bucket_pct(count, total), do: round(count / total * 100)

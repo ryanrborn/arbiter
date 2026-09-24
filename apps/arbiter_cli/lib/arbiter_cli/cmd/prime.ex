@@ -5,6 +5,10 @@ defmodule ArbiterCli.Cmd.Prime do
 
   Output (in order):
 
+    0. **Scheduler** — the drain state (`GET /api/scheduler/status`): running,
+       paused-and-draining (with what is still in flight), or
+       paused-and-quiescent (the only safe restart point). Always shown when
+       the server answers, because a pause alone does not mean idle.
     1. **Global Coordinator Inbox** — up to 5 most recent unread messages
        addressed to the coordinator, not scoped to any single workspace.
        Omitted entirely when there are none.
@@ -46,9 +50,10 @@ defmodule ArbiterCli.Cmd.Prime do
 
   ## `--json` shape
 
-  Emits a JSON object with two keys:
+  Emits a JSON object with three keys:
 
       {
+        "scheduler": {"state": "draining", "safe_to_restart": false, "in_flight": [...], ...},
         "coordinator_inbox": [...],
         "workspaces": [
           {
@@ -70,7 +75,7 @@ defmodule ArbiterCli.Cmd.Prime do
       labelled text sections.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{Client, Output, SchedulerState}
 
   def run(argv) do
     if Output.help?(argv) do
@@ -88,6 +93,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp to_json(sections) do
     %{
+      scheduler: unwrap(sections.scheduler),
       coordinator_inbox: unwrap(sections.global_coordinator_inbox),
       workspaces: Enum.map(sections.workspaces, &workspace_to_json/1)
     }
@@ -129,9 +135,17 @@ defmodule ArbiterCli.Cmd.Prime do
       end
 
     %{
+      scheduler: gather_scheduler(),
       global_coordinator_inbox: gather_global_coordinator_inbox(),
       workspaces: workspace_sections
     }
+  end
+
+  defp gather_scheduler do
+    case SchedulerState.fetch() do
+      {:ok, body} -> {:ok, body}
+      {:error, %Client.Error{message: msg}} -> {:error, msg}
+    end
   end
 
   defp gather_workspaces do
@@ -248,6 +262,7 @@ defmodule ArbiterCli.Cmd.Prime do
   # ---- render ------------------------------------------------------------
 
   defp emit_text(sections) do
+    emit_scheduler(sections.scheduler)
     maybe_emit_global_coordinator_inbox(sections.global_coordinator_inbox)
     Enum.each(sections.workspaces, &emit_workspace_block/1)
   end
@@ -315,6 +330,21 @@ defmodule ArbiterCli.Cmd.Prime do
   defp standing_order_line(order), do: "[ ] #{inspect(order)}"
 
   # Omitted entirely when there's no unread coordinator mail.
+  # bd-9fgg04: a paused scheduler still draining must not read as idle — the
+  # in-flight list is exactly the work a restart would kill.
+  defp emit_scheduler({:ok, body}) do
+    IO.puts("== Scheduler ==")
+    IO.puts("  " <> SchedulerState.headline(body))
+    Enum.each(SchedulerState.entry_lines(body), &IO.puts("    " <> &1))
+    IO.puts("")
+  end
+
+  defp emit_scheduler({:error, msg}) do
+    IO.puts("== Scheduler ==")
+    IO.puts("  (unavailable: #{msg})")
+    IO.puts("")
+  end
+
   defp maybe_emit_global_coordinator_inbox({:ok, []}), do: :ok
 
   defp maybe_emit_global_coordinator_inbox({:ok, list}) do

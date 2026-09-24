@@ -211,6 +211,13 @@ defmodule ArbiterCli.Cmd.Worker do
     end
 
     IO.puts("Status:     #{snap["status"]}")
+
+    # bd-aw2cyt: the record's status outlives its agent. Say which phase the
+    # work is actually in, and whether anything is running for it at all.
+    if snap["phase"] do
+      IO.puts("Phase:      #{snap["phase_label"] || snap["phase"]}#{agent_note(snap, :long)}")
+    end
+
     # A claude-driven worker has no ticking workflow step; show the live
     # activity derived from its stream instead of a frozen step. See bd-c919xj.
     if snap["claude_session"] do
@@ -222,6 +229,7 @@ defmodule ArbiterCli.Cmd.Worker do
     IO.puts("Repo:        #{snap["repo"]}")
     IO.puts("Started:    #{snap["started_at"]}")
     if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
+    if label = cost_label(snap), do: IO.puts("Spend:      #{label}")
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
     if snap["result"], do: IO.puts("Result:     #{snap["result"]}")
     if snap["failure_reason"], do: IO.puts("Failure:    #{snap["failure_reason"]}")
@@ -254,10 +262,22 @@ defmodule ArbiterCli.Cmd.Worker do
           "started=#{r["started_at"]}  completed=#{completed}#{model_part}"
       )
 
-      if r["failure_reason"], do: IO.puts("      failure: #{r["failure_reason"]}")
-      if r["failure_summary"], do: IO.puts("      summary: #{r["failure_summary"]}")
+      if r["failure_reason"], do: IO.puts("      #{reason_label(r)}: #{r["failure_reason"]}")
+      if r["failure_summary"], do: IO.puts("      #{summary_label(r)}: #{r["failure_summary"]}")
     end)
   end
+
+  # bd-aje6fj: an `interrupted` run (shut down with the server) carries its
+  # cause in failure_reason too, but it is not a failure — don't label it one.
+  defp reason_label(%{"status" => "interrupted"}), do: "reason"
+  defp reason_label(_run), do: "failure"
+
+  # bd-1eb6fc: `failure_summary` also carries a non-failure completion note on
+  # a `:completed` run (arb done fired with a background task still RUNNING)
+  # — same reason_label/1 pattern above, so a completed run isn't labeled
+  # with the word "failure" it didn't have.
+  defp summary_label(%{"status" => "completed"}), do: "note"
+  defp summary_label(_run), do: "failure summary"
 
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
 
@@ -342,17 +362,65 @@ defmodule ArbiterCli.Cmd.Worker do
           else: "step=#{p["current_step"]}"
 
       model_part = if p["model"], do: "  model=#{p["model"]}", else: ""
-      cost_part = format_cost(p["cost_usd"])
+      cost_part = format_cost(p)
+      phase_part = if p["phase"], do: "  phase=#{p["phase"]}", else: ""
 
       IO.puts(
-        "  #{p["task_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
+        "  #{p["task_id"]}  status=#{p["status"]}#{phase_part}#{agent_note(p)}  #{step}  " <>
+          "repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
       )
     end)
   end
 
-  defp format_cost(nil), do: ""
-  defp format_cost(cost) when cost <= 0, do: ""
-  defp format_cost(cost) when is_number(cost), do: "  cost=$#{Float.round(cost / 1, 4)}"
+  # bd-aw2cyt: `agent_live == false` is the whole point of the phase model —
+  # a row that looks like work in progress with no process behind it. Only the
+  # negative is worth ink; a live row is the unremarkable case, and an unknown
+  # one (an older server that does not send the field) says nothing.
+  defp agent_note(row, style \\ :short)
+  defp agent_note(%{"agent_live" => false}, :long), do: " — no live agent"
+  defp agent_note(%{"agent_live" => false}, :short), do: "  (no agent)"
+  defp agent_note(_row, _style), do: ""
+
+  defp format_cost(row) do
+    case cost_label(row) do
+      nil -> ""
+      label -> "  cost=#{label}"
+    end
+  end
+
+  # bd-8vnuy3: `cost_usd` is the task's settled + in-flight worker spend — the
+  # issue page's figure. An in-flight estimate reads `~`, never like a settled
+  # total; nothing priced (agy/antigravity) reads n/a, never $0.00. A plain
+  # zero with nothing to qualify it stays hidden, as it always was.
+  defp cost_label(%{"cost_usd" => nil, "cost_unpriced" => true}), do: "n/a"
+
+  defp cost_label(%{"cost_usd" => cost} = row) when is_number(cost) do
+    unpriced? = row["cost_unpriced"] == true
+    degraded? = row["cost_degraded"] == true
+
+    if cost <= 0 and not (unpriced? or degraded?) do
+      nil
+    else
+      [
+        live_figure(cost, row),
+        unpriced? && " + n/a unpriced",
+        degraded? && " (live read incomplete)"
+      ]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.join()
+    end
+  end
+
+  defp cost_label(_row), do: nil
+
+  defp live_figure(cost, %{"cost_live" => true, "cost_live_usd" => in_flight})
+       when is_number(in_flight) and in_flight > 0,
+       do: "~#{dollars(cost)} (incl. ~#{dollars(in_flight)} in flight)"
+
+  defp live_figure(cost, %{"cost_live" => true}), do: "~#{dollars(cost)}"
+  defp live_figure(cost, _row), do: dollars(cost)
+
+  defp dollars(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
 
   # The JSON API exposes a claude-driven worker's live activity as a map
   # (%{"label", "kind", "since"}) or null; render its label, falling back to a

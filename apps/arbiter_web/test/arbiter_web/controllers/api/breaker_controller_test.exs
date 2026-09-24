@@ -138,4 +138,50 @@ defmodule ArbiterWeb.Api.BreakerControllerTest do
 
     assert length(resp["breakers"]) == 1
   end
+
+  describe "auth holds (bd-21bmdh)" do
+    setup do
+      {:ok, _} = Arbiter.Agents.AuthHold.reset(:all)
+      Arbiter.Agents.CredentialWatchdog.reset()
+
+      on_exit(fn ->
+        {:ok, _} = Arbiter.Agents.AuthHold.reset(:all)
+        Arbiter.Agents.CredentialWatchdog.reset()
+      end)
+    end
+
+    defp open_codex_hold do
+      reason = %Arbiter.Worker.StopReason{
+        category: :auth_expired,
+        summary: "401",
+        remediation: nil,
+        exit_status: 1,
+        signal: nil
+      }
+
+      :counted = Arbiter.Agents.AuthHold.record_death(Arbiter.Agents.Codex, reason)
+      :opened = Arbiter.Agents.AuthHold.record_death(Arbiter.Agents.Codex, reason)
+    end
+
+    test "GET /api/breakers lists the open hold", %{conn: conn} do
+      open_codex_hold()
+
+      assert [%{"provider" => "codex", "open" => true, "deaths" => 2}] =
+               conn |> get("/api/breakers") |> json_response(200) |> Map.fetch!("auth_holds")
+    end
+
+    test "POST /api/breakers/reset with provider clears it", %{conn: conn} do
+      open_codex_hold()
+
+      resp = conn |> post("/api/breakers/reset", %{"provider" => "codex"}) |> json_response(200)
+
+      assert resp["reset"] == 1
+      assert resp["auth_hold"] == "codex"
+      refute Arbiter.Agents.AuthHold.open?(Arbiter.Agents.Codex)
+    end
+
+    test "POST /api/breakers/reset with an unknown provider is a 4xx", %{conn: conn} do
+      assert conn |> post("/api/breakers/reset", %{"provider" => "nope"}) |> json_response(400)
+    end
+  end
 end

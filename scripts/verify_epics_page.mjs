@@ -158,7 +158,7 @@ async function run(page) {
 
   const badge = await page.eval(
     `(() => {
-       const el = document.querySelector('#top-nav a[href="/epics"] [data-role="nav-badge"]')
+       const el = document.querySelector('#nav-rail a[href="/epics"] [data-role="nav-badge"]')
        return el ? el.textContent.trim() : null
      })()`
   )

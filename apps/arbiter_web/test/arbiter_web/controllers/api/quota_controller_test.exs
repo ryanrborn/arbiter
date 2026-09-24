@@ -39,6 +39,37 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert is_binary(resp["data"]["codex_message"])
   end
 
+  # bd-1fpjgx: generalises `claude`'s `credentials_expired` field to Codex and
+  # Gemini/Antigravity — sourced live off `CredentialWatchdog`, not the
+  # persisted snapshot.
+  test "reports codex_credentials_expired / gemini_credentials_expired off CredentialWatchdog",
+       %{conn: conn} do
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["codex_credentials_expired"] == false
+    assert resp["data"]["gemini_credentials_expired"] == false
+
+    alias Arbiter.Agents.CredentialWatchdog
+    alias Arbiter.Worker.StopReason
+
+    on_exit(fn -> CredentialWatchdog.reset() end)
+
+    reason = %StopReason{
+      category: :auth_expired,
+      summary: "test",
+      remediation: nil,
+      exit_status: nil,
+      signal: nil
+    }
+
+    :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Codex, reason)
+    :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Gemini, reason)
+    _ = CredentialWatchdog.expired?(Arbiter.Agents.Claude)
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["codex_credentials_expired"] == true
+    assert resp["data"]["gemini_credentials_expired"] == true
+  end
+
   test "returns the captured snapshot for the default workspace", %{conn: conn, ws: ws} do
     {:ok, _} =
       Quota.capture(ws.id, [
@@ -92,6 +123,13 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     |> to_string()
   end
 
+  defp reset_iso(offset_seconds) do
+    DateTime.utc_now()
+    |> DateTime.truncate(:second)
+    |> DateTime.add(offset_seconds, :second)
+    |> DateTime.to_iso8601()
+  end
+
   test "resolves an explicit ?workspace= by id", %{conn: conn} do
     other = Ash.create!(Workspace, %{name: "by-id"})
     {:ok, _} = Quota.capture(other.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.6"}])
@@ -143,6 +181,69 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
 
     resp = conn |> get("/api/quota") |> json_response(200)
     assert resp["data"]["gemini"]["plan"] == "Free"
+  end
+
+  test "surfaces the antigravity 5h + weekly split from a 4-bucket snapshot (bd-7mro0t)", %{
+    conn: conn,
+    ws: ws
+  } do
+    Ash.create!(Arbiter.Quota.GoogleQuota, %{
+      provider_account_id: account_id!(ws.id, "antigravity"),
+      provider: "antigravity",
+      plan: "Unknown",
+      used_percent: 60.0,
+      snapshot: %{
+        "provider" => "antigravity",
+        "models" => [
+          %{
+            "model_id" => "gemini_models_5h",
+            "remaining_percentage" => 75.0,
+            "reset_at" => reset_iso(3600)
+          },
+          %{
+            "model_id" => "gemini_models_weekly",
+            "remaining_percentage" => 40.0,
+            "reset_at" => reset_iso(7 * 86_400)
+          },
+          %{
+            "model_id" => "claude_and_gpt_models_5h",
+            "remaining_percentage" => 100.0,
+            "reset_at" => reset_iso(3600)
+          },
+          %{
+            "model_id" => "claude_and_gpt_models_weekly",
+            "remaining_percentage" => 100.0,
+            "reset_at" => reset_iso(7 * 86_400)
+          }
+        ]
+      },
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    antigravity = Enum.find(resp["data"]["quotas"], &(&1["provider"] == "antigravity"))
+
+    refute is_nil(antigravity["utilization_7d"])
+    refute is_nil(antigravity["reset_7d_at"])
+    assert antigravity["secondary_label"] == "weekly"
+  end
+
+  test "falls back to the collapsed antigravity shape when the snapshot has no parseable buckets",
+       %{conn: conn, ws: ws} do
+    Ash.create!(Arbiter.Quota.GoogleQuota, %{
+      provider_account_id: account_id!(ws.id, "antigravity"),
+      provider: "antigravity",
+      plan: "Unknown",
+      used_percent: 33.0,
+      snapshot: %{"provider" => "antigravity", "models" => []},
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    antigravity = Enum.find(resp["data"]["quotas"], &(&1["provider"] == "antigravity"))
+
+    assert antigravity["utilization_7d"] == nil
+    assert antigravity["secondary_label"] == nil
   end
 
   test "the quotas list carries every tracked provider", %{conn: conn, ws: ws} do
@@ -206,6 +307,97 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
       assert [%{"id" => id}] = resp["data"]["workspaces"]
       assert id == ws.id
       assert resp["data"]["claude"]["provider_account_id"] == account_id!(ws.id)
+    end
+  end
+
+  describe "P10: ?account= goes straight to the account (§8, bd-icwk2k)" do
+    test "?account=<slug> reports the account total + workspace breakdown with no workspace lookup",
+         %{conn: conn, ws: ws} do
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "personal-max"})
+      other = Ash.create!(Workspace, %{name: "emricare"})
+
+      for w <- [ws, other] do
+        Ash.create!(WorkspaceProviderAccount, %{
+          workspace_id: w.id,
+          provider: :claude,
+          provider_account_id: account.id
+        })
+      end
+
+      {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+      resp = conn |> get("/api/quota?account=personal-max") |> json_response(200)
+
+      assert resp["data"]["account"]["slug"] == "personal-max"
+      assert Enum.map(resp["data"]["workspaces"], & &1["name"]) == ["default", "emricare"]
+      assert resp["data"]["claude"]["provider_account_id"] == account.id
+      assert resp["data"]["workspace_id"] == nil
+    end
+
+    test "?account=<provider:slug> resolves an unambiguous account ref", %{conn: conn, ws: ws} do
+      account = Ash.create!(ProviderAccount, %{provider: :codex, slug: "work"})
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :codex,
+        provider_account_id: account.id
+      })
+
+      resp = conn |> get("/api/quota?account=codex:work") |> json_response(200)
+
+      assert resp["data"]["account"]["slug"] == "work"
+      assert resp["data"]["account"]["provider"] == "codex"
+      assert resp["data"]["claude"] == nil
+    end
+
+    test "an unknown account ref is a 404, not a crash", %{conn: conn} do
+      resp = conn |> get("/api/quota?account=no-such-account") |> json_response(404)
+      assert resp["error"]["type"] == "not_found"
+    end
+
+    test "cost_usd includes a preflight row that carries no workspace_id (bd-adyhvn)", %{
+      conn: conn,
+      ws: ws
+    } do
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "personal-max"})
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      {:ok, _} =
+        Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+      Ash.create!(Arbiter.Usage.Event, %{
+        task_id: "bd-quota-ctrl-1",
+        source: :task,
+        step: :work,
+        provider: "claude",
+        provider_account_id: account.id,
+        workspace_id: ws.id,
+        cost_usd: 1.0,
+        occurred_at: DateTime.utc_now()
+      })
+
+      Ash.create!(Arbiter.Usage.Event, %{
+        task_id: nil,
+        source: :preflight,
+        step: :other,
+        provider: "claude",
+        provider_account_id: account.id,
+        workspace_id: nil,
+        cost_usd: 0.5,
+        occurred_at: DateTime.utc_now()
+      })
+
+      resp = conn |> get("/api/quota?account=personal-max") |> json_response(200)
+      claude = Enum.find(resp["data"]["quotas"], &(&1["provider"] == "claude"))
+
+      # The headline total is the account's whole spend (task + preflight,
+      # 1.0 + 0.5), not just the workspace-scoped breakdown (1.0) below it.
+      assert_in_delta claude["cost_usd"], 1.5, 0.0001
     end
   end
 end

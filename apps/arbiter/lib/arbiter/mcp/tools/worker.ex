@@ -310,21 +310,33 @@ defmodule Arbiter.MCP.Tools.Worker do
   List active workers in the scope's workspace. Coordinator only. Backs onto
   `Arbiter.Worker.list_children/0`, filtered to the scope's workspace_id so a
   coordinator never sees workers running in other workspaces.
+
+  bd-45tkhq: a workspace-agnostic coordinator that names no `workspace` gets
+  one resolved for it (`Tools.resolve_workspace_id/2` — the scope's bound
+  workspace, else the installation default). That guess can be wrong for
+  where a given worker is actually running, and an empty `workers: []` on
+  its own reads as "nothing is running" rather than "scoped to a workspace
+  with nothing running". The response always echoes the `workspace_id` it
+  scoped to so that ambiguity is never silent.
   """
   @spec worker_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
-      children =
-        Arbiter.Worker.list_children()
-        |> Enum.filter(&(&1.workspace_id == ws_id))
+      all = Arbiter.Worker.list_children()
+      children = Enum.filter(all, &(&1.workspace_id == ws_id))
 
-      task_ids = Enum.map(children, & &1.task_id)
-      costs = Arbiter.Worker.Stats.task_costs_usd(task_ids)
+      # bd-8vnuy3: the task's settled + in-flight spend — the issue page's
+      # figure, so a row never disagrees with the page for the same task.
+      costs = worker_costs(children, all)
 
       workers =
-        Enum.map(children, &serialize_worker_summary(&1, Map.get(costs, &1.task_id, 0.0)))
+        children
+        # bd-aw2cyt: a row's phase depends on its siblings' rounds, so stamp it
+        # over the whole list before serializing.
+        |> Arbiter.Worker.Phase.annotate()
+        |> Enum.map(&serialize_worker_summary(&1, Map.get(costs, &1.task_id)))
 
-      {:ok, %{workers: workers, count: length(workers)}}
+      {:ok, %{workers: workers, count: length(workers), workspace_id: ws_id}}
     end
   end
 
@@ -350,8 +362,16 @@ defmodule Arbiter.MCP.Tools.Worker do
 
         pid ->
           case Worker.state(pid) do
-            %{} = snap -> {:ok, serialize_worker_snapshot(Map.put(snap, :pid, pid), lines)}
-            _ -> worker_show_historical(task_id, lines)
+            %{} = snap ->
+              snap = Map.put(snap, :pid, pid)
+              # bd-aw2cyt: the task's other rounds decide this row's phase.
+              siblings = live_siblings()
+
+              {:ok,
+               serialize_worker_snapshot(Map.put(snap, :phase, phase_of(snap, siblings)), lines)}
+
+            _ ->
+              worker_show_historical(task_id, lines)
           end
       end
     end
@@ -359,9 +379,33 @@ defmodule Arbiter.MCP.Tools.Worker do
 
   defp worker_show_historical(task_id, lines) do
     case latest_run(task_id) do
-      %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_run(run, lines)}
-      nil -> {:error, {:not_found, "no worker found for task #{task_id}"}}
+      %Arbiter.Workers.Run{} = run ->
+        {:ok, Map.merge(serialize_worker_run(run, lines), task_cost_fields(task_id))}
+
+      nil ->
+        {:error, {:not_found, "no worker found for task #{task_id}"}}
     end
+  end
+
+  # Best-effort, like every cost read on these surfaces: a failed ledger read
+  # costs the row its cost fields, never the listing.
+  defp worker_costs(snaps, all) do
+    Arbiter.Usage.LiveSpend.by_worker_task(snaps, workers: all)
+  rescue
+    e ->
+      Logger.warning("worker_list: live spend read failed: #{Exception.message(e)}")
+      %{}
+  end
+
+  defp task_cost_fields(task_id) do
+    task_id
+    |> Arbiter.Usage.Estimate.fold_task_id()
+    |> Arbiter.Usage.LiveSpend.for_task()
+    |> Arbiter.Usage.LiveSpend.cost_fields()
+  rescue
+    e ->
+      Logger.warning("worker_show: live spend read failed: #{Exception.message(e)}")
+      Arbiter.Usage.LiveSpend.cost_fields(nil)
   end
 
   defp latest_run(task_id) do
@@ -494,6 +538,8 @@ defmodule Arbiter.MCP.Tools.Worker do
       model: run.model,
       provider: run.provider,
       provider_fallback: run.provider_fallback,
+      session_id: run.session_id,
+      resumed_from_run_id: run.resumed_from_run_id,
       started_at: Tools.iso(run.started_at),
       completed_at: Tools.iso(run.completed_at),
       exit_code: run.exit_code,
@@ -908,7 +954,20 @@ defmodule Arbiter.MCP.Tools.Worker do
     }
   end
 
-  defp serialize_worker_summary(snap, cost_usd) do
+  # The live rows a single-worker read needs in order to know which round is
+  # running for its task. Best-effort: an unreadable supervisor just means the
+  # phase is derived from this row alone.
+  defp live_siblings do
+    Arbiter.Worker.list_children()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp phase_of(snap, siblings), do: Arbiter.Worker.Phase.of(snap, siblings)
+
+  defp serialize_worker_summary(snap, spend) do
     meta = Map.get(snap, :meta, %{}) || %{}
     routing = Map.get(meta, :routing_config) || %{}
     model_id = Map.get(meta, :model) || Map.get(routing, :model)
@@ -924,15 +983,21 @@ defmodule Arbiter.MCP.Tools.Worker do
       registry_key: Map.get(snap, :registry_key) || snap.task_id,
       role: Tools.to_str(Map.get(snap, :role)),
       status: Tools.to_str(snap.status),
+      # bd-aw2cyt: `status` is unchanged for every existing consumer; `phase`
+      # and `agent_live` are additive, and are what say whether a process
+      # actually exists behind this row.
+      phase: Tools.to_str(Map.get(snap, :phase)),
+      phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
+      agent_live: Map.get(snap, :agent_live),
       repo: snap.repo,
       started_at: Tools.iso(snap.started_at),
       activity: Map.get(meta, :activity),
       provider: Map.get(meta, :provider) || Map.get(routing, :provider),
       model: Arbiter.Worker.Stats.short_model_name(model_id),
-      cost_usd: cost_usd,
       resumable: resumable,
       blocked_reason: blocked_reason
     }
+    |> Map.merge(Arbiter.Usage.LiveSpend.cost_fields(spend))
   end
 
   defp serialize_worker_snapshot(snap, lines) do
@@ -955,6 +1020,10 @@ defmodule Arbiter.MCP.Tools.Worker do
       claude_session: Map.get(meta, :claude_session, false),
       activity: Map.get(meta, :activity),
       status: Tools.to_str(snap.status),
+      # See serialize_worker_summary/2 — additive, `status` is untouched.
+      phase: Tools.to_str(Map.get(snap, :phase)),
+      phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
+      agent_live: Map.get(snap, :agent_live),
       started_at: Tools.iso(snap.started_at),
       step_started_at: Tools.iso(Map.get(snap, :step_started_at)),
       mr_ref: Map.get(snap, :mr_ref),
@@ -971,6 +1040,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       resumable: resumable,
       blocked_reason: blocked_reason
     }
+    |> Map.merge(task_cost_fields(snap.task_id))
   end
 
   defp serialize_worker_run(%Arbiter.Workers.Run{} = run, lines) do

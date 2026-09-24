@@ -276,7 +276,7 @@ async function run(page) {
 
   // -- live navigation --------------------------------------------------------
 
-  await page.eval(`document.querySelector('#top-nav a[href="/tasks"]').click()`)
+  await page.eval(`document.querySelector('#nav-rail a[href="/tasks"]').click()`)
   await page.poll(`location.pathname === "/tasks"`, "the live navigation to /tasks never happened")
   await page.waitForLive()
   await page.settle()

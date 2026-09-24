@@ -72,7 +72,7 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `task_show`, `task_create`, `task_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off issue dispatch:
 
 - **Skills** — `skill_list`/`skill_get`/`skill_create`/`skill_update`/`skill_delete` for managing reusable skill content.
-- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire issues together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. Chains of issues run by declaring the edges, not by building a separate graph object.
+- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire issues together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. A pause stops new board dispatches only — fix passes, conflict resolvers and review rounds already under way keep running — so `scheduler_status` reports a drain state (`running` / `draining` with what is in flight / `quiescent`, the only safe restart point); `arb scheduler pause && arb scheduler wait` blocks until it is safe to restart. Chains of issues run by declaring the edges, not by building a separate graph object.
 - **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not task-linked.
 
 See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
@@ -419,6 +419,28 @@ the migration:
    it becomes inert once the flag is on, but leaving a stale credential lying
    around in a secrets file is its own risk.
 
+#### Account-model path (requires `:provider_accounts_enabled`)
+
+Once the flag is on, you can also manage provider accounts directly via the
+`arb account` CLI instead of (or alongside) the census/migrate flow above:
+
+```sh
+# Create or reference a provider account
+arb account create claude my_account
+
+# Attach it to a workspace
+arb account attach <workspace> claude my_account
+
+# Install or rotate the credential
+arb account rotate claude:my_account --kind oauth_token --env-var CLAUDE_CODE_OAUTH_TOKEN --secret <your-long-ttl-token>
+```
+
+This path is particularly useful if you have **multiple Claude credentials**
+(e.g., for different Anthropic accounts or organizations) and want to route
+different workspaces to different accounts — the account model lets each
+workspace reference its own account identity directly, without duplicating
+tokens across workspaces or relying on install-wide environment fallbacks.
+
 **Precedence when both are set:** a spawn can end up with both
 `CLAUDE_CODE_OAUTH_TOKEN` (install-wide, or the account's) and
 `ANTHROPIC_API_KEY` (workspace `credentials_ref`/`api_keys` rotation) in its
@@ -548,4 +570,21 @@ Architecture and design decision records live in [`docs/`](docs/):
 - [Quota and Auth Posture](docs/quota-and-auth.md) — Provider quota management and credential lifecycle.
 - [Worker Security Policy](docs/worker-security.md) — Execution sandbox and security isolation for agent workers.
 - [Remote Access](docs/remote-access.md) — Connecting to dashboard and sessions over SSH tunnels.
+
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local
+development commands and contribution guidelines. Before a pull request can be
+merged, it must be signed off under the [Contributor License Agreement
+(CLA.md)](CLA.md). Found a security issue? See [`SECURITY.md`](SECURITY.md)
+for how to report it privately.
+
+## License
+
+Arbiter is licensed under the [Apache License, Version 2.0](LICENSE). Third-party
+dependencies and their licenses are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+Arbiter follows an open-core model: future commercially-licensed components ship
+as separate packages and are not covered by this repository's license. See
+[Licensing Model & Open-Core Architecture](docs/licensing-model.md) for details.
 

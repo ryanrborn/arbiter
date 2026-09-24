@@ -80,6 +80,14 @@ defmodule Arbiter.Reviews.CoverageShadow do
   itself: it computed the decision it is acting on, so it persists the row
   directly (`Coverage.record/1`) rather than through here, and hands
   `observe/1` the answer it already has.
+
+  P7 (bd-60r6wp / #1738) adds the one flag-off writer, and it is not this
+  module either: when the legacy guard's own content check (the Watchdog's
+  `base_merge_only?/3`, the queue's mirror of it) authorises a merge on a
+  proven-equal net diff, the merge path records the `:mechanical` row that
+  proof implies (`Coverage.mechanical_for_diff/5`). That row is written on the
+  strength of a decision that *is* being acted on, which is the line this
+  section draws.
   """
 
   require Ash.Query
@@ -119,6 +127,9 @@ defmodule Arbiter.Reviews.CoverageShadow do
   # acceptance criterion is the coordinator's call, not this module's, so the
   # operator sees it in `:blocking` and decides. P5 removes the grace latch that
   # produces the `unknown` half, after which the class stops occurring at all.
+  # P7 (bd-60r6wp / #1738) stops the old guard stamping these heads, so the
+  # class no longer occurs on new observations; the entry stays for the rows
+  # recorded before it deployed.
   @deferred_transitions %{
     "covered->uncovered" => "post-approval fix_pass (§4.5, P7)"
   }
@@ -233,11 +244,16 @@ defmodule Arbiter.Reviews.CoverageShadow do
   newest `seq` first, whatever `Arbiter.Events.Retention` has left on the topic
   — and answers with the numbers the decision rests on:
 
-    * `:merges` — distinct observations where the guard actually merged
+    * `:merges` — distinct observations (one durable row per `{site, mr_ref,
+      head, old, new}`, deduped at write time by `observe/1` / the event log —
+      see "Reading the counter" above) where the guard actually merged
       (`old = "covered"`) *while the old guard was still authoritative*. A
       workspace that has already flipped stops producing evidence about the
       flip, so its rows are excluded.
-    * `:blocking` — disagreements per `old->new` transition that must be zero.
+    * `:blocking` / `:blocking_observations` — disagreements per `old->new`
+      transition that must be zero for `:pass?`, and the same disagreements
+      listed observation by observation (with `:occurred_at`) rather than only
+      summed.
     * `:deferred` / `:deferred_observations` — the one documented exception
       #1736's AC3 authorises: `covered->uncovered`, §4.5's post-approval
       `fix_pass` class, P7's ticket. Listed observation by observation rather
@@ -249,14 +265,37 @@ defmodule Arbiter.Reviews.CoverageShadow do
     * `:truncated?` — whether the read hit `#{@count_limit}` rows and so may not
       be the whole topic. A gate cannot pass on evidence it knows is partial, so
       this forces `:pass?` false.
+    * `:reason` — one line naming why `:pass?` came out the way it did (too
+      few merges, which transitions are blocking, a truncated read, or a
+      clean pass), so a caller does not have to re-derive it from the other
+      fields.
 
   `:pass?` is `merges >= min_merges` (default 20) with `blocking` empty and
   `truncated?` false.
+
+  ### The boundary-filter decision (bd-cy2mmu)
+
+  This function does **not** filter rows by a fix-boundary timestamp — it
+  keeps reading the whole topic (bounded only by `Arbiter.Events.Retention`
+  and the row cap), exactly as it did before. A gate that silently excluded
+  "old" rows could just as easily hide a regression as a fix, and the
+  function has no reliable way to know which fix landed when — that
+  knowledge lives in git history and task tickets, not in the shadow log.
+  Instead, every `:blocking_observations` / `:deferred_observations` entry
+  carries `:occurred_at`, so a caller can see the actual time distribution
+  and judge for itself whether the blocking rows predate a specific fix (the
+  false-negative window #1900 identified: a fix lands, but rows from before
+  it keep the gate failing until `Arbiter.Events.Retention` ages them out).
+  Correlating a specific fix commit against that distribution is the
+  caller's job, not this function's.
 
   Run it against the install's database:
 
       MIX_ENV=prod mix run --no-start -e \
         'IO.inspect(Arbiter.Reviews.CoverageShadow.preflip_gate(), pretty: true)'
+
+  or, now that it has a caller, `arb preflip-gate` / `GET
+  /api/coverage_shadow/preflip_gate`.
 
   Never raises: an unreadable events table answers "not yet", which is the
   safe direction for a gate.
@@ -268,11 +307,13 @@ defmodule Arbiter.Reviews.CoverageShadow do
           merges: non_neg_integer(),
           agreements: non_neg_integer(),
           blocking: %{optional(String.t()) => non_neg_integer()},
+          blocking_observations: [map()],
           deferred: %{optional(String.t()) => non_neg_integer()},
           deferred_observations: [map()],
           min_merges: pos_integer(),
           truncated?: boolean(),
-          pass?: boolean()
+          pass?: boolean(),
+          reason: String.t()
         }
   def preflip_gate(min_merges \\ @preflip_min_merges, limit \\ @count_limit) do
     read = durable_rows(limit)
@@ -290,17 +331,44 @@ defmodule Arbiter.Reviews.CoverageShadow do
     disagreements = Enum.filter(rows, &(payload(&1, "result") == "disagree"))
 
     {deferred, blocking} = Enum.split_with(disagreements, &deferred_class?/1)
+    blocking_by_transition = Enum.frequencies_by(blocking, &transition/1)
+
+    pass? = merges >= min_merges and blocking_by_transition == %{} and not truncated?
 
     %{
       merges: merges,
       agreements: agreements,
-      blocking: Enum.frequencies_by(blocking, &transition/1),
+      blocking: blocking_by_transition,
+      # bd-cy2mmu: every blocking/deferred row carries `occurred_at`
+      # (`observation_summary/1`), which is the time-distribution surface —
+      # not a fix-boundary filter on the gate itself. See the moduledoc
+      # "boundary decision" note above `preflip_gate/0`: this gate deliberately
+      # keeps reading the whole topic, so an operator relies on these
+      # timestamps to see whether blocking disagreements predate a fix.
+      blocking_observations: Enum.map(blocking, &observation_summary/1),
       deferred: Enum.frequencies_by(deferred, &transition/1),
       deferred_observations: Enum.map(deferred, &observation_summary/1),
       min_merges: min_merges,
       truncated?: truncated?,
-      pass?: merges >= min_merges and blocking == [] and not truncated?
+      pass?: pass?,
+      reason: reason(pass?, merges, min_merges, blocking_by_transition, truncated?, limit)
     }
+  end
+
+  defp reason(true, merges, _min_merges, _blocking, false, _limit),
+    do: "pass: #{merges} merges, zero blocking disagreements"
+
+  defp reason(false, _merges, _min_merges, _blocking, true, limit),
+    do: "read hit the #{limit}-row cap; evidence may be partial and truncated reads never pass"
+
+  defp reason(false, merges, min_merges, blocking, false, _limit) when blocking == %{},
+    do: "only #{merges} merges observed; need >= #{min_merges}"
+
+  defp reason(false, merges, min_merges, blocking, false, _limit) do
+    transitions = blocking |> Map.keys() |> Enum.sort() |> Enum.join(", ")
+
+    "#{Enum.sum(Map.values(blocking))} blocking disagreement(s) (#{transitions}) " <>
+      "over #{merges} merges (need >= #{min_merges} with none blocking)"
   end
 
   @doc "The PubSub/event topic the durable counter is written on."
@@ -349,7 +417,10 @@ defmodule Arbiter.Reviews.CoverageShadow do
       task_id: payload(record, "task_id"),
       mr_ref: payload(record, "mr_ref"),
       head: payload(record, "head"),
-      new_reason: payload(record, "new_reason")
+      old: payload(record, "old"),
+      new: payload(record, "new"),
+      new_reason: payload(record, "new_reason"),
+      occurred_at: record.occurred_at
     }
   end
 

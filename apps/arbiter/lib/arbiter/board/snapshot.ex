@@ -82,10 +82,13 @@ defmodule Arbiter.Board.Snapshot do
   reason defaults to "a person's" instead of silently reading as pipeline
   wait. It measures "still needs a human today", not "something is imperfect".
 
-  A worker at `:awaiting_review` holds an MR, not a subprocess, so it does not
-  consume a worker slot; every other live status does. That is what makes
-  `slots_free` mean "agents I could start right now" rather than "rows in the
-  registry".
+  A worker at `:awaiting_review` holds an MR, not a subprocess — no agent is
+  burning quota for it — but it still occupies its task's *slot* (bd-45pwo1):
+  the operator's rule is "another slot doesn't open until the issue occupying
+  it is merged", and an open MR is not merged. `slots_free` means "tasks I
+  could start dispatching right now given the cap", which is a different
+  number from `agents_live`, "agents actually burning quota this instant" —
+  see `Arbiter.Tasks.SlotGate`'s "A slot is a task, not an agent" section.
 
   ## Deriving vs loading
 
@@ -100,14 +103,19 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
+  alias Arbiter.Tasks.SlotGate
   alias Arbiter.Usage.Budget
   alias Arbiter.Worker
+  alias Arbiter.Worker.Phase
   alias Arbiter.Worker.Watchdog
 
   require Ash.Query
 
-  @typedoc "Worker statuses that hold a live agent, and so a worker slot."
-  @slot_statuses [:idle, :resuming, :running, :awaiting, :awaiting_review_gate]
+  # Worker statuses that *used* to define a slot (the `:issues` basis).
+  # bd-aw2cyt moved the question to `Arbiter.Tasks.SlotGate`, which counts live
+  # agent sessions instead; this list is still what `:issues` falls back to, and
+  # its definition lives there now.
+  @slot_statuses SlotGate.slot_statuses()
 
   # Live agent working; the author is still "running" while a reviewer reads.
   @running_statuses [:idle, :resuming, :running, :awaiting_review_gate]
@@ -159,6 +167,8 @@ defmodule Arbiter.Board.Snapshot do
           promote: String.t() | nil,
           slots_total: non_neg_integer(),
           slots_free: non_neg_integer(),
+          slots_used: non_neg_integer(),
+          agents_live: non_neg_integer(),
           quota: Scheduler.quota(),
           paused: boolean(),
           now: DateTime.t()
@@ -209,6 +219,9 @@ defmodule Arbiter.Board.Snapshot do
     # ledger question, and the pure half never goes to the ledger. A caller
     # that can't answer passes nothing, and no card flags.
     over_budget = over_budget_set(Map.get(input, :over_budget))
+    # bd-aw2cyt: how a slot is counted. An *input*, like everything else here —
+    # `load/1` resolves the configured basis and the pure half just applies it.
+    slot_basis = SlotGate.normalize_basis(Map.get(input, :slot_basis))
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
     parents = parent_refs(parent_of, issues_by_id)
@@ -223,8 +236,24 @@ defmodule Arbiter.Board.Snapshot do
 
     worked = MapSet.new(authors, & &1.task_id)
 
-    running = running_cards(authors, issues_by_id, gate_workers_by_author)
-    slots_free = max(slots_total - Enum.count(authors, &(&1.status in @slot_statuses)), 0)
+    running = running_cards(authors, issues_by_id, gate_workers_by_author, workers)
+
+    # bd-aw2cyt: a live agent session in any role — author, reviewer,
+    # implementer round, CI fix pass, conflict resolver. Counted over ALL
+    # workers, not just the author rows: a reviewer is a second paid session.
+    # This is "agents live" on the header — what's actually burning quota —
+    # and no longer what the dispatch cap is measured against; see below.
+    agents_live = SlotGate.occupied(workers, slot_basis)
+
+    # bd-45pwo1: the dispatch cap is measured in TASKS, not agent sessions —
+    # "another slot doesn't open until the issue occupying it is merged". A
+    # task between ReviewGate rounds, waiting on CI, or waiting on a merge
+    # still holds its one slot even with no agent live for it right now; only
+    # `:done` and `:waiting_on_you` (human-parked) release it early. See
+    # `SlotGate`'s "A slot is a task, not an agent" section.
+    annotated_workers = Phase.annotate(workers)
+    slots_used = SlotGate.occupied_tasks(annotated_workers, slot_basis)
+    slots_free = max(slots_total - slots_used, 0)
 
     plan =
       Scheduler.plan(%{
@@ -246,7 +275,7 @@ defmodule Arbiter.Board.Snapshot do
       running: running |> with_parents(parents) |> with_over_budget(over_budget),
       waiting:
         authors
-        |> waiting(issues, issues_by_id, worked, now, watchdog_live)
+        |> waiting(issues, issues_by_id, worked, now, watchdog_live, workers)
         |> with_parents(parents)
         |> with_over_budget(over_budget),
       # A closed task that ran over is done — there is nothing left to act on,
@@ -256,6 +285,8 @@ defmodule Arbiter.Board.Snapshot do
       promote: plan.promote,
       slots_total: slots_total,
       slots_free: slots_free,
+      slots_used: slots_used,
+      agents_live: agents_live,
       quota: quota,
       paused: paused?,
       now: now
@@ -282,6 +313,10 @@ defmodule Arbiter.Board.Snapshot do
     issues = Keyword.get_lazy(opts, :issues, &load_issues/0)
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
     workspace_id = Keyword.get(opts, :workspace_id) || default_workspace_id()
+    # bd-aw2cyt: `load/1` is the impure boundary, so it is where the configured
+    # basis is read. `derive/1` stays a function of its inputs, and an explicit
+    # `:slot_basis` (the pure tests, a caller with its own opinion) still wins.
+    slot_basis = SlotGate.normalize_basis(Keyword.get(opts, :slot_basis) || SlotGate.basis())
 
     # One read of the dependency rows feeds both derived inputs — the gating
     # blockers and (bd-38of5i) the `parent_of` pairs. Skipped entirely when the
@@ -297,7 +332,18 @@ defmodule Arbiter.Board.Snapshot do
         Keyword.get_lazy(opts, :conflicts_with, fn -> EdgeGate.conflict_pairs(deps) end),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
-      slots_total: Keyword.get(opts, :slots_total) || effective_max_concurrent(workspace_id),
+      slot_basis: slot_basis,
+      # bd-aw2cyt/bd-45pwo1: `derive/1` subtracts the *occupied* slots from
+      # this total, and the account term folded in below is a headroom
+      # expressed in the caller's own frame — so the two have to agree on
+      # what "occupied" means. Since bd-45pwo1 that is task occupancy, not
+      # live agent sessions — hand it the same count `derive/1` will subtract.
+      slots_total:
+        Keyword.get(opts, :slots_total) ||
+          effective_max_concurrent(
+            workspace_id,
+            SlotGate.occupied_tasks(Phase.annotate(workers), slot_basis)
+          ),
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
       ready_order: Keyword.get(opts, :ready_order, []),
@@ -345,6 +391,8 @@ defmodule Arbiter.Board.Snapshot do
       promote: nil,
       slots_total: 0,
       slots_free: 0,
+      slots_used: 0,
+      agents_live: 0,
       quota: :ok,
       paused: true,
       now: now || DateTime.utc_now()
@@ -377,16 +425,23 @@ defmodule Arbiter.Board.Snapshot do
   The workspace's own live workers are added back before the min (via
   `Concurrency.clamp/3`) because `load/1` subtracts the running cards from
   `slots_total` itself — counting them in both places would halve the number.
+  `already_counted` is exactly what the caller will subtract; since bd-aw2cyt
+  that is the *live agent* count, so `load/1` passes it rather than letting
+  this function guess with `Concurrency.workspace_live_count/2`. Omitting it
+  keeps the pre-bd-aw2cyt behaviour for callers that have no worker list.
 
   When workspace_id is nil, returns the system max: a fleet-wide board is not
   scoped to any one account.
   """
-  @spec effective_max_concurrent(String.t() | nil) :: non_neg_integer()
-  def effective_max_concurrent(nil) do
+  @spec effective_max_concurrent(String.t() | nil, non_neg_integer() | nil) ::
+          non_neg_integer()
+  def effective_max_concurrent(workspace_id, already_counted \\ nil)
+
+  def effective_max_concurrent(nil, _already_counted) do
     system_max_concurrent()
   end
 
-  def effective_max_concurrent(workspace_id) when is_binary(workspace_id) do
+  def effective_max_concurrent(workspace_id, already_counted) when is_binary(workspace_id) do
     system_max = system_max_concurrent()
 
     base =
@@ -397,11 +452,10 @@ defmodule Arbiter.Board.Snapshot do
 
     provider = Arbiter.Quota.default_provider(workspace_id)
 
-    Concurrency.clamp(
-      base,
-      Concurrency.headroom(workspace_id, provider),
-      Concurrency.workspace_live_count(workspace_id, provider)
-    )
+    already_counted =
+      already_counted || Concurrency.workspace_live_count(workspace_id, provider)
+
+    Concurrency.clamp(base, Concurrency.headroom(workspace_id, provider), already_counted)
   rescue
     _ -> system_max_concurrent()
   end
@@ -437,11 +491,39 @@ defmodule Arbiter.Board.Snapshot do
   here: the `dispatch/2` seam is the single choke point for the allow/overage decision,
   so the board must not show a `blocked — quota exhausted` hold that the
   dispatcher itself would not honor (reviewer round 1, finding 1).
+
+  An open `Arbiter.Agents.AuthHold` on the workspace's default agent provider
+  (bd-21bmdh — N consecutive workers died on auth) rides the same board-wide
+  hold, ahead of the quota window and regardless of `:continue` mode: the
+  dispatcher's auth guard refuses those dispatches unconditionally, so
+  `Arbiter.Board.Autopilot` must not keep promoting a card only to have it
+  refused. This is what stops a reopened auth-failed task from being
+  re-attempted every tick while credentials are dead.
   """
   @spec quota_hold(String.t() | nil) :: Scheduler.quota()
   def quota_hold(workspace_id \\ nil) do
     workspace_id = workspace_id || default_workspace_id()
+    auth_hold(workspace_id) || quota_window_hold(workspace_id)
+  end
 
+  # The board's read of the hold is `AuthHold.held/2`, which fails open: the
+  # dispatch guard's own fail-closed read is the backstop, and a board must
+  # not paint a hold that is not there.
+  defp auth_hold(ws_id) when is_binary(ws_id) do
+    with %Arbiter.Tasks.Workspace{} = workspace <- safe_workspace(ws_id),
+         adapter when is_atom(adapter) <- Arbiter.Agents.for_workspace(workspace),
+         %{provider: provider, deaths: deaths} <- Arbiter.Agents.AuthHold.held(adapter) do
+      {:hold, "#{provider} auth hold (#{deaths} consecutive auth deaths)"}
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp auth_hold(_ws_id), do: nil
+
+  defp quota_window_hold(workspace_id) do
     with ws_id when is_binary(ws_id) <- workspace_id,
          workspace <- safe_workspace(ws_id),
          false <- Arbiter.Quota.continue_mode?(workspace),
@@ -580,7 +662,7 @@ defmodule Arbiter.Board.Snapshot do
 
   # ---- running / waiting ----------------------------------------------------
 
-  defp running_cards(workers, issues_by_id, gate_workers_by_author) do
+  defp running_cards(workers, issues_by_id, gate_workers_by_author, all_workers) do
     workers
     |> Enum.filter(&(&1.status in @running_statuses))
     |> Enum.map(fn w ->
@@ -594,6 +676,7 @@ defmodule Arbiter.Board.Snapshot do
         provider: card_provider(w, gate_worker),
         since: since(w)
       })
+      |> with_phase(w, all_workers)
     end)
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
@@ -603,8 +686,8 @@ defmodule Arbiter.Board.Snapshot do
   # and an orphaned issue (no live worker at all) still carries both, nil.
   # The view reads whichever it has instead of branching on which shape
   # produced the card.
-  defp waiting(workers, issues, issues_by_id, worked, now, watchdog_live) do
-    (waiting_cards(workers, issues_by_id, watchdog_live) ++
+  defp waiting(workers, issues, issues_by_id, worked, now, watchdog_live, all_workers) do
+    (waiting_cards(workers, issues_by_id, watchdog_live, all_workers) ++
        orphaned_cards(issues, worked, now) ++
        awaiting_verification_cards(issues))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
@@ -635,6 +718,7 @@ defmodule Arbiter.Board.Snapshot do
         collapsed_note: nil,
         since: awaiting_since(issue)
       }
+      |> workerless_phase()
     end)
   end
 
@@ -646,7 +730,7 @@ defmodule Arbiter.Board.Snapshot do
     Arbiter.Tasks.Verification.awaiting_since(issue) || created_at(issue)
   end
 
-  defp waiting_cards(workers, issues_by_id, watchdog_live) do
+  defp waiting_cards(workers, issues_by_id, watchdog_live, all_workers) do
     workers
     |> Enum.filter(&(&1.status in @waiting_statuses))
     |> one_row_per_task()
@@ -668,8 +752,27 @@ defmodule Arbiter.Board.Snapshot do
         collapsed_note: collapsed_note(w, group),
         since: since(w)
       })
+      |> with_phase(w, all_workers)
     end)
   end
+
+  # bd-aw2cyt: what the card is *actually* doing, and whether anything is
+  # burning quota for it. Two separate facts on purpose — `:in_review` names
+  # the stage, `agent_live` says whether a process exists, and a card with a
+  # stage but no process is exactly the thing this ticket made visible.
+  defp with_phase(card, worker, all_workers) do
+    subordinates = Phase.subordinates_of(worker, all_workers)
+
+    Map.merge(card, %{
+      phase: Phase.of(worker, all_workers),
+      agent_live: Phase.any_agent_live?(worker, subordinates)
+    })
+  end
+
+  # A card with no worker behind it at all: nothing is running, and a human is
+  # the only thing that moves it.
+  defp workerless_phase(card),
+    do: Map.merge(card, %{phase: :waiting_on_you, agent_live: false})
 
   # What the collapsed subordinate rows say that the primary row's own fields
   # cannot: a `:failed` fix pass / conflict pass under the card. Nil when
@@ -750,6 +853,7 @@ defmodule Arbiter.Board.Snapshot do
         collapsed_note: nil,
         since: Map.get(issue, :updated_at) || created_at(issue)
       }
+      |> workerless_phase()
     end)
   end
 

@@ -984,6 +984,22 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "slots free"
     end
 
+    # bd-45pwo1: "agents live" (live agent sessions) and "slots used" (tasks
+    # occupying the dispatch cap) are different numbers now — a task parked
+    # on an open MR burns no agent but still holds its slot.
+    test "shows agents live and slots used separately, and they can differ", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = working_issue(ws, "parked on its MR")
+      merge_worker(ws, task)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "agents live: 0"
+      assert html =~ "slots used: 1"
+    end
+
     test "the filter narrows the board to matching issues", %{conn: conn, ws: ws} do
       keep = issue(ws, "keep this one")
       drop = issue(ws, "unrelated work")

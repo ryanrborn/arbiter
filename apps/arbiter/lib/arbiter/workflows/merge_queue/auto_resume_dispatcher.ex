@@ -49,6 +49,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
           required(:attempt) => pos_integer(),
           optional(:workspace_id) => String.t() | nil,
           optional(:mr_ref) => String.t() | nil,
+          optional(:briefing) => String.t(),
           optional(:claude_command) => [String.t()]
         }
 
@@ -64,6 +65,12 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
   `{:error, reason}`. A `{:error, _}` (e.g. `:no_outpost` — the worktree was
   cleaned up, so there is nothing to resume) means the Watchdog must fall back
   to escalating rather than assume the task is healing.
+
+  `args.briefing` (P7, bd-60r6wp / #1738) is prepended to the resumed worker's
+  git-derived resume context — the same slot `Dispatch.resume/2` gives an
+  auto-revise's reviewer feedback. The Watchdog sets it when the resume exists
+  only to put an uncovered post-approval head in front of the ReviewGate, so
+  the fresh agent hands straight back instead of looking for more work.
 
   `args.claude_command` is the same test escape hatch the sibling dispatchers
   carry (`ConflictResolver`, `FixPassDispatcher`, `ReviseDispatcher`): an argv
@@ -132,6 +139,15 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
       case Map.get(args, :claude_command) do
         cmd when is_list(cmd) and cmd != [] -> [claude_command: cmd]
         _ -> []
+      end
+
+    opts =
+      case Map.get(args, :briefing) do
+        briefing when is_binary(briefing) and briefing != "" ->
+          Keyword.put(opts, :revise_feedback, briefing)
+
+        _ ->
+          opts
       end
 
     Dispatch.resume(task_id, Keyword.put(opts, :awaiting_review_resume_attempts, attempt))

@@ -1,0 +1,1 @@
+{"event":"step_update","step_update":{"conversation_id":"2c6afa29-2f02-4dd3-8c52-fc1cf0527ad8","step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":0.417524894,"tool_info":{"name":"run_command","parameters":{"CommandLine":"arb --version"},"output":"arb 0.1.70\r\n"}}}

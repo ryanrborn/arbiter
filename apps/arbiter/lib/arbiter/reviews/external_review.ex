@@ -64,6 +64,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   require Logger
   require Ash.Query
 
+  alias Arbiter.Board.Drain
   alias Arbiter.Mergers
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Mergers.NetDiff
@@ -712,8 +713,12 @@ defmodule Arbiter.Reviews.ExternalReview do
   # retry hint (bd-bvxdy9). Every other failure (including a rate_limited one
   # with no `retry_after_ms`) returns immediately on the first attempt, same
   # as before this change.
+  # bd-9fgg04: the review shells out to the agent CLI from a plain task, not a
+  # worker — track it so a drain report counts it (sync and async alike).
   defp run_workflow_with_retries(prepared, opts, record) do
-    run_workflow_with_retries(prepared, opts, record, 0)
+    Drain.track(:external_review, %{detail: prepared.mr_ref}, fn ->
+      run_workflow_with_retries(prepared, opts, record, 0)
+    end)
   end
 
   defp run_workflow_with_retries(prepared, opts, record, attempt) do

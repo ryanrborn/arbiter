@@ -276,6 +276,46 @@ defmodule Arbiter.QuotaTest do
       refute id == quota_account_id!(other.id)
     end
 
+    # bd-clzkvp: the quota bars colour by the gate's own thresholds, so each
+    # view carries the `{account, workspace}` policy the gate would resolve.
+    test "each view carries the gate policy for its account and the workspace" do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+          provider: :claude,
+          slug: "paced",
+          quota_config: %{"threshold_mode" => "paced"}
+        })
+
+      ws = workspace!()
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      assert [%{gate_policy: %{policy: {view_account, view_ws}, enforcing?: true}}] =
+               Quota.list_latest_for_workspace(ws.id)
+
+      assert view_account.id == account.id
+      assert view_account.quota_config == %{"threshold_mode" => "paced"}
+      assert view_ws.id == ws.id
+    end
+
+    test "a :continue workspace's gate policy is not enforcing" do
+      ws =
+        Ash.create!(Workspace, %{
+          name: "cont",
+          config: %{"quota" => %{"on_exhaustion" => "continue"}}
+        })
+
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      assert [%{gate_policy: %{enforcing?: false}}] = Quota.list_latest_for_workspace(ws.id)
+    end
+
     # P5 acceptance 4: three workspaces on one account report one row, not
     # three (`docs/provider-account-design.md` §6).
     test "three workspaces on one account collapse to a single reported row" do
@@ -347,11 +387,26 @@ defmodule Arbiter.QuotaTest do
     alias Arbiter.Quota.CodexQuota
     alias Arbiter.Quota.GoogleQuota
 
+    # `provider` here is the *ledger* provider ("claude"/"openai"/"gemini");
+    # `cost_for/2` maps it onto a quota provider code via `@ledger_providers`
+    # to find the account. `provider_spend/1` (what `decorate_view/2` now
+    # reads the headline `cost_usd` from) filters on `provider_account_id`
+    # directly, so a row with none is invisible to it even with a
+    # `workspace_id` set — real ingested rows always carry both (P9).
+    @quota_provider_for_ledger %{
+      "claude" => "claude",
+      "openai" => "codex",
+      "gemini" => "gemini_cli"
+    }
+
     defp usage_event!(ws_id, provider, cost) do
+      quota_provider = Map.fetch!(@quota_provider_for_ledger, provider)
+
       Ash.create!(Arbiter.Usage.Event, %{
         task_id: "cost-#{System.unique_integer([:positive])}",
         step: :work,
         provider: provider,
+        provider_account_id: quota_account_id!(ws_id, quota_provider),
         cost_usd: cost,
         workspace_id: ws_id,
         occurred_at: DateTime.utc_now()
@@ -499,7 +554,7 @@ defmodule Arbiter.QuotaTest do
       end
     end
 
-    test "a supplied spend cache is what every provider's view reads" do
+    test "a supplied spend cache backs the workspace breakdown, not the headline cost_usd" do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
 
@@ -510,8 +565,7 @@ defmodule Arbiter.QuotaTest do
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
       })
 
-      # Ledger rows that the cache deliberately disagrees with: any view that
-      # rescans instead of reading the cache reports these numbers.
+      # Ledger rows that the cache deliberately disagrees with.
       usage_event!(ws.id, "claude", 1.0)
       usage_event!(ws.id, "openai", 2.0)
 
@@ -523,8 +577,18 @@ defmodule Arbiter.QuotaTest do
       claude = Enum.find(views, &(&1.provider == "claude"))
       codex = Enum.find(views, &(&1.provider == "codex"))
 
-      assert_in_delta claude.cost_usd, 9.0, 0.0001
-      assert_in_delta codex.cost_usd, 7.0, 0.0001
+      # The breakdown line for this workspace reads the supplied cache verbatim...
+      assert [%{cost_usd: claude_ws_cost}] = claude.workspaces
+      assert [%{cost_usd: codex_ws_cost}] = codex.workspaces
+      assert_in_delta claude_ws_cost, 9.0, 0.0001
+      assert_in_delta codex_ws_cost, 7.0, 0.0001
+
+      # ...but the headline `cost_usd` is `provider_spend/1`'s own read off the
+      # account's ledger rows (bd-adyhvn), never the cache — a `spend_cache/1`
+      # memo is workspace-scoped and would silently drop probe/preflight rows
+      # that carry no `workspace_id`, so it cannot back the account total.
+      assert_in_delta claude.cost_usd, 1.0, 0.0001
+      assert_in_delta codex.cost_usd, 2.0, 0.0001
     end
 
     test "the dedicated Codex table wins over a same-provider generic row" do

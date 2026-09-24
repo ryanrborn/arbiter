@@ -8,7 +8,8 @@ defmodule Arbiter.TerminateProbe do
   process and its descendants (bd-bmmj4w) — and a bare exit signal skips it on
   a process that does not trap exits.
 
-  Like `Arbiter.Worker`, this probe does **not** trap exits, so it reports only
+  This probe deliberately does **not** trap exits — the worst case for an
+  owner (`Arbiter.Worker` itself traps since bd-aje6fj) — so it reports only
   when it is stopped through the `sys` terminate path. Killed with a signal, it
   dies silently and the watcher sees nothing.
   """
