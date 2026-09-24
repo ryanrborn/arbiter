@@ -214,7 +214,9 @@ defmodule Arbiter.Accounts.OverviewTest do
         })
 
       {hold, watchdog} = start_pair()
-      assert %{health: %{state: :ok}} = row(Overview.list(auth_hold: hold, watchdog: watchdog), account)
+
+      assert %{health: %{state: :ok}} =
+               row(Overview.list(auth_hold: hold, watchdog: watchdog), account)
 
       :counted = AuthHold.record_death(Claude, auth_reason(), hold)
       :opened = AuthHold.record_death(Claude, auth_reason(), hold)

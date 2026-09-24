@@ -99,7 +99,9 @@ defmodule ArbiterWeb.ProvidersLive do
   end
 
   defp action("new_account", _params, socket),
-    do: {:noreply, assign(socket, creating?: true, account_form: account_form(), account_error: nil)}
+    do:
+      {:noreply,
+       assign(socket, creating?: true, account_form: account_form(), account_error: nil)}
 
   defp action("cancel_account", _params, socket),
     do: {:noreply, assign(socket, creating?: false, account_error: nil)}
@@ -288,7 +290,8 @@ defmodule ArbiterWeb.ProvidersLive do
   defp error_message(:ambiguous), do: "That account reference is ambiguous."
   defp error_message(other), do: inspect(other)
 
-  defp humanize(field), do: field |> to_string() |> String.replace("_", " ") |> String.capitalize()
+  defp humanize(field),
+    do: field |> to_string() |> String.replace("_", " ") |> String.capitalize()
 
   # ---- view helpers ---------------------------------------------------------
 
@@ -336,7 +339,9 @@ defmodule ArbiterWeb.ProvidersLive do
   defp concurrency_text(%{live_count: live, max_concurrent: cap}), do: "#{live} / #{cap}"
 
   defp concurrency_pct(%{max_concurrent: cap}) when cap in [nil, 0], do: 0
-  defp concurrency_pct(%{live_count: live, max_concurrent: cap}), do: min(100, round(live / cap * 100))
+
+  defp concurrency_pct(%{live_count: live, max_concurrent: cap}),
+    do: min(100, round(live / cap * 100))
 
   defp health_label(%{state: :ok}), do: "healthy"
   defp health_label(%{state: :no_credential}), do: "no credential"
@@ -426,7 +431,11 @@ defmodule ArbiterWeb.ProvidersLive do
           role="status"
           class="flex items-start gap-3 rounded-[var(--radius-panel)] border border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] px-4 py-3 text-[13px] text-[var(--arb-attention-ink)]"
         >
-          <ArbiterWeb.CoreComponents.Core.icon name="hero-lock-closed" size={16} class="mt-0.5 shrink-0" />
+          <ArbiterWeb.CoreComponents.Core.icon
+            name="hero-lock-closed"
+            size={16}
+            class="mt-0.5 shrink-0"
+          />
           <div class="flex flex-col gap-0.5">
             <span class="font-medium">Accounts not enabled on this install</span>
             <span class="text-[12px] opacity-90">
@@ -448,7 +457,12 @@ defmodule ArbiterWeb.ProvidersLive do
             phx-submit="create_account"
             class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end"
           >
-            <.input field={@account_form[:provider]} type="select" label="Provider" options={@providers} />
+            <.input
+              field={@account_form[:provider]}
+              type="select"
+              label="Provider"
+              options={@providers}
+            />
             <.input field={@account_form[:slug]} label="Slug" placeholder="work-max" required />
             <.input field={@account_form[:label]} label="Label" placeholder="Work Max plan" />
             <.input field={@account_form[:plan]} label="Plan" placeholder="max_20x" />
@@ -535,7 +549,10 @@ defmodule ArbiterWeb.ProvidersLive do
             </header>
 
             <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_minmax(0,0.8fr)] gap-px bg-[var(--arb-line-soft)]">
-              <section id={"account-#{row.account.id}-quota"} class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
+              <section
+                id={"account-#{row.account.id}-quota"}
+                class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2"
+              >
                 <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">Pools</h3>
                 <p :if={row.quotas == []} class="text-[12px] text-[var(--arb-text-muted)]">
                   No quota snapshot yet.
@@ -560,14 +577,18 @@ defmodule ArbiterWeb.ProvidersLive do
                       class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--arb-text-muted)]"
                     >
                       {pace_text(pool)} ·
-                      <span class={verdict_class(pool.pace.verdict)}>{verdict_label(pool.pace.verdict)}</span>
+                      <span class={verdict_class(pool.pace.verdict)}>
+                        {verdict_label(pool.pace.verdict)}
+                      </span>
                     </span>
                   </div>
                 </div>
               </section>
 
               <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
-                <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">Concurrency</h3>
+                <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                  Concurrency
+                </h3>
                 <span
                   id={"account-#{row.account.id}-concurrency"}
                   class="text-[18px] font-medium tabular-nums text-[var(--text-title)]"
@@ -583,12 +604,16 @@ defmodule ArbiterWeb.ProvidersLive do
                     style={"width: #{concurrency_pct(row)}%"}
                   />
                 </div>
-                <span class="text-[11px] text-[var(--arb-text-muted)]">workers live across every attached workspace</span>
+                <span class="text-[11px] text-[var(--arb-text-muted)]">
+                  workers live across every attached workspace
+                </span>
               </section>
 
               <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
                 <div class="flex items-center justify-between gap-2">
-                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">Credential</h3>
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                    Credential
+                  </h3>
                   <ArbiterWeb.CoreComponents.Core.button
                     :if={@enabled? and @credential_for != row.account.id}
                     id={"account-#{row.account.id}-credential-button"}
@@ -600,7 +625,10 @@ defmodule ArbiterWeb.ProvidersLive do
                     {if row.credentials == [], do: "Add", else: "Rotate"}
                   </ArbiterWeb.CoreComponents.Core.button>
                 </div>
-                <ul id={"account-#{row.account.id}-credentials"} class="flex flex-col gap-1 list-none m-0 p-0">
+                <ul
+                  id={"account-#{row.account.id}-credentials"}
+                  class="flex flex-col gap-1 list-none m-0 p-0"
+                >
                   <li :if={row.credentials == []} class="text-[12px] text-[var(--arb-text-muted)]">
                     No active credential.
                   </li>
@@ -632,7 +660,12 @@ defmodule ArbiterWeb.ProvidersLive do
                 >
                   <input type="hidden" name="account_id" value={row.account.id} />
                   <div class="grid grid-cols-2 gap-2">
-                    <.input field={@credential_form[:kind]} type="select" label="Kind" options={@kinds} />
+                    <.input
+                      field={@credential_form[:kind]}
+                      type="select"
+                      label="Kind"
+                      options={@kinds}
+                    />
                     <.input field={@credential_form[:env_var]} label="Env var" required />
                   </div>
                   <.input
@@ -686,8 +719,12 @@ defmodule ArbiterWeb.ProvidersLive do
             </div>
 
             <footer class="flex flex-wrap items-center gap-2 px-[18px] py-2.5 border-t border-[var(--border-default)] bg-[var(--surface-chrome)]">
-              <span class="text-[11px] uppercase tracking-wide text-[var(--text-label)] mr-1">Workspaces</span>
-              <span :if={row.workspaces == []} class="text-[12px] text-[var(--arb-text-muted)]">none attached</span>
+              <span class="text-[11px] uppercase tracking-wide text-[var(--text-label)] mr-1">
+                Workspaces
+              </span>
+              <span :if={row.workspaces == []} class="text-[12px] text-[var(--arb-text-muted)]">
+                none attached
+              </span>
               <span
                 :for={link <- row.workspaces}
                 id={"account-#{row.account.id}-ws-#{link.workspace_id}"}
@@ -696,7 +733,11 @@ defmodule ArbiterWeb.ProvidersLive do
                 <.link navigate={~p"/workspaces/#{link.workspace_id}"} class="hover:underline">
                   {link.workspace_name}
                 </.link>
-                <span :if={link.share} class="text-[var(--arb-text-muted)] font-[family-name:var(--font-mono)]" title="this workspace's cap on the account's concurrency">
+                <span
+                  :if={link.share}
+                  class="text-[var(--arb-text-muted)] font-[family-name:var(--font-mono)]"
+                  title="this workspace's cap on the account's concurrency"
+                >
                   ≤{link.share}
                 </span>
                 <button

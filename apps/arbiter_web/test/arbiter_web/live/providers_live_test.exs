@@ -149,7 +149,13 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
       assert has_element?(view, "#account-#{bare.id}-health[data-health=no_credential]")
       assert has_element?(view, "#account-#{credentialed.id}-health[data-health=ok]")
-      assert has_element?(view, "#account-#{credentialed.id}-credentials", "CLAUDE_CODE_OAUTH_TOKEN")
+
+      assert has_element?(
+               view,
+               "#account-#{credentialed.id}-credentials",
+               "CLAUDE_CODE_OAUTH_TOKEN"
+             )
+
       assert has_element?(view, "#account-#{credentialed.id}-last-probe", "never")
       refute html =~ @secret
     end
@@ -224,7 +230,10 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
       view |> element("#account-#{account.id}-credential-button") |> render_click()
 
-      assert has_element?(view, "#credential-form-#{account.id} input[type=password][name='credential[secret]']")
+      assert has_element?(
+               view,
+               "#credential-form-#{account.id} input[type=password][name='credential[secret]']"
+             )
 
       html =
         view
@@ -354,7 +363,12 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/providers")
 
-      assert has_element?(view, "#accounts-disabled-notice", "Accounts not enabled on this install")
+      assert has_element?(
+               view,
+               "#accounts-disabled-notice",
+               "Accounts not enabled on this install"
+             )
+
       assert has_element?(view, "#account-#{account.id}")
       refute has_element?(view, "#new-account-button")
       refute has_element?(view, "#account-#{account.id}-credential-button")
@@ -368,7 +382,9 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
       {:ok, view, _html} = live(conn, ~p"/providers")
 
-      render_hook(view, "create_account", %{"account" => %{"provider" => "claude", "slug" => "sneaky"}})
+      render_hook(view, "create_account", %{
+        "account" => %{"provider" => "claude", "slug" => "sneaky"}
+      })
 
       render_hook(view, "rotate_credential", %{
         "account_id" => account.id,
