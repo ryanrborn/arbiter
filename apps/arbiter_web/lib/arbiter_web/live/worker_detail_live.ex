@@ -55,6 +55,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:pr_label, "pull request")
       |> assign(:retry_modal, false)
       |> assign(:retry_error, nil)
+      |> assign(:retry_over_cap, false)
       |> assign(:retrying, false)
       |> assign(:restarting_watchdog, false)
       |> assign(:stop_notice, false)
@@ -177,11 +178,11 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # the modal is the confirmation step — the button only opens it.
 
   def handle_event("open_retry", _params, socket) do
-    {:noreply, assign(socket, retry_modal: true, retry_error: nil)}
+    {:noreply, assign(socket, retry_modal: true, retry_error: nil, retry_over_cap: false)}
   end
 
   def handle_event("cancel_retry", _params, socket) do
-    {:noreply, assign(socket, retry_modal: false, retry_error: nil)}
+    {:noreply, assign(socket, retry_modal: false, retry_error: nil, retry_over_cap: false)}
   end
 
   # A second click while one is in flight would spend credits twice.
@@ -195,14 +196,16 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # queued `:worker_lifecycle` / `:worker_output` messages and risking the
   # client giving up before the result lands. Run it async and hold the modal
   # in a pending state instead.
-  def handle_event("retry", _params, socket) do
-    task_id = socket.assigns.task_id
+  #
+  # bd-92mx1m: a human resume. A task that released its slot re-acquires one;
+  # at a full cap `Dispatch.resume/2` refuses (never defers), the modal says
+  # why, and only then offers "retry_force" — the explicit, recorded override.
+  def handle_event("retry", _params, socket), do: start_retry(socket, false)
 
-    {:noreply,
-     socket
-     |> assign(retrying: true, retry_error: nil)
-     |> start_async(:retry, fn -> Dispatch.resume(task_id) end)}
-  end
+  def handle_event("retry_force", _params, %{assigns: %{retrying: true}} = socket),
+    do: {:noreply, socket}
+
+  def handle_event("retry_force", _params, socket), do: start_retry(socket, true)
 
   # Re-arm one more auto-resolve attempt on a task's merge Watchdog once it's
   # exhausted its bounded retries on a :ci_failed block and parked (bd-bspakl).
@@ -336,6 +339,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply,
      socket
      |> assign(:retrying, false)
+     |> assign(:retry_over_cap, match?({:slot_cap_full, _}, reason))
      |> assign(:retry_error, "Resume failed: #{resume_failure(reason)}")
      |> refresh_all()}
   end
@@ -532,7 +536,22 @@ defmodule ArbiterWeb.WorkerDetailLive do
     do: "a worker is still active (#{status}) — stop it first."
 
   defp resume_failure({:task_closed, _id}), do: "the issue is closed."
+
+  defp resume_failure({:slot_cap_full, info}),
+    do: Arbiter.Worker.ResumeSlot.refusal_message(info)
+
   defp resume_failure(reason), do: inspect(reason)
+
+  defp start_retry(socket, force?) do
+    task_id = socket.assigns.task_id
+
+    opts = [resume_origin: :human, force_slot: force?, slot_override_actor: "dashboard"]
+
+    {:noreply,
+     socket
+     |> assign(retrying: true, retry_error: nil)
+     |> start_async(:retry, fn -> Dispatch.resume(task_id, opts) end)}
+  end
 
   defp refresh_snapshot(socket) do
     snap =
@@ -1309,6 +1328,18 @@ defmodule ArbiterWeb.WorkerDetailLive do
               disabled={@retrying}
             >
               Cancel
+            </Core.button>
+            <%!-- bd-92mx1m: offered only after the cap refused the plain
+                 resume, so going over it is always a deliberate second click. --%>
+            <Core.button
+              :if={@retry_over_cap}
+              id="worker-retry-force-btn"
+              phx-click="retry_force"
+              variant="attention"
+              size="sm"
+              disabled={@retrying}
+            >
+              Resume over the cap
             </Core.button>
             <Core.button phx-click="retry" variant="primary" size="sm" disabled={@retrying}>
               {if @retrying, do: "Resuming…", else: "Resume"}

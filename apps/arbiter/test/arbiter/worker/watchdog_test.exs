@@ -1342,6 +1342,42 @@ defmodule Arbiter.Worker.WatchdogTest do
                StubAutoResumeDispatcher.escalations()
     end
 
+    # bd-92mx1m: the worker is failed only so the auto-resume can replace it —
+    # a hand-off, not a park — so its task keeps its slot, and the resume is
+    # not a new admission. Once the Watchdog gives up instead, the worker IS
+    # parked for a human and the slot is released.
+    test "the timed-out worker holds its slot through the auto-resume hand-off" do
+      {pid, task_id} = running_worker()
+
+      start_timeout_watchdog(pid, task_id, "!arr-slot")
+
+      wait_for_decisions(1)
+      assert StubAutoResumeDispatcher.resume_count() == 1
+      assert Worker.state(pid).meta[:slot_handoff] == true
+      assert Arbiter.Worker.Phase.of(Worker.state(pid)) == :handing_off
+    end
+
+    test "a spent budget releases the slot before paging" do
+      {pid, task_id} = running_worker()
+
+      start_timeout_watchdog(pid, task_id, "!arr-slot-off", max_auto_resumes: 0)
+      wait_for_decisions(1)
+
+      assert Worker.state(pid).status == :failed
+      refute Worker.state(pid).meta[:slot_handoff]
+      assert Arbiter.Worker.Phase.of(Worker.state(pid)) == :waiting_on_you
+    end
+
+    test "a resume that cannot run releases the slot before paging" do
+      StubAutoResumeDispatcher.arm_resume_error(:no_outpost)
+      {pid, task_id} = running_worker()
+
+      start_timeout_watchdog(pid, task_id, "!arr-slot-err")
+      wait_until(fn -> length(StubAutoResumeDispatcher.escalations()) >= 1 end, 2_000)
+
+      refute Worker.state(pid).meta[:slot_handoff]
+    end
+
     test "max_auto_resumes: 0 keeps the pre-bd-8eheb6 behaviour (escalate, never resume)" do
       {pid, task_id} = running_worker()
 

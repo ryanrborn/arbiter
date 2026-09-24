@@ -30,6 +30,7 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Test.StubFixRoundDispatcher
   alias Arbiter.Worker
+  alias Arbiter.Worker.Phase
 
   @findings "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:1 needs a guard"
   @other_findings "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:9 leaks a pid"
@@ -248,6 +249,60 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
       Process.sleep(120)
       assert StubFixRoundDispatcher.dispatch_count() == 0
       assert StubFixRoundDispatcher.escalations() == []
+    end
+  end
+
+  # bd-92mx1m: the author is failed only so the fix round can replace it. That
+  # is a hand-off, not a park — the task keeps its slot through it, and the
+  # round's resume is not a new admission (`Arbiter.Worker.ResumeSlot`). Once
+  # the round is given up on, the author IS parked for a human and the slot is
+  # released.
+  describe "the task's slot across a REQUEST_CHANGES rejection" do
+    test "is held while the fix round is dispatched", %{repo: repo} do
+      ws = new_workspace()
+      pid = start_parked_author(new_task(ws), repo)
+
+      reject(pid)
+      wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
+      _ = :sys.get_state(pid)
+
+      assert Worker.state(pid).meta[:slot_handoff] == true
+      assert Phase.of(Worker.state(pid)) == :handing_off
+    end
+
+    test "is released when the budget is spent", %{repo: repo} do
+      ws = new_workspace()
+      pid = start_parked_author(new_task(ws), repo, %{review_gate_fix_round_attempts: 1})
+
+      reject(pid, :request_changes, @other_findings)
+      wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
+      _ = :sys.get_state(pid)
+
+      refute Worker.state(pid).meta[:slot_handoff]
+      assert Phase.of(Worker.state(pid)) == :waiting_on_you
+    end
+
+    test "is released when the fix round's dispatch fails", %{repo: repo} do
+      ws = new_workspace()
+      pid = start_parked_author(new_task(ws), repo)
+      StubFixRoundDispatcher.arm_dispatch_error(:no_outpost)
+
+      reject(pid)
+      wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
+      _ = :sys.get_state(pid)
+
+      refute Worker.state(pid).meta[:slot_handoff]
+      assert Phase.of(Worker.state(pid)) == :waiting_on_you
+    end
+
+    test "is never held by an inconclusive verdict, which gets no fix round", %{repo: repo} do
+      ws = new_workspace()
+      pid = start_parked_author(new_task(ws), repo)
+
+      reject(pid, :no_verdict, "reviewer crashed")
+
+      refute Worker.state(pid).meta[:slot_handoff]
+      assert Phase.of(Worker.state(pid)) == :waiting_on_you
     end
   end
 

@@ -94,6 +94,14 @@ defmodule ArbiterWeb.Api.FallbackController do
     })
   end
 
+  def call(conn, {:error, {:conflict, message, details}}) when is_binary(message) do
+    conn
+    |> put_status(:conflict)
+    |> json(%{
+      error: %{type: "conflict", message: message, details: details}
+    })
+  end
+
   def call(conn, {:error, {:busy, message}}) when is_binary(message) do
     conn
     |> put_status(:service_unavailable)

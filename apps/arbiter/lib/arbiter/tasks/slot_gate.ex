@@ -242,10 +242,29 @@ defmodule Arbiter.Tasks.SlotGate do
   """
   @spec occupied_tasks([map()], basis() | nil) :: non_neg_integer()
   def occupied_tasks(annotated_workers, basis \\ nil) when is_list(annotated_workers) do
-    case normalize_basis(basis) do
-      :issues -> issues_task_count(annotated_workers)
-      :agents -> phase_task_count(annotated_workers)
-    end
+    annotated_workers |> slot_holders(basis) |> length()
+  end
+
+  @doc """
+  The distinct task ids `occupied_tasks/2` counts, in first-seen order — the
+  same rule, but naming the holders rather than counting them.
+
+  `Arbiter.Worker.ResumeSlot` (bd-92mx1m) needs both halves: whether the task
+  being resumed is itself among the holders (a resume of work that never gave
+  its slot up is not a new admission), and, when the cap is full, *which*
+  tasks hold it, so a refusal can say so.
+  """
+  @spec slot_holders([map()], basis() | nil) :: [String.t()]
+  def slot_holders(annotated_workers, basis \\ nil) when is_list(annotated_workers) do
+    holding =
+      case normalize_basis(basis) do
+        :issues -> Enum.filter(annotated_workers, &record_slot?/1)
+        :agents -> Enum.filter(annotated_workers, &phase_slot?/1)
+      end
+
+    holding
+    |> Enum.map(&Map.get(&1, :task_id))
+    |> Enum.uniq()
   end
 
   @doc """
@@ -261,19 +280,9 @@ defmodule Arbiter.Tasks.SlotGate do
 
   # ---- internals ------------------------------------------------------------
 
-  defp phase_task_count(workers) do
-    workers
-    |> Enum.filter(&author_row?/1)
-    |> Enum.uniq_by(&Map.get(&1, :task_id))
-    |> Enum.count(&task_occupies_slot?(Map.get(&1, :phase)))
-  end
-
-  defp issues_task_count(workers) do
-    workers
-    |> Enum.filter(&record_slot?/1)
-    |> Enum.uniq_by(&Map.get(&1, :task_id))
-    |> length()
-  end
+  # A task's own author row, in a phase that still holds its slot.
+  defp phase_slot?(worker),
+    do: author_row?(worker) and task_occupies_slot?(Map.get(worker, :phase))
 
   defp author_row?(worker), do: role_of(worker) not in @subordinate_roles
 

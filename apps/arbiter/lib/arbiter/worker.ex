@@ -962,9 +962,29 @@ defmodule Arbiter.Worker do
 
   @doc """
   Mark the workflow failed. Valid from `:running` or `:awaiting`.
+
+  `slot_handoff: true` (bd-92mx1m) marks a failure that exists only so an
+  automatic round can replace this worker — the Watchdog's awaiting_review
+  auto-resume. The task keeps its slot through the hand-off
+  (`Arbiter.Worker.Phase` reads it as `:handing_off`, not `:waiting_on_you`)
+  until the round starts or `clear_slot_handoff/1` gives it up.
   """
-  @spec fail(ref(), term()) :: :ok | {:error, term()}
-  def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
+  @spec fail(ref(), term(), keyword()) :: :ok | {:error, term()}
+  def fail(ref, reason \\ nil, opts \\ [])
+
+  def fail(ref, reason, []), do: call(ref, {:fail, reason})
+
+  def fail(ref, reason, opts) when is_list(opts),
+    do: call(ref, {:fail, reason, Keyword.get(opts, :slot_handoff) == true})
+
+  @doc """
+  Drop a pending slot hand-off (`fail/3`'s `slot_handoff: true`, or the
+  ReviewGate fix round's): the automatic round it was waiting for will not
+  run, so the worker is parked for a human now and its task releases its slot.
+  A no-op on a worker that carries no hand-off.
+  """
+  @spec clear_slot_handoff(ref()) :: :ok | {:error, term()}
+  def clear_slot_handoff(ref), do: call(ref, :clear_slot_handoff)
 
   @doc """
   Deliver a ReviewGate (review-gate) verdict. Only valid from `:awaiting_review_gate`
@@ -2163,6 +2183,19 @@ defmodule Arbiter.Worker do
     {:reply, {:error, {:invalid_transition, status, :failed}}, state}
   end
 
+  def handle_call({:fail, reason, handoff?}, _from, %State{status: status} = state)
+      when status in [:idle, :running, :awaiting, :awaiting_review] do
+    {:reply, :ok, fail_now(put_slot_handoff(state, handoff?), reason)}
+  end
+
+  def handle_call({:fail, _reason, _handoff?}, _from, %State{status: status} = state) do
+    {:reply, {:error, {:invalid_transition, status, :failed}}, state}
+  end
+
+  def handle_call(:clear_slot_handoff, _from, %State{} = state) do
+    {:reply, :ok, drop_slot_handoff(state)}
+  end
+
   def handle_call(
         {:review_gate_verdict, verdict},
         _from,
@@ -2538,8 +2571,17 @@ defmodule Arbiter.Worker do
   # `park_rejected/4` so it lands after that call's reply, with `status` already
   # `:failed`. Never crashes the worker: the whole decision is best-effort.
   def handle_info({:__review_gate_fix_round__, verdict, findings}, %State{} = state) do
-    maybe_dispatch_fix_round(state, verdict, findings)
-    {:noreply, state}
+    case maybe_dispatch_fix_round(state, verdict, findings) do
+      :started -> {:noreply, state}
+      _ -> {:noreply, drop_slot_handoff(state)}
+    end
+  end
+
+  # bd-92mx1m: the fix round's resume failed before it could replace this
+  # worker (a missing worktree, an unresolvable repo…). Nothing will run, so
+  # this is a park for a human now, and the task gives its slot up.
+  def handle_info(:__fix_round_dispatch_failed__, %State{} = state) do
+    {:noreply, drop_slot_handoff(state)}
   end
 
   # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
@@ -5449,7 +5491,14 @@ defmodule Arbiter.Worker do
       |> Map.put(:failure_summary, review_gate_failure_summary(verdict, findings))
       |> put_park_reason(park_reason)
 
-    failed = fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
+    # bd-92mx1m: a rejection that may yet get a fix round is a hand-off, not a
+    # park — the task keeps its slot until `maybe_dispatch_fix_round/3` either
+    # starts the round (whose resume then passes `ResumeSlot` uncapped) or
+    # gives up on it (`drop_slot_handoff/1`, and the slot is released).
+    handoff? = is_nil(park_reason) and verdict == :request_changes
+    state = put_slot_handoff(%State{state | meta: meta}, handoff?)
+
+    failed = fail_now(state, fail_reason_for(verdict))
 
     # bd-a9zb7w: the rejection is recorded and paged — now schedule the
     # implementer. Deferred to a self-message rather than run inline because the
@@ -5467,6 +5516,19 @@ defmodule Arbiter.Worker do
 
     failed
   end
+
+  # bd-92mx1m: see `fail/3` and `Arbiter.Worker.Phase`. Set on the way into a
+  # hand-off failure; dropped (and the new phase announced, so the board and
+  # the autopilot see the slot come free) when the round will not run.
+  defp put_slot_handoff(%State{} = state, true),
+    do: %State{state | meta: Map.put(state.meta, :slot_handoff, true)}
+
+  defp put_slot_handoff(%State{} = state, _), do: state
+
+  defp drop_slot_handoff(%State{meta: %{slot_handoff: true} = meta} = state),
+    do: announce_phase(%State{state | meta: Map.delete(meta, :slot_handoff)})
+
+  defp drop_slot_handoff(%State{} = state), do: state
 
   defp put_park_reason(meta, nil), do: Map.delete(meta, :review_park_reason)
   defp put_park_reason(meta, reason), do: Map.put(meta, :review_park_reason, reason)
@@ -5551,6 +5613,7 @@ defmodule Arbiter.Worker do
     task_id = state.task_id
     workspace_id = state.workspace_id
     prior_attempts = attempt - 1
+    worker = self()
 
     run = fn ->
       case dispatcher.dispatch(args) do
@@ -5563,6 +5626,8 @@ defmodule Arbiter.Worker do
               "task=#{task_id}: #{inspect(reason)}"
           )
 
+          send(worker, :__fix_round_dispatch_failed__)
+
           dispatcher.escalate_exhausted(
             task_id,
             workspace_id,
@@ -5574,7 +5639,7 @@ defmodule Arbiter.Worker do
 
     case Task.Supervisor.start_child(Arbiter.TaskSupervisor, run) do
       {:ok, _pid} ->
-        :ok
+        :started
 
       other ->
         Logger.warning(
