@@ -64,6 +64,7 @@ defmodule ArbiterCli.AliasResolverTest do
       main_source = File.read!(main_source_path)
 
       verb_pattern = ~r/defp dispatch_known\("([^"]+)"/
+
       dispatch_verbs =
         verb_pattern
         |> Regex.scan(main_source, capture: :all_but_first)
