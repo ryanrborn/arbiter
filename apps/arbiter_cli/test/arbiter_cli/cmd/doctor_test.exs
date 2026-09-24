@@ -280,8 +280,11 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     refute res_sha.hint =~ "restart the server"
 
     # And verify via Doctor.run with a newer server version (same major)
+    Application.put_env(:arbiter_cli, :app_version, "0.1.67")
+    on_exit(fn -> Application.delete_env(:arbiter_cli, :app_version) end)
+
     server_version_resp = %{
-      "version" => "0.1.69",
+      "version" => "0.1.68",
       "sha" => "unknown",
       "built_at" => "2024-01-01T00:00:00Z",
       "booted_at" => "2024-01-01T00:01:00Z"
@@ -315,6 +318,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     refute res_sha.hint =~ "rebuild and reinstall"
 
     # And verify via Doctor.run
+    Application.put_env(:arbiter_cli, :app_version, "0.1.68")
+    on_exit(fn -> Application.delete_env(:arbiter_cli, :app_version) end)
+
     mismatched_version_resp = %{
       "version" => "0.1.64",
       "sha" => "eb0c8690",

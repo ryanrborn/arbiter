@@ -27,10 +27,15 @@ defmodule ArbiterCli.Version do
                     end
                 end)
 
+  {sha_raw, sha_rc} = System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true)
+  @git_sha if sha_rc == 0, do: String.trim(sha_raw), else: "unknown"
+
+  {dirty_raw, _} = System.cmd("git", ["status", "--porcelain"], stderr_to_stdout: true)
+  @git_dirty String.trim(dirty_raw) != ""
+
   # True if the CLI was built from source (git was available at build time),
   # false if it's a release build or git was unavailable at build time.
-  @git_available @release_version == nil and
-                   match?({_tag, 0}, @git_version_result)
+  @git_available @release_version == nil and sha_rc == 0
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
   @git_dir Path.expand("../../../../", __DIR__) |> Path.join(".git")
@@ -59,16 +64,10 @@ defmodule ArbiterCli.Version do
   end
 
   # ── compile-time stamp ────────────────────────────────────────────────────
-  {sha_raw, sha_rc} = System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true)
-  @git_sha if sha_rc == 0, do: String.trim(sha_raw), else: "unknown"
-
-  {dirty_raw, _} = System.cmd("git", ["status", "--porcelain"], stderr_to_stdout: true)
-  @git_dirty String.trim(dirty_raw) != ""
-
   @built_at DateTime.utc_now() |> DateTime.to_iso8601()
 
   @doc "App version from mix.exs at build time."
-  def app_version, do: @app_version
+  def app_version, do: Application.get_env(:arbiter_cli, :app_version, @app_version)
 
   @doc "Short git SHA at build time, suffixed with `*` when the tree was dirty."
   def git_sha, do: if(@git_dirty, do: "#{@git_sha}*", else: @git_sha)
@@ -88,5 +87,5 @@ defmodule ArbiterCli.Version do
   mismatches should suggest restarting the server or reinstalling from a
   release asset.
   """
-  def dev_build?, do: @git_available
+  def dev_build?, do: Application.get_env(:arbiter_cli, :dev_build, @git_available)
 end
