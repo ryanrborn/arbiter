@@ -21,7 +21,7 @@ defmodule ArbiterCli.AliasResolver do
   # The canonical command surface: resources, plus the flat meta commands that
   # carry no resource ambiguity, plus `dispatch` (the top-level shortcut for
   # `issue dispatch`).
-  @known_verbs ~w(issue worker repo dep config server workspace message usage loop queue quota breaker install mcp skill session account dispatch verify prime where init help version self-update upgrade preflip-gate)
+  @known_verbs ~w(issue worker repo dep config server workspace message usage loop queue scheduler quota breaker install mcp skill session account dispatch verify prime where init help version self-update upgrade preflip-gate)
 
   @doc "The set of canonical resources/commands that arb dispatches to."
   @spec known_verbs() :: [String.t()]
