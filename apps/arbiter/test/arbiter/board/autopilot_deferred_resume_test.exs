@@ -145,6 +145,28 @@ defmodule Arbiter.Board.AutopilotDeferredResumeTest do
     assert Autopilot.status(pid).deferred_resumes == []
   end
 
+  # A task parking for a human frees its slot without a worker_done /
+  # worker_failed event — only a `worker_phase` says so. That is worth a pass
+  # exactly while a deferred resume is waiting for the slot.
+  test "a slot-releasing phase change asks for a pass only while a resume waits" do
+    {pid, _free} = start(slots_free: 0)
+    released = {:event, %{topic: "worker_phase", phase: "waiting_on_you"}}
+
+    send(pid, released)
+    assert :sys.get_state(pid).plan_timer == nil
+
+    :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
+    # Consume the pass the deferral itself asked for.
+    send(pid, :run_plan)
+    assert :sys.get_state(pid).plan_timer == nil
+
+    send(pid, {:event, %{topic: "worker_phase", phase: "implementing"}})
+    assert :sys.get_state(pid).plan_timer == nil
+
+    send(pid, released)
+    assert :sys.get_state(pid).plan_timer != nil
+  end
+
   test "defer_resume/4 against a scheduler that is not running refuses" do
     assert {:error, :not_running} =
              Autopilot.defer_resume(:no_such_autopilot, "bd-x", :resume, [])

@@ -539,6 +539,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   defp resume_failure({:slot_cap_full, info}),
     do: Arbiter.Worker.ResumeSlot.refusal_message(info)
+
   defp resume_failure(reason), do: inspect(reason)
 
   defp start_retry(socket, force?) do

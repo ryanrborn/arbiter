@@ -43,7 +43,13 @@ defmodule ArbiterCli.Cmd.Worker do
 
   alias ArbiterCli.{Client, Output}
 
-  @switches [json: :boolean, repo: :string, model: :string, force_quota: :boolean, force: :boolean]
+  @switches [
+    json: :boolean,
+    repo: :string,
+    model: :string,
+    force_quota: :boolean,
+    force: :boolean
+  ]
 
   # Pre-existing complexity 18 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new

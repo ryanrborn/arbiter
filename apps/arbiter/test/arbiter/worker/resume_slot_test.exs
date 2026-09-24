@@ -165,7 +165,12 @@ defmodule Arbiter.Worker.ResumeSlotTest do
       workers = [author(a, :failed), author(b, :running)]
 
       assert {:ok, :admitted} =
-               ResumeSlot.admit(a, origin: :automatic, slot_admitted: true, workers: workers, cap: 1)
+               ResumeSlot.admit(a,
+                 origin: :automatic,
+                 slot_admitted: true,
+                 workers: workers,
+                 cap: 1
+               )
     end
   end
 

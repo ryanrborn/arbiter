@@ -510,7 +510,10 @@ defmodule Arbiter.Board.Autopilot do
   # or failing (a `worker_phase` to `waiting_on_you`), and so does a dropped
   # slot hand-off. Only worth a pass while a deferred resume is waiting on
   # exactly that.
-  def handle_info({:event, %{topic: "worker_phase", phase: phase}}, %{deferred_resumes: [_ | _]} = state)
+  def handle_info(
+        {:event, %{topic: "worker_phase", phase: phase}},
+        %{deferred_resumes: [_ | _]} = state
+      )
       when phase in ["waiting_on_you", "done"] do
     {:noreply, request_plan(state)}
   end

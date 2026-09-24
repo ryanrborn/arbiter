@@ -631,7 +631,12 @@ defmodule Arbiter.Workers.ReconcilerTest do
         Ash.create(
           Run,
           Map.merge(
-            %{task_id: issue.id, repo: "arbiter", workspace_id: ws.id, started_at: DateTime.utc_now()},
+            %{
+              task_id: issue.id,
+              repo: "arbiter",
+              workspace_id: ws.id,
+              started_at: DateTime.utc_now()
+            },
             attrs
           )
         )
