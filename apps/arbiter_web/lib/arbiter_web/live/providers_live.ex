@@ -363,6 +363,9 @@ defmodule ArbiterWeb.ProvidersLive do
     do:
       "Auth hold and watchdog state are per #{quota_provider_label(Atom.to_string(account.provider))} CLI adapter — shared by every account on this provider."
 
+  defp usage_rows_text(1), do: "1 usage event"
+  defp usage_rows_text(n), do: "#{n} usage events"
+
   defp cost_text(%{cost_usd: nil}), do: "n/a"
   defp cost_text(%{cost_usd: cost}), do: format_usd(cost)
 
@@ -713,7 +716,7 @@ defmodule ArbiterWeb.ProvidersLive do
                   {cost_text(row.usage)}
                 </span>
                 <span class="text-[11px] text-[var(--arb-text-muted)] tabular-nums">
-                  {format_tokens(row.usage.tokens)} tokens · {row.usage.rows} runs
+                  {format_tokens(row.usage.tokens)} tokens · {usage_rows_text(row.usage.rows)}
                 </span>
               </section>
             </div>
