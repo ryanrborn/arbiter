@@ -53,4 +53,20 @@ defmodule ArbiterCli.AliasResolverTest do
       assert AliasResolver.suggest("anything", []) == []
     end
   end
+
+  describe "consistency — every dispatched verb is resolvable" do
+    # This list must match every verb in Main.dispatch_known/2.
+    # If you add a dispatch_known clause, add the verb here and to @known_verbs.
+    @dispatched_verbs ~w(issue worker repo dep config server workspace message usage loop queue scheduler quota preflip-gate breaker install mcp skill account session dispatch verify prime where init version self-update upgrade)
+
+    test "all dispatched verbs are known" do
+      known = AliasResolver.known_verbs()
+
+      for verb <- @dispatched_verbs do
+        assert verb in known,
+               "dispatch_known(\"#{verb}\", ...) is not in @known_verbs; " <>
+                 "verbs must be resolvable before dispatch"
+      end
+    end
+  end
 end
