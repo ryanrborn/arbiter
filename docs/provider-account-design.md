@@ -631,31 +631,32 @@ false. Two decisions the rows above do not spell out:
   cheap.
 * **Install-level sources are not what P3 moved.** `oauth_token/1`'s steps 2
   and 3 (the server process env, and the unambiguous install-wide value) are
-  install configuration, not workspace configuration, so a workspace that
-  never carried a token of its own still falls through to them, and a spawn
-  with no workspace in hand — the fleet-wide watchdog and quota probes — takes
-  the unambiguous install-wide *account* credential with those steps beneath
-  it as a floor. P4 deletes them; P3 does not.
+  install configuration, not workspace configuration, so on the *flag-off*
+  path a workspace that never carried a token of its own still falls through
+  to them, and a workspace-less spawn — the fleet-wide watchdog and quota
+  probes — takes the unambiguous install-wide token with those steps beneath
+  it as a floor. P4 removed that floor from the *flag-on* path (see "What P4
+  actually shipped" below); it survives only while `:provider_accounts_enabled`
+  is `false`. P3 did not touch either path.
 
-**What P4 actually shipped (bd-6yb06i).** The destructive step — removal of
-the legacy `ConfigDir` fallback chain and deletion of install-wide-unambiguous
-sources — was deferred per operator ruling on #1947 (commit `7eaaaafe`). The
-design intended P4 to land as the final step of a three-phase sequence
-(N / N+1 / N+2 in §7.5), making the account model mandatory once the rollback
-window closed. Instead, the fallback chain remains in place: `ConfigDir.oauth_token/1`
-still consults the server process env and `CLAUDE_CODE_OAUTH_TOKEN` as fallbacks
-when no account is found. This means:
-
-* **The account model is opt-in, not the live default.** `:provider_accounts_enabled`
-  defaults `false` in every environment (§7.5 / `config/config.exs:131`), and P3's
-  read paths are gated on it. A workspace without an explicit account join still
-  sources credentials from its `encrypted_worker_env` blob, and the fleet-wide
-  probes still fall back to install-wide sources. The reversal preserves the
-  three-release N / N+1 / N+2 structure.
-* **No further destructive changes.** P4's nominal scope (deletion) is closed.
-  Extending the fallback chain or changing its behaviour is a future decision
-  and requires explicit work, not a phase; there is no "P4 rolled back but P12
-  deletes it anyway" trap.
+**What P4 actually shipped (bd-cblemv).** The `worker_env` removal described
+as "Release N+2 — destructive" above was already delivered by P2
+(bd-77j2if; see "What P2 actually shipped" above) — there was no additional
+`worker_env` deletion left for P4 to do. What P4 shipped in `config_dir.ex`
+was removing the server-env and install-wide-unambiguous fallbacks (steps 2
+and 3, just above) *as a fallback under the flag-on path*: `account_oauth_token/1`
+answers `nil` directly instead of falling through to `legacy_oauth_token/1`
+(`config_dir.ex:270`, `:289`), and `oauth_token_pairs/1` now emits an explicit
+`{"CLAUDE_CODE_OAUTH_TOKEN", false}` unset pair so `Port.open`'s ambient
+inheritance can't leak a server token into a spawn decided to carry none. The
+operator ruled on PR #1947 that these same two fallbacks must stay in place
+on the **flag-off** path, since the legacy chain still depends on them there
+for workspaces and workspace-less spawns that have never been migrated —
+deleting them there would break that path, not just tidy it
+(`config_dir.ex:263-265`, kept verbatim). Deleting the flag-off chain is
+deferred to a new **P13 ("flip") phase** (§10), which also removes the
+`:provider_accounts_enabled` flag and hard-codes the account join as the
+only path.
 
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
@@ -797,7 +798,7 @@ Each phase is sized to be one child ticket.
 | **P1** | `ProviderAccount` / `ProviderCredential` / `WorkspaceProviderAccount` resources + migration. Tables only; nothing reads them (**shipped**) | P0 | P2 | D2 |
 | **P2** | Plan-driven extraction: move allowlisted keys, encrypted backup row, `mix arbiter.accounts.rollback`. Flag off; workspace blob still authoritative (**shipped**, bd-77j2if) | P1 | P2 | D3 |
 | **P3** | Read-path flip behind `:provider_accounts_enabled` — `ConfigDir.oauth_token/1`, `ConfigDir.env/1`, `WorkerEnv.resolve/1` source from the account (**shipped**, bd-aiodva; see §7.5) | P2 | P2 | D3 |
-| **P4** | Destructive step: remove moved keys from `worker_env`; delete `ConfigDir`'s server-env and install-wide-unambiguous fallbacks (**shipped**, bd-6yb06i) | P3 | P2 | D2 |
+| **P4** | Destructive step (**shipped**, bd-cblemv; see §7.5) — `worker_env` removal already landed in P2; deferred the `ConfigDir` fallback deletion to P13 per operator ruling on #1947 | P3 | P2 | D2 |
 | **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) (**shipped**, bd-3yokey) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
 | **P6** | Build account iteration in the probes: `CloudProbe` fetches `/api/oauth/usage` once per account (bd-4fbpto deleted bd-5xuneh's per-token grouping; this is new code, not a re-key of it — §9); `OAuthUsage` cooldown keyed by account (**shipped**) | P5 | P2 | D2 |
 | **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` (**shipped**) | P5 | **P1** | D3 |
@@ -806,6 +807,7 @@ Each phase is sized to be one child ticket.
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces (**shipped**, bd-icwk2k) | P9, P5 | P3 | D2 |
 | **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |
+| **P13** | "Flip" phase: delete `ConfigDir.oauth_token/1`'s flag-off legacy chain (the server-env and install-wide-unambiguous fallbacks kept verbatim at `config_dir.ex:263-265`; the flag-on floor was already removed in P4); remove `:provider_accounts_enabled` and hard-code the account join as the only path (deferred from P4, bd-cblemv, per operator ruling on #1947 — see §7.5) | P4 | P2 | D2 |
 
 P5 and P7 are P1 because they are the correctness fixes — the gate is only sound
 once the budget, the cap and the quota live on the same object.

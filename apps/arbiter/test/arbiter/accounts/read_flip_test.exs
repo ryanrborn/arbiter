@@ -321,7 +321,9 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       flag(true)
 
       assert ConfigDir.oauth_token(ws) == nil
-      assert ConfigDir.env(ws) == []
+      # {..., false} is an explicit Port.open unset, not an empty list — see
+      # config_dir.ex's oauth_token_pairs/1 (P4, bd-cblemv).
+      assert ConfigDir.env(ws) == [{@oauth_var, false}]
       assert WorkerEnv.resolve(task.id) == {[{"LOG_LEVEL", "debug"}], []}
     end
 

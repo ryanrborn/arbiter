@@ -301,8 +301,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
       env = build_invoke_env(workspace)
 
       opts =
-        [{:stderr_to_stdout, true}] ++
-          if(env == [], do: [], else: [{:env, env}]) ++
+        [{:stderr_to_stdout, true}, {:env, env}] ++
           if(cwd, do: [{:cd, cwd}], else: [])
 
       # The raw `output` rides back to `invoke_reviewer/2` as a trailing
