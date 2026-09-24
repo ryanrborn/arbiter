@@ -783,6 +783,14 @@ defmodule Arbiter.MCP.Catalog do
             "description" => "Repo to run in (optional; inherited from the task's last run)."
           },
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
+          "force" => %{
+            "type" => "boolean",
+            "description" =>
+              "Resume over a full concurrency cap. A task that released its slot (parked for you, " <>
+                "stopped, completed) must re-acquire one; when none is free the resume is refused " <>
+                "with the cap and the tasks holding it. `true` goes over the cap anyway, and the " <>
+                "override is recorded. Defaults to false."
+          },
           "force_quota" => %{
             "type" => "boolean",
             "description" =>

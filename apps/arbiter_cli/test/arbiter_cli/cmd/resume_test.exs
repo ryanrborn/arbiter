@@ -99,6 +99,53 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       assert_receive {:body, body}
       assert body["repo"] == "my/repo"
       assert body["model"] == "opus"
+      refute Map.has_key?(body, "force")
+    end
+
+    # bd-92mx1m: a task that released its slot, at a full cap, is refused with a
+    # 409 naming the cap and the holders; `--force` goes over it (recorded
+    # server-side).
+    test "--force forwards force: true in the request body" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "task" => %{"id" => "bd-9", "title" => "t", "status" => "in_progress"},
+          "worker" => %{"task_id" => "bd-9", "pid" => "x"},
+          "machine" => %{"id" => "m", "pid" => "y"}
+        })
+      end)
+
+      {_out, _err, code} = capture(fn -> run_resume(["bd-9", "--force"]) end)
+
+      assert code == 0
+      assert_receive {:body, %{"force" => true}}
+    end
+
+    test "a full-cap refusal surfaces the server's message" do
+      stub_post(
+        "/api/workers/bd-a/resume",
+        %{
+          "error" => %{
+            "type" => "conflict",
+            "message" =>
+              "no free worker slot to resume bd-a: the concurrency cap is 1 and 1 held by bd-b.",
+            "details" => %{"cap" => 1, "holders" => ["bd-b"]}
+          }
+        },
+        409
+      )
+
+      {_out, err, code} = capture(fn -> run_resume(["bd-a"]) end)
+      assert code != 0
+      assert err =~ "cap is 1"
+      assert err =~ "bd-b"
     end
   end
 end

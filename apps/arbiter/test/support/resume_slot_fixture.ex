@@ -5,6 +5,9 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   task A dispatched and then parked for a human (its worker lingers `:failed`,
   which releases its slot), and task B admitted into the slot A freed.
 
+  Every agent CLI is stubbed (`Arbiter.TestSandbox`), so a resume that
+  succeeds spawns a sleeping stub, never the operator's real CLI.
+
   Real enough that `Arbiter.Worker.Dispatch.resume/2` gets all the way to
   the slot gate on A — preserved worktree, known repo, prior run — so a
   surface's test proves the gate where it actually sits.
@@ -39,37 +42,23 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   end
 
   @doc """
-  A real git repo with a remote, registered as `rs/repo`, a private worktree
-  root, and a cap of 1 — all restored on exit.
+  An `Arbiter.TestSandbox` — a real repo with an origin, and every agent CLI
+  stubbed first on `PATH` (a sleeping stub, so a resumed agent stays live and
+  moves nothing on) — registered as `rs/repo`, plus a cap of 1. All restored
+  on exit, and every worker left running is stopped before the sandbox goes.
   """
   def setup_repo! do
-    tmp = Path.join(System.tmp_dir!(), "resume-slot-#{:erlang.unique_integer([:positive])}")
-    repo = Path.join(tmp, "source")
-    File.mkdir_p!(repo)
+    sandbox = Arbiter.TestSandbox.provision!("resume-slot", stub: "exec sleep 30\n")
 
-    git!(["init", "-q", "-b", "main", repo])
-    git!(["-C", repo, "config", "user.email", "test@example.com"])
-    git!(["-C", repo, "config", "user.name", "Test User"])
-    git!(["-C", repo, "config", "commit.gpgsign", "false"])
-    File.write!(Path.join(repo, "README.md"), "hello\n")
-    git!(["-C", repo, "add", "README.md"])
-    git!(["-C", repo, "commit", "-q", "-m", "initial"])
-
-    remote = Path.join(tmp, "remote.git")
-    git!(["init", "-q", "--bare", "-b", "main", remote])
-    git!(["-C", repo, "remote", "add", "origin", remote])
-    git!(["-C", repo, "push", "-q", "origin", "main"])
-
-    worktree_root = Path.join(tmp, "worktrees")
-    File.mkdir_p!(worktree_root)
-
-    put_env_restoring(:worktree_root, worktree_root)
-    put_env_restoring(:repo_paths, %{@repo => repo})
+    put_env_restoring(:worktree_root, sandbox.worktree_root)
+    put_env_restoring(:repo_paths, %{@repo => sandbox.repo})
     # The 2026-09-23 incident's cap.
     put_env_restoring(:conductor_system_max_concurrent, 1)
 
-    on_exit(fn -> File.rm_rf!(tmp) end)
-    :ok
+    # LIFO: runs before the sandbox's own teardown, so a worker a resume
+    # started (whose pid the test may never hold) is stopped first.
+    on_exit(fn -> Arbiter.TestSandbox.own_live_workers!(sandbox) end)
+    sandbox
   end
 
   @doc "Dispatch `task`, then fail its worker: parked for a human."
@@ -101,10 +90,6 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     if Worker.whereis(task_id), do: Worker.stop(task_id, :normal)
   catch
     :exit, _ -> :ok
-  end
-
-  defp git!(args) do
-    {_, 0} = System.cmd("git", args)
   end
 
   defp put_env_restoring(key, value) do

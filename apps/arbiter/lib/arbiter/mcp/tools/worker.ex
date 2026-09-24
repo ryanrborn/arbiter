@@ -66,14 +66,28 @@ defmodule Arbiter.MCP.Tools.Worker do
   dispatch-recursion guardrail (`can_dispatch` + `depth`): resume spawns a worker, so
   the same recursion concerns apply. The child worker's scope is minted one
   level deeper. Backs onto `Arbiter.Worker.Dispatch.resume/2`.
+
+  bd-92mx1m: a task that released its slot (parked for a human, stopped,
+  completed) re-acquires one like a new admission. At a full cap the resume is
+  refused with a message naming the cap and the tasks holding it; `force:
+  true` goes over the cap, and the override is recorded
+  (`Arbiter.Worker.ResumeSlot`).
   """
   @spec worker_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_resume(%Scope{} = scope, args) do
     with :ok <- Tools.ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- Tools.fetch_task(scope, args, task_id) do
-      case Dispatch.resume(task_id, dispatch_opts(scope, args)) do
+         {:ok, _task} <- Tools.fetch_task(scope, args, task_id),
+         {:ok, force} <- Tools.fetch_bool(args, "force", false) do
+      opts =
+        scope
+        |> dispatch_opts(args)
+        |> Keyword.put(:resume_origin, :human)
+        |> Keyword.put(:force_slot, force)
+        |> Keyword.put(:slot_override_actor, actor_string(scope.tier))
+
+      case Dispatch.resume(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
       end
@@ -915,6 +929,10 @@ defmodule Arbiter.MCP.Tools.Worker do
 
   defp dispatch_error_message(:repo_unknown),
     do: "could not resolve the repo for this task; pass `repo` explicitly"
+
+  # bd-92mx1m: the task released its slot and the cap is full.
+  defp dispatch_error_message({:slot_cap_full, info}),
+    do: Arbiter.Worker.ResumeSlot.refusal_message(info)
 
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 
