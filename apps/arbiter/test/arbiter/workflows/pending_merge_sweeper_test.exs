@@ -749,6 +749,206 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
     end
   end
 
+  # ---- red CI is a wait, not a give-up (v0.1.72 regression) -----------------
+  #
+  # emricare/tonic !292 / !293: approved while CI was red for an infra reason.
+  # The retry saw the red pipeline, paged "approved merge abandoned" and
+  # latched the stamp; nothing re-armed it when a later pipeline went green.
+
+  describe "an orphaned approved merge on red CI" do
+    defp red(reviewed),
+      do: %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :failed}
+
+    defp ci_escalations(task_id),
+      do: task_id |> escalations() |> Enum.filter(&(&1.subject =~ "CI checks are failing"))
+
+    defp abandon_escalations(task_id),
+      do: task_id |> escalations() |> Enum.filter(&(&1.subject =~ "abandoned"))
+
+    test "keeps watching and merges once a re-run pipeline goes green" do
+      reviewed = sha("red-then-green")
+      mr_ref = "!pm-red-green"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.queue_get(mr_ref, [red(reviewed)])
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> StubMerger.get_count(mr_ref) >= 5 end)
+      end)
+
+      # Still watching: no merge, no latch, no "abandoned" page — one notice
+      # that CI is red on an approved PR.
+      assert is_pid(Watchdog.retry_whereis(task.id))
+      assert PendingMerge.get(reload(task)).escalated_at == nil
+      assert StubMerger.merge_count(mr_ref) == 0
+      assert abandon_escalations(task.id) == []
+      assert [_one] = ci_escalations(task.id)
+
+      # Somebody re-runs the pipeline on the same head; it goes green.
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :running},
+        %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :success}
+      ])
+
+      capture_log(fn -> wait_until(fn -> reload(task).status == :closed end) end)
+
+      assert StubMerger.merge_count(mr_ref) == 1
+      assert StubMerger.last_merge() == {mr_ref, reviewed}
+      assert abandon_escalations(task.id) == []
+      assert [_one] = ci_escalations(task.id)
+    end
+
+    test "the red-CI notice is sent once, across retries and restarts" do
+      reviewed = sha("red-once")
+      mr_ref = "!pm-red-once"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.queue_get(mr_ref, [red(reviewed)])
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> ci_escalations(task.id) != [] end)
+      end)
+
+      # The coordinator clears the notice, then the server restarts: the retry
+      # process is gone and a fresh sweep re-arms one on the same red pipeline.
+      Enum.each(escalations(task.id), &({:ok, _} = Message.mark_cleared(&1)))
+      retry = Watchdog.retry_whereis(task.id)
+      ref = Process.monitor(retry)
+      stop_quietly(retry)
+      assert_receive {:DOWN, ^ref, :process, ^retry, _}, 2_000
+
+      before = StubMerger.get_count(mr_ref)
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> StubMerger.get_count(mr_ref) >= before + 5 end)
+      end)
+
+      assert length(ci_escalations(task.id)) == 1
+      assert PendingMerge.get(reload(task)).escalated_at == nil
+    end
+
+    test "a head pushed after approval still has to pass the stale-SHA guard" do
+      reviewed = sha("red-new-head-reviewed")
+      head = sha("red-new-head")
+      mr_ref = "!pm-red-new-head"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.set_diff(mr_ref, reviewed, @reviewed_diff)
+      StubMerger.set_diff(mr_ref, head, @unreviewed_diff)
+
+      StubMerger.queue_get(mr_ref, [
+        red(reviewed),
+        red(reviewed),
+        %{status: :open, head_sha: head, base_ref: "main", pipeline: :success}
+      ])
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> PendingMerge.get(reload(task)).escalated_at != nil end)
+      end)
+
+      assert StubMerger.merge_count(mr_ref) == 0
+      assert PendingMerge.get(reload(task)).escalation_reason =~ "stale_reviewed_sha"
+      assert reload(task).status != :closed
+    end
+
+    test "red CI that never recovers gives up once max_wait_ms after the merge first waited" do
+      reviewed = sha("red-forever")
+      mr_ref = "!pm-red-forever"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      three_days_ago =
+        DateTime.utc_now() |> DateTime.add(-3 * 24 * 3600, :second) |> DateTime.to_iso8601()
+
+      raw = Map.put(reload(task).pending_merge, "since", three_days_ago)
+      {:ok, _} = Ash.update(reload(task), %{pending_merge: raw}, action: :set_pending_merge)
+
+      StubMerger.queue_get(mr_ref, [red(reviewed)])
+
+      capture_log(fn ->
+        assert %{retried: [_]} =
+                 sweep(retry_opts: [interval_ms: 15, initial_delay_ms: 0, max_wait_ms: 3_600_000])
+
+        wait_until(fn -> PendingMerge.get(reload(task)).escalated_at != nil end)
+        wait_until(fn -> is_nil(Watchdog.retry_whereis(task.id)) end)
+        assert %{retried: []} = sweep()
+      end)
+
+      assert PendingMerge.get(reload(task)).escalation_reason =~ "wait_exhausted"
+      assert [_one] = abandon_escalations(task.id)
+      assert StubMerger.merge_count(mr_ref) == 0
+    end
+  end
+
+  # ---- a fix pass still working the PR owns it ------------------------------
+  #
+  # In the v0.1.72 incident the sweeper started its retry while the task's
+  # `:fixpass` worker was still running against the red pipeline: the retry
+  # only looked for a worker under the task's own registry key.
+
+  describe "a live subordinate worker (fix pass / conflict resolver)" do
+    defp running_subordinate(task, suffix) do
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "arbiter", registry_key: task.id <> suffix)
+
+      :ok = Worker.advance(pid, :implement)
+      on_exit(fn -> stop_quietly(pid) end)
+      pid
+    end
+
+    test "owns the merge: the sweeper does not start a retry beside it" do
+      ws = workspace()
+      task = task(ws, "!pm-fixpass")
+      stamp!(task, sha("fixpass"))
+      running_subordinate(task, ":fixpass")
+
+      assert %{retried: [], skipped: [{_, :live_worker}]} = sweep()
+      assert Watchdog.retry_whereis(task.id) == nil
+    end
+
+    test "a running retry stands down when one starts" do
+      reviewed = sha("fixpass-mid-retry")
+      mr_ref = "!pm-fixpass-mid"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.queue_get(mr_ref, [red(reviewed)])
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> StubMerger.get_count(mr_ref) >= 2 end)
+      end)
+
+      retry = Watchdog.retry_whereis(task.id)
+      ref = Process.monitor(retry)
+
+      capture_log(fn ->
+        running_subordinate(task, ":conflict")
+        assert_receive {:DOWN, ^ref, :process, ^retry, :normal}, 3_000
+      end)
+
+      assert StubMerger.merge_count(mr_ref) == 0
+      assert PendingMerge.get(reload(task)).escalated_at == nil
+    end
+  end
+
   describe "sweeper scope" do
     test "a workspace with auto_merge turned off is not retried" do
       reviewed = sha("manual")
