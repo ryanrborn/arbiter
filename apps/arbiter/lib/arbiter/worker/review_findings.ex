@@ -95,12 +95,15 @@ defmodule Arbiter.Worker.ReviewFindings do
   # A file path token, optionally with `:line` / `:line-line`. Deliberately
   # requires a dotted extension of 1..6 letters so ordinary prose ("e.g.", "i.e.")
   # and bare identifiers do not read as paths — see `@path_stoplist`. The
-  # leading `\.?` lets a dotfile's own leading dot (`.gitlab-ci.yml`) survive
-  # the match — bd-bm6bfs: without it, `.gitlab-ci.yml` was captured as
+  # leading `(?<![\w.])\.?` lets a dotfile's own leading dot (`.gitlab-ci.yml`)
+  # survive the match — bd-bm6bfs: without it, `.gitlab-ci.yml` was captured as
   # `gitlab-ci.yml`, so `touched?/2` could never match it against a real `git
   # diff --name-only` entry (which keeps the dot), and the unproven-file
-  # backstop rejected every ADDRESSED disposition that cited a dotfile.
-  @path ~r/((?:[\w.\-]+\/)*\.?[\w\-]+\.[a-zA-Z]{1,6})(?::\d+(?:-\d+)?)?/
+  # backstop rejected every ADDRESSED disposition that cited a dotfile. The
+  # negative lookbehind stops a *preceding* prose dot (`...config.exs`) from
+  # being pulled in as part of the path, which would otherwise capture
+  # `.config.exs` and make `touched?/2` compare against the wrong basename.
+  @path ~r/((?:[\w.\-]+\/)*(?<![\w.])\.?[\w\-]+\.[a-zA-Z]{1,6})(?::\d+(?:-\d+)?)?/
   @path_stoplist ~w(e.g i.e etc vs no.of)
 
   # A finding id as it appears in a DISPOSITIONS line.
