@@ -215,6 +215,28 @@ defmodule Arbiter.Accounts do
     end
   end
 
+  @doc """
+  Detach a workspace from an account — the inverse of `attach_workspace/4`.
+  Deletes the `(workspace_id, account.provider)` `WorkspaceProviderAccount`
+  row, but only while it still points at *this* account: a link an operator
+  has since re-pointed elsewhere is `{:error, :not_attached}`, never deleted
+  out from under them.
+  """
+  @spec detach_workspace(String.t(), String.t()) ::
+          {:ok, WorkspaceProviderAccount.t()} | {:error, :not_found | :ambiguous | :not_attached}
+  def detach_workspace(workspace_id, account_ref) do
+    with {:ok, _workspace} <- get_workspace(workspace_id),
+         {:ok, account} <- get_account(account_ref),
+         %WorkspaceProviderAccount{provider_account_id: account_id} = link
+         when account_id == account.id <- existing_link(workspace_id, account.provider),
+         :ok <- Ash.destroy(link) do
+      {:ok, link}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :not_attached}
+    end
+  end
+
   defp maybe_put_share(attrs, opts) do
     if Keyword.has_key?(opts, :share) do
       Map.put(attrs, :share, Keyword.get(opts, :share))
