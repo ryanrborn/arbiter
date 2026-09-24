@@ -111,6 +111,7 @@ defmodule ArbiterWeb.Nav do
             icon: "hero-building-office-2",
             badge: nil
           },
+          %{label: "Providers", href: ~p"/providers", icon: "hero-key", badge: nil},
           %{
             label: cap_plural("skill"),
             href: ~p"/skills",
