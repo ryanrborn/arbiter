@@ -785,6 +785,40 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert has_element?(view, ~s(#board-column-running [id="card-#{task.id}"]))
     end
 
+    # bd-92mx1m: a worker parked on a question released its task's slot, so
+    # letting it proceed is a new admission. At a full cap it stays parked, and
+    # the board says what holds the slots.
+    test "at a full cap a parked card will not proceed, and names what holds the slots", %{
+      conn: conn,
+      ws: ws
+    } do
+      prior = Application.fetch_env(:arbiter, :conductor_system_max_concurrent)
+      Application.put_env(:arbiter, :conductor_system_max_concurrent, 1)
+
+      on_exit(fn ->
+        case prior do
+          {:ok, v} -> Application.put_env(:arbiter, :conductor_system_max_concurrent, v)
+          :error -> Application.delete_env(:arbiter, :conductor_system_max_concurrent)
+        end
+      end)
+
+      parked = working_issue(ws, "asked a question")
+      pid = parked_worker(ws, parked)
+
+      holder = working_issue(ws, "admitted into the freed slot")
+      {:ok, holder_pid} = Worker.start(task_id: holder.id, repo: "r", workspace_id: ws.id)
+      :ok = Worker.advance(holder_pid, :implement)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      html = drag(view, parked.id, "waiting", "closed")
+
+      assert html =~ "cap is 1"
+      assert html =~ holder.id
+      assert Worker.state(pid).status == :awaiting
+      assert has_element?(view, ~s(#board-column-waiting [id="card-#{parked.id}"]))
+    end
+
     test "a card the worker FSM will not un-park says so rather than moving", %{
       conn: conn,
       ws: ws
