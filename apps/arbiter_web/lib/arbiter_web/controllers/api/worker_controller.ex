@@ -285,48 +285,49 @@ defmodule ArbiterWeb.Api.WorkerController do
         |> put_status(:created)
         |> render(:dispatch, result: result)
 
-      {:error, {:task_not_found, _}} ->
-        {:error, :not_found}
-
-      {:error, {:task_closed, _}} ->
-        {:error,
-         {:invalid_request, "task is closed; reopen it before resuming", %{task_id: task_id}}}
-
-      {:error, :no_outpost} ->
-        {:error,
-         {:invalid_request,
-          "no preserved worktree for this task — nothing to resume; start fresh with " <>
-            "`arb dispatch #{task_id}`", %{task_id: task_id}}}
-
-      {:error, :no_session} ->
-        {:error,
-         {:invalid_request,
-          "no prior Claude session recorded for this task — nothing to resume at the " <>
-            "session level; start fresh with `arb dispatch #{task_id}`", %{task_id: task_id}}}
-
-      {:error, :repo_unknown} ->
-        {:error,
-         {:invalid_request,
-          "could not resolve the repo for this task; pass it explicitly: `arb worker resume <task> <repo>`",
-          %{task_id: task_id}}}
-
-      {:error, {:worker_active, status}} ->
-        {:error,
-         {:invalid_request, Arbiter.Worker.Dispatch.worker_active_message(status, task_id),
-          %{task_id: task_id}}}
-
-      # bd-92mx1m: the task released its slot and the cap is full. A 409 — the
-      # request is fine, the fleet's state refuses it — naming the cap and the
-      # holders; `force` (`arb worker resume --force`) overrides.
-      {:error, {:slot_cap_full, info}} ->
-        {:error,
-         {:conflict, Arbiter.Worker.ResumeSlot.refusal_message(info),
-          %{task_id: task_id, cap: info.cap, holders: info.holders}}}
-
       {:error, reason} ->
-        {:error, {:server_error, "resume failed", %{reason: inspect(reason)}}}
+        {:error, resume_error(reason, task_id)}
     end
   end
+
+  defp resume_error({:task_not_found, _}, _task_id), do: :not_found
+
+  defp resume_error({:task_closed, _}, task_id),
+    do: {:invalid_request, "task is closed; reopen it before resuming", %{task_id: task_id}}
+
+  defp resume_error(:no_outpost, task_id),
+    do:
+      {:invalid_request,
+       "no preserved worktree for this task — nothing to resume; start fresh with " <>
+         "`arb dispatch #{task_id}`", %{task_id: task_id}}
+
+  defp resume_error(:no_session, task_id),
+    do:
+      {:invalid_request,
+       "no prior Claude session recorded for this task — nothing to resume at the " <>
+         "session level; start fresh with `arb dispatch #{task_id}`", %{task_id: task_id}}
+
+  defp resume_error(:repo_unknown, task_id),
+    do:
+      {:invalid_request,
+       "could not resolve the repo for this task; pass it explicitly: `arb worker resume <task> <repo>`",
+       %{task_id: task_id}}
+
+  defp resume_error({:worker_active, status}, task_id),
+    do:
+      {:invalid_request, Arbiter.Worker.Dispatch.worker_active_message(status, task_id),
+       %{task_id: task_id}}
+
+  # bd-92mx1m: the task released its slot and the cap is full. A 409 — the
+  # request is fine, the fleet's state refuses it — naming the cap and the
+  # holders; `force` (`arb worker resume --force`) overrides.
+  defp resume_error({:slot_cap_full, info}, task_id),
+    do:
+      {:conflict, Arbiter.Worker.ResumeSlot.refusal_message(info),
+       %{task_id: task_id, cap: info.cap, holders: info.holders}}
+
+  defp resume_error(reason, _task_id),
+    do: {:server_error, "resume failed", %{reason: inspect(reason)}}
 
   def index(conn, _params) do
     children = Worker.list_children()
