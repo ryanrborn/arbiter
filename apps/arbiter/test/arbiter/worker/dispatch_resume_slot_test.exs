@@ -114,6 +114,46 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
       assert Worker.whereis(a.id) == first.worker_pid
     end
 
+    # The production drain end to end: the real `Autopilot.defer_resume/4`
+    # queues it, and the Autopilot's own default replay — `Dispatch.resume/2`
+    # with `slot_admitted: true` — starts it once its board shows a free slot,
+    # without being re-refused by B still holding the cap.
+    test "the scheduler replays it for real once a slot frees", %{ws: ws, a: a, b: b} do
+      first = park_a(a)
+      admit_b(ws, b)
+      {:ok, free} = Agent.start_link(fn -> 0 end)
+
+      {:ok, autopilot} =
+        Arbiter.Board.Autopilot.start_link(
+          name: nil,
+          paused: true,
+          interval_ms: :never,
+          debounce_ms: 60_000,
+          topics: [],
+          snapshot: fn _ -> %{promote: nil, ready: [], slots_free: Agent.get(free, & &1)} end
+        )
+
+      assert {:ok, %{deferred: true}} =
+               Dispatch.resume(a.id,
+                 resume_origin: :automatic,
+                 defer_resume: &Arbiter.Board.Autopilot.defer_resume(autopilot, &1, &2, &3),
+                 start_driver: false,
+                 claude_command: ["sleep", "2"]
+               )
+
+      assert :paused = Arbiter.Board.Autopilot.tick(autopilot)
+      assert Worker.whereis(a.id) == first.worker_pid
+
+      Agent.update(free, fn _ -> 1 end)
+      task_id = a.id
+      assert {:resumed, ^task_id} = Arbiter.Board.Autopilot.tick(autopilot, 30_000)
+
+      resumed = Worker.whereis(a.id)
+      assert resumed not in [nil, first.worker_pid]
+      assert Worker.state(resumed).meta[:resume] == true
+      assert overrides(ws) == []
+    end
+
     test "a deferral nobody can take is a refusal, never a bypass", %{ws: ws, a: a, b: b} do
       park_a(a)
       admit_b(ws, b)
