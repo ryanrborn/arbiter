@@ -580,6 +580,95 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert ids(board.waiting) == ["bd-a"]
     end
+
+    # bd-6lvc1r: `:completed` is a real, terminal worker status — the CI fix
+    # pass finished — but it is in neither `@running_statuses` nor
+    # `@waiting_statuses`, and its presence in `worked` used to be enough to
+    # keep `orphaned_cards` from picking the issue up either. The task
+    # vanished from every column even though `classify_columns` still called
+    # it `:waiting`.
+    test "an in_progress issue whose only worker row is :completed still shows, flagged for a human" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{
+              status: :in_progress,
+              updated_at: @yesterday,
+              pr_ref: "!293",
+              review_park_reason: "resume_blocked"
+            })
+          ],
+          workers: [worker("bd-a", :completed)]
+        )
+
+      assert [%{id: "bd-a", reason: reason, mr_ref: "!293", needs_you: true}] = board.waiting
+      assert reason =~ "resume_blocked"
+
+      refute Enum.any?([board.backlog, board.ready, board.running, board.closed_today], fn col ->
+               "bd-a" in ids(col)
+             end)
+    end
+
+    test "an in_progress issue whose only worker row is :completed and has no park reason still shows" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{status: :in_progress, updated_at: @yesterday})
+          ],
+          workers: [worker("bd-a", :completed)]
+        )
+
+      assert [%{id: "bd-a", reason: reason}] = board.waiting
+      assert reason =~ "worker stopped"
+    end
+
+    test "an in_progress issue with both a completed row and a live row is not double-counted" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{status: :in_progress, updated_at: @yesterday})],
+          workers: [
+            worker("bd-a", :completed),
+            worker("bd-a", :awaiting_review, %{mr_ref: "!7"})
+          ]
+        )
+
+      assert ids(board.waiting) == ["bd-a"]
+    end
+  end
+
+  describe "waiting/running column invariant (bd-6lvc1r)" do
+    # Whatever `classify_columns/2` says an issue's column is, `derive/1` must
+    # produce exactly one card for it in that column — never zero (the bug),
+    # never two.
+    test "every issue classify_columns puts in :waiting or :running gets exactly one card" do
+      issues = [
+        issue("bd-running", %{status: :in_progress}),
+        issue("bd-waiting-awaiting", %{status: :in_progress}),
+        issue("bd-waiting-failed", %{status: :in_progress}),
+        issue("bd-waiting-review", %{status: :in_progress}),
+        issue("bd-waiting-completed-only", %{status: :in_progress, updated_at: @yesterday}),
+        issue("bd-waiting-orphaned", %{status: :in_progress, updated_at: @yesterday}),
+        issue("bd-waiting-verification", %{status: :awaiting_verification})
+      ]
+
+      workers = [
+        worker("bd-running", :running),
+        worker("bd-waiting-awaiting", :awaiting),
+        worker("bd-waiting-failed", :failed),
+        worker("bd-waiting-review", :awaiting_review, %{mr_ref: "!1"}),
+        worker("bd-waiting-completed-only", :completed)
+      ]
+
+      board = derive(issues: issues, workers: workers)
+      columns = Snapshot.classify_columns(issues, workers)
+
+      for issue <- issues, Map.get(columns, issue.id) in [:waiting, :running] do
+        count =
+          Enum.count(board.waiting ++ board.running, &(&1.id == issue.id))
+
+        assert count == 1, "expected exactly one card for #{issue.id}, got #{count}"
+      end
+    end
   end
 
   # bd-8jixav: a task's own `:awaiting_review` row and a subordinate
