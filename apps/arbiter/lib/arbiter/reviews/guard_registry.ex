@@ -883,6 +883,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Watchdog, :handle_retry_merge_failure, 2},
         {Watchdog, :retry_still_owed, 1},
         {Watchdog, :detached_wait, 2},
+        {Watchdog, :detached_ci_red, 1},
+        {Watchdog, :notify_ci_red_once, 1},
         {Watchdog, :give_up_retry, 2}
       ],
       anchors: [
@@ -891,11 +893,13 @@ defmodule Arbiter.Reviews.GuardRegistry do
         "wait_exhausted",
         "merge_fail_notify_threshold",
         "orphaned_merge_abandoned",
-        "mark_escalated"
+        "mark_escalated",
+        "note_block"
       ],
       summary:
         "a worker-less retry of an approved merge whose worker exited: waits out transient " <>
-          "blockers, merges through W1–W5, else pages once and latches the stamp escalated"
+          "blockers (red CI included, noticed once), merges through W1–W5, else pages once " <>
+          "and latches the stamp escalated"
     }
   ]
 

@@ -30,7 +30,11 @@ defmodule Arbiter.Mergers.PendingMerge do
     * `since` — when this merge first started waiting;
     * `escalated_at` / `escalation_reason` — set once a retry has given up and
       paged the coordinator. A stamp carrying it is never retried again; the
-      page is the hand-off to a human.
+      page is the hand-off to a human;
+    * `notified_block` — a blocker the retry is *still waiting out* but has
+      already told the coordinator about (red CI, `note_block/2`), so a restart
+      or a re-armed retry does not tell them again. Unlike `escalated_at` it
+      does not stop the retry.
 
   `Arbiter.Workflows.PendingMergeSweeper` re-arms a worker-less retry for any
   stamp nobody owns any more, and that retry runs the Watchdog's own merge
@@ -57,7 +61,8 @@ defmodule Arbiter.Mergers.PendingMerge do
           detail: String.t() | nil,
           since: String.t() | nil,
           escalated_at: String.t() | nil,
-          escalation_reason: String.t() | nil
+          escalation_reason: String.t() | nil,
+          notified_block: String.t() | nil
         }
 
   # Merge-call errors that describe a PR state the forge expects to change on
@@ -134,6 +139,44 @@ defmodule Arbiter.Mergers.PendingMerge do
     :exit, reason -> swallow("mark_escalated", task_id, inspect(reason))
   end
 
+  @doc """
+  Record that a retry told the coordinator it is waiting on `block` (e.g.
+  `:ci_failed`) for this pending merge. `:first` when this is news — the caller
+  sends the notice — and `:already` when the stamp already carries it, so the
+  notice goes out once per pending merge however often the retry is re-armed.
+  Also sets `reason` to the block, for the operator. A fresh `stamp/2` (a live
+  Watchdog on the task again) starts a new episode and clears it.
+
+  `{:error, _}` (no stamp, or a DB failure) means "don't notify now"; the next
+  poll asks again.
+  """
+  @spec note_block(String.t(), atom()) :: :first | :already | {:error, term()}
+  def note_block(task_id, block) when is_binary(task_id) and is_atom(block) do
+    tag = Atom.to_string(block)
+
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{pending_merge: %{} = raw} = task} ->
+        raw = stringify(raw)
+
+        if raw["notified_block"] == tag do
+          :already
+        else
+          with :ok <- write(task, Map.merge(raw, %{"notified_block" => tag, "reason" => tag})),
+               do: :first
+        end
+
+      {:ok, %Issue{}} ->
+        {:error, :no_pending_merge}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    e -> swallow("note_block", task_id, Exception.message(e))
+  catch
+    :exit, reason -> swallow("note_block", task_id, inspect(reason))
+  end
+
   @doc "The pending merge a task carries, normalised, or `nil`."
   @spec get(Issue.t() | map() | nil) :: t() | nil
   def get(%{pending_merge: %{} = raw}) do
@@ -147,7 +190,8 @@ defmodule Arbiter.Mergers.PendingMerge do
       detail: raw["detail"],
       since: raw["since"],
       escalated_at: raw["escalated_at"],
-      escalation_reason: raw["escalation_reason"]
+      escalation_reason: raw["escalation_reason"],
+      notified_block: raw["notified_block"]
     }
   end
 
@@ -216,7 +260,8 @@ defmodule Arbiter.Mergers.PendingMerge do
       "detail" => attrs |> fetch(:detail) |> to_s(),
       "since" => since,
       "escalated_at" => nil,
-      "escalation_reason" => nil
+      "escalation_reason" => nil,
+      "notified_block" => nil
     }
   end
 

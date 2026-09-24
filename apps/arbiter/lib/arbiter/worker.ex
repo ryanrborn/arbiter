@@ -400,6 +400,16 @@ defmodule Arbiter.Worker do
     end
   end
 
+  @doc """
+  The first subordinate worker for `task_id` — a `<task_id>:fixpass` or
+  `<task_id>:conflict` pass, i.e. the exclusive family minus the task's own key
+  — that is still driving an agent, as `%{registry_key:, pid:, status:, ...}`,
+  or `nil`. Same probe (and same "unresponsive counts as active" rule) as the
+  single-active-worker guard in `start/1`.
+  """
+  @spec active_subordinate(String.t()) :: map() | nil
+  def active_subordinate(task_id) when is_binary(task_id), do: active_sibling(task_id, task_id)
+
   # The first worker for `task_id` — under any key in the exclusive family
   # except the one we are asking for — that is still driving an agent.
   #
