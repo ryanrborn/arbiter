@@ -8,19 +8,14 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
   """
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Events.Record
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Test.{ResumeSlotFixture, StubResumeDeferrer}
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
-  alias Arbiter.Test.StubResumeDeferrer
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workers.Reconciler
   alias Arbiter.Workflows.MergeQueue.{AutoResumeDispatcher, ReviseDispatcher}
   alias Arbiter.Workflows.ReviewGateFixRoundDispatcher
-
-  require Ash.Query
-
-  @env_key :repo_paths
 
   setup do
     {:ok, ws} =
@@ -29,43 +24,7 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
         prefix: "rsd#{System.unique_integer([:positive])}"
       })
 
-    tmp = Path.join(System.tmp_dir!(), "resume-slot-#{:erlang.unique_integer([:positive])}")
-    repo = Path.join(tmp, "source")
-    File.mkdir_p!(repo)
-
-    git = fn args -> {_, 0} = System.cmd("git", args) end
-    git.(["init", "-q", "-b", "main", repo])
-    git.(["-C", repo, "config", "user.email", "test@example.com"])
-    git.(["-C", repo, "config", "user.name", "Test User"])
-    git.(["-C", repo, "config", "commit.gpgsign", "false"])
-    File.write!(Path.join(repo, "README.md"), "hello\n")
-    git.(["-C", repo, "add", "README.md"])
-    git.(["-C", repo, "commit", "-q", "-m", "initial"])
-
-    remote = Path.join(tmp, "remote.git")
-    git.(["init", "-q", "--bare", "-b", "main", remote])
-    git.(["-C", repo, "remote", "add", "origin", remote])
-    git.(["-C", repo, "push", "-q", "origin", "main"])
-
-    worktree_root = Path.join(tmp, "worktrees")
-    File.mkdir_p!(worktree_root)
-
-    prior_wt_root = Application.get_env(:arbiter, :worktree_root)
-    prior_repo_paths = Application.get_env(:arbiter, @env_key)
-    prior_cap = Application.get_env(:arbiter, :conductor_system_max_concurrent)
-
-    Application.put_env(:arbiter, :worktree_root, worktree_root)
-    Application.put_env(:arbiter, @env_key, %{"rs/repo" => repo})
-    # The 2026-09-23 incident's cap.
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 1)
-
-    on_exit(fn ->
-      restore(:worktree_root, prior_wt_root)
-      restore(@env_key, prior_repo_paths)
-      restore(:conductor_system_max_concurrent, prior_cap)
-      File.rm_rf!(tmp)
-    end)
-
+    ResumeSlotFixture.setup_repo!()
     StubResumeDeferrer.reset()
 
     {:ok, a} = Ash.create(Issue, %{title: "task A (parked)", workspace_id: ws.id})
@@ -74,37 +33,14 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
     %{ws: ws, a: a, b: b}
   end
 
-  defp restore(key, nil), do: Application.delete_env(:arbiter, key)
-  defp restore(key, value), do: Application.put_env(:arbiter, key, value)
-
   # Task A ran, then parked for a human: its worker lingers :failed, which
   # releases its slot (bd-45pwo1).
-  defp park_a(a, fail_opts \\ []) do
-    {:ok, first} = Dispatch.dispatch(a.id, repo: "rs/repo", start_driver: false)
-    :ok = Worker.fail(first.worker_pid, :review_gate_rejected, fail_opts)
-    on_exit(fn -> stop_quietly(a.id) end)
-    first
-  end
+  defp park_a(a, fail_opts \\ []), do: ResumeSlotFixture.park!(a, fail_opts)
 
   # Task B was admitted into the slot A freed.
-  defp admit_b(ws, b) do
-    {:ok, pid} = Worker.start(task_id: b.id, repo: "rs/repo", workspace_id: ws.id)
-    :ok = Worker.advance(pid, :implement)
-    on_exit(fn -> stop_quietly(b.id) end)
-    pid
-  end
+  defp admit_b(ws, b), do: ResumeSlotFixture.admit!(ws, b)
 
-  defp stop_quietly(task_id) do
-    if Worker.whereis(task_id), do: Worker.stop(task_id, :normal)
-  catch
-    :exit, _ -> :ok
-  end
-
-  defp overrides(ws) do
-    Record
-    |> Ash.Query.filter(workspace_id == ^ws.id and topic == "slot_cap_override")
-    |> Ash.read!()
-  end
+  defp overrides(ws), do: ResumeSlotFixture.overrides(ws)
 
   describe "the 2026-09-23 incident (cap 1, A parked, B admitted)" do
     test "a human resume of A is refused, naming the cap and B; the parked worker is untouched",
