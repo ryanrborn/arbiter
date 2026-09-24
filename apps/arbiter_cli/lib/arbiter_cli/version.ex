@@ -67,7 +67,12 @@ defmodule ArbiterCli.Version do
   @built_at DateTime.utc_now() |> DateTime.to_iso8601()
 
   @doc "App version from mix.exs at build time."
-  def app_version, do: Application.get_env(:arbiter_cli, :app_version, @app_version)
+  def app_version do
+    case Process.get(:bd2_app_version) do
+      nil -> Application.get_env(:arbiter_cli, :app_version, @app_version)
+      vsn -> vsn
+    end
+  end
 
   @doc "Short git SHA at build time, suffixed with `*` when the tree was dirty."
   def git_sha, do: if(@git_dirty, do: "#{@git_sha}*", else: @git_sha)
@@ -87,5 +92,10 @@ defmodule ArbiterCli.Version do
   mismatches should suggest restarting the server or reinstalling from a
   release asset.
   """
-  def dev_build?, do: Application.get_env(:arbiter_cli, :dev_build, @git_available)
+  def dev_build? do
+    case Process.get(:bd2_dev_build) do
+      nil -> Application.get_env(:arbiter_cli, :dev_build, @git_available)
+      flag -> flag
+    end
+  end
 end
