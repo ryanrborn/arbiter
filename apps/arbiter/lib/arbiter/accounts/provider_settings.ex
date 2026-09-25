@@ -241,10 +241,14 @@ defmodule Arbiter.Accounts.ProviderSettings do
     }
   end
 
-  # §4.2's `min(a.max_concurrent, share)`, with an absent term imposing nothing.
-  defp cap(nil, share), do: share
-  defp cap(ceiling, nil), do: ceiling
-  defp cap(ceiling, share), do: min(ceiling, share)
+  @doc """
+  §4.2's `min(a.max_concurrent, share)` — the most workers this workspace may
+  run on an account — with an absent term imposing nothing; `nil` = no cap.
+  """
+  @spec cap(non_neg_integer() | nil, non_neg_integer() | nil) :: non_neg_integer() | nil
+  def cap(nil, share), do: share
+  def cap(ceiling, nil), do: ceiling
+  def cap(ceiling, share), do: min(ceiling, share)
 
   # The role's configured adapter types, registered ones only, in order.
   defp configured_types(ws, role) do

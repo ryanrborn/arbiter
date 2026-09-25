@@ -3,8 +3,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   Workspace detail + editor at `/workspaces/:id`.
 
   Surfaces every config section a non-CLI operator needs to onboard and run a
-  workspace: repos, policy, agent models, routing, standing orders, tracker,
-  secrets and security. Those eight are the **rail** down the left of the
+  workspace: repos, policy, providers, agent models, routing, standing orders,
+  tracker, secrets and security. Those nine are the **rail** down the left of the
   panel; the body shows exactly one of them at a time.
 
   Every pane stays mounted, hidden with CSS rather than unmounted. A section
@@ -19,8 +19,12 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   `ArbiterWeb.WorkspaceDetail.Shared` for the small contract they share:
 
     * `ArbiterWeb.WorkspaceDetail.PolicyConfigComponent` — the high-level
-      enums (agent / review-agent provider pools, tracker type, merger
-      strategy, routing policy, review gate, quota, conductor, patrols).
+      enums (tracker type, merger strategy, routing policy, review gate,
+      quota, conductor, patrols).
+    * `ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent` — the provider
+      accounts each role (implementer, reviewer) may use, their preference
+      order and this workspace's concurrency share of each, plus the
+      `agent.type` / `review_agent.type` fallback while none is attached.
     * `ArbiterWeb.WorkspaceDetail.TrackerConfigComponent` — `tracker.config.*`,
       the adapter-specific fields scoped to the selected tracker type. Rendered
       *by* the policy component, whose select drives which fields show.
@@ -76,6 +80,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   @sections [
     {"repos", "Repos"},
     {"policy", "Policy"},
+    {"providers", "Providers"},
     {"agent_models", "Agent models"},
     {"routing", "Routing"},
     {"standing_orders", "Standing orders"},
@@ -383,13 +388,20 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               id="policy-config"
               section={@section}
               workspace={@workspace}
-              agent_types={@agent_types}
               tracker_types={@tracker_types}
               merger_strategies={@merger_strategies}
               routing_policies={@routing_policies}
               review_automation_modes={@review_automation_modes}
               quota_modes={@quota_modes}
               quota_weekly_warning_policies={@quota_weekly_warning_policies}
+            />
+
+            <.live_component
+              module={WorkspaceDetail.ProviderSettingsComponent}
+              id="provider-settings-section"
+              section={@section}
+              workspace={@workspace}
+              agent_types={@agent_types}
             />
 
             <.live_component

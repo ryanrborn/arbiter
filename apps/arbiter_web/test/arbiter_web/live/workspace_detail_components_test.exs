@@ -18,6 +18,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
   # Every section component the page is built from.
   @components [
     ArbiterWeb.WorkspaceDetail.PolicyConfigComponent,
+    ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent,
     ArbiterWeb.WorkspaceDetail.TrackerConfigComponent,
     ArbiterWeb.WorkspaceDetail.RepoPathsComponent,
     ArbiterWeb.WorkspaceDetail.RepoOverridesComponent,
@@ -33,6 +34,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
   # The events that must be owned by a component rather than the parent.
   @component_events ~w[
     save_config preview_tracker_type add_agent_type remove_agent_type move_agent_type
+    add_role_account remove_role_account move_role_account adopt_role set_share
     save_tracker_config
     add_repo_path rm_repo_path
     add_repo_override rm_repo_override
@@ -85,6 +87,12 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
       )
 
     {:ok, ws} = Ash.update(ws, %{secrets: %{"tracker_token" => "hunter2"}}, action: :update)
+
+    # A reviewer account renders the role list and share bindings; the
+    # implementer, with none attached, keeps its agent.type fallback editor,
+    # an add button for the account, and (codex being linked) an adopt button.
+    codex = Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :codex, slug: "wdc-codex"})
+    {:ok, ws} = Arbiter.Accounts.ProviderSettings.add(ws, :reviewer, codex.id)
 
     {:ok, ws} =
       Ash.update(ws, %{worker_env: %{"API_TOKEN" => %{"value" => "t", "secret" => true}}},
