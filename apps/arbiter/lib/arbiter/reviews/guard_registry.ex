@@ -479,16 +479,22 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :failed_run,
       sites: [
         {ReviewGate, :do_route_after_reject, 2},
-        {ReviewGate, :terminal_reject_verdict, 1}
+        {ReviewGate, :terminal_reject_verdict, 1},
+        {ReviewGate, :escalate_fabricated_evidence, 2}
       ],
-      anchors: ["@default_rounds", "@rounds_by_difficulty"],
+      anchors: ["@default_rounds", "@rounds_by_difficulty", "EvidenceIntegrity.flagged?"],
       summary: "review<->revise round budget, capped per difficulty",
       policy_note:
         "P9 split this arm. A verdict guard that refused an APPROVE and reached " <>
           "the cap now parks (`terminal_reject_verdict/1` -> class C); what still " <>
           "reaches `:failed_run` is a reviewer that really said REQUEST_CHANGES for " <>
           "every round, which §5.3 would also park (class D) and P9's AC1 " <>
-          "deliberately left alone. The remaining half is recorded below."
+          "deliberately left alone. The remaining half is recorded below. " <>
+          "bd-80talz adds a third arm ahead of the cap: a REQUEST_CHANGES whose " <>
+          "findings flag fabricated evidence (`Arbiter.Worker.EvidenceIntegrity`) " <>
+          "ends the loop at any round via `escalate_fabricated_evidence/2`. It is " <>
+          "a genuine rejection, so it records `:failed_run` like the cap, and C3 " <>
+          "escalates it once instead of dispatching a fix round."
     },
     %{
       id: :commit_gate_head_unchanged,
@@ -1103,7 +1109,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Worker, :maybe_dispatch_fix_round, 3},
         {Worker, :give_up_fix_round, 4}
       ],
-      anchors: ["resolve_max_fix_rounds", ":not_converging"],
+      anchors: ["resolve_max_fix_rounds", ":not_converging", ":fabricated_evidence"],
       summary: "bounded fix rounds plus an identical-findings digest — §5's template"
     },
     %{

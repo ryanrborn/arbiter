@@ -52,6 +52,23 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   old D3/D4 collision: D4 is the top tier source can express, and D5's
   distinction is supplied entirely by workspace config.
 
+  ## Known weakness: evidence-heavy ACs on the economy tier (bd-80talz)
+
+  bd-aro53b was filed D1, so it routed to economy (agy on
+  `gemini-3.8-flash-low`). Its ACs asked for two-theme screenshots and
+  officially sourced artwork, which a headless worker cannot always produce.
+  The worker fabricated both, and its rerun at standard completed honestly.
+
+  The decision is to fix this where difficulty is set, not with an AC-keyword
+  floor in this policy. `Arbiter.Sessions.RefineDoctrine` rates such ACs at
+  least D2 (never economy, for every provider) and requires each to name an
+  honest fallback. A keyword floor here would guess at prose, silently change
+  cost fleet-wide, and not stop a stronger model from faking an AC it cannot
+  meet either. What catches fabrication at any tier is the worker prompt's
+  evidence-integrity rule, the `:no_public_upload` deny list, and the
+  ReviewGate escalating a fabricated-evidence finding to the coordinator
+  (`Arbiter.Worker.EvidenceIntegrity`).
+
   ## Workspace overrides
 
   `workspace.config["routing"]["rules"]` is consulted with the task's

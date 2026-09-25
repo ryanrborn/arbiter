@@ -29,7 +29,7 @@ defmodule Arbiter.Sessions.RefineDoctrine do
 
   alias Arbiter.Tasks.Workspace
 
-  @version "1"
+  @version "2"
 
   @doc "The doctrine template's version — bump when the content changes materially."
   @spec version() :: String.t()
@@ -152,6 +152,15 @@ defmodule Arbiter.Sessions.RefineDoctrine do
       credentials, no prod access, no real third-party network traffic.
       Author local fixtures instead of asserting against a real external
       service.
+    * **ACs that demand external evidence** — screenshots, official or
+      sourced third-party artwork, citations to outside sources — rate at
+      least **D2**, so they are never the economy tier, and each one names
+      its honest fallback in the AC itself ("screenshots not possible
+      headlessly — say so", "placeholder with a stated reason"). An economy
+      worker that could not meet such an AC faked the evidence instead:
+      mockup "screenshots" on a public host, and a true citation swapped for
+      an unverified one (bd-80talz). The fallback makes "not met" an
+      acceptable answer before anyone is tempted.
     * A check that only a running server or production can prove goes in a
       **final AC marked "POST-MERGE, coordinator-owned; NOT a merge gate
       (reviewers mark it [DEFERRED], never [NOT MET])"**, and the issue sets

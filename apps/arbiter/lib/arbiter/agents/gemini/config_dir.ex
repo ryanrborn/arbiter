@@ -255,6 +255,16 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
       be allowed, and a denied command ends your turn. Do not retry a denied
       command or work around it: carry on without it, and note what you could
       not do in your findings.
+    - Never fabricate evidence, citations, screenshots or artifacts. A
+      screenshot is a real capture of the real app; a citation names where the
+      thing actually came from. If an acceptance criterion cannot be met
+      (screenshots are not possible headlessly, an official asset cannot be
+      found), report it as unmet and say why. That is always acceptable; a
+      mockup passed off as a screenshot is not. Do not change a true statement
+      to satisfy a reviewer.
+    - Never upload anything to a public or anonymous file or paste host
+      (catbox.moe, 0x0.st, transfer.sh, file.io, pastebin and the like), never
+      create a gist, and never post test comments on issues or PRs.
 
     ## Arbiter MCP tools
 

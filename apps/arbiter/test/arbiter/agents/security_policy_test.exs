@@ -381,4 +381,34 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert SecurityPolicy.interactive_session().permissions.mode == :auto
     end
   end
+
+  # bd-80talz: an agy worker uploaded mockup "screenshots" to files.catbox.moe
+  # and a public gist on the operator's account, and tried 0x0.st, transfer.sh
+  # and envs.sh. Nothing in the default posture stopped it.
+  describe "the public upload/paste host baseline (bd-80talz)" do
+    test "is a default safe-default category for workers and sessions alike" do
+      assert :no_public_upload in SecurityPolicy.safe_default_categories()
+      assert :no_public_upload in SecurityPolicy.base().permissions.safe_defaults
+      assert :no_public_upload in SecurityPolicy.resolve(nil).permissions.safe_defaults
+      assert :no_public_upload in SecurityPolicy.interactive_session().permissions.safe_defaults
+    end
+
+    test "documents at least the hosts the incident used or tried" do
+      hosts = SecurityPolicy.public_upload_hosts()
+
+      for host <- ~w(catbox.moe 0x0.st transfer.sh file.io envs.sh pastebin.com) do
+        assert host in hosts, "#{host} missing from public_upload_hosts/0"
+      end
+    end
+
+    test "lists bare registrable domains, so a subdomain rule can be derived from each" do
+      for host <- SecurityPolicy.public_upload_hosts() do
+        refute String.contains?(host, ["/", "*", " ", ":"]), "#{inspect(host)} is not a bare host"
+      end
+
+      # litterbox is catbox's temporary host, litter.catbox.moe — covered by
+      # catbox.moe's subdomain rule rather than listed on its own.
+      refute "litter.catbox.moe" in SecurityPolicy.public_upload_hosts()
+    end
+  end
 end

@@ -119,4 +119,47 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       refute "ScheduleWakeup" in rules
     end
   end
+
+  describe "no_public_upload (bd-80talz)" do
+    test "the resolved default policy denies every documented host, subdomains included" do
+      rules = Security.deny_rules(SecurityPolicy.resolve(nil))
+
+      for host <- SecurityPolicy.public_upload_hosts() do
+        assert "WebFetch(domain:#{host})" in rules
+        assert "WebFetch(domain:*.#{host})" in rules
+        assert "Bash(curl *#{host}*)" in rules
+        assert "Bash(wget *#{host}*)" in rules
+      end
+    end
+
+    test "names the incident's hosts, litterbox included via the catbox subdomain rule" do
+      rules = Security.deny_rules(policy())
+
+      assert "Bash(curl *catbox.moe*)" in rules
+      assert "WebFetch(domain:*.catbox.moe)" in rules
+      assert "Bash(curl *0x0.st*)" in rules
+      assert "Bash(curl *transfer.sh*)" in rules
+      assert "Bash(curl *file.io*)" in rules
+      assert "Bash(nc *termbin.com*)" in rules
+    end
+
+    test "denies gists and issue comments, but not PR comments (the review-thread protocol uses them)" do
+      rules = Security.deny_rules(policy())
+
+      assert "Bash(gh gist create:*)" in rules
+      assert "Bash(gh gist edit:*)" in rules
+      assert "Bash(gh issue comment:*)" in rules
+      refute Enum.any?(rules, &(&1 =~ "gh pr comment"))
+    end
+
+    test "is carried by the --settings document even under bypass" do
+      assert ["--settings", json] = Security.settings_argv(policy())
+      assert "Bash(curl *catbox.moe*)" in Jason.decode!(json)["permissions"]["deny"]
+    end
+
+    test "opting out of safe_defaults drops it" do
+      rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
+      refute Enum.any?(rules, &(&1 =~ "catbox"))
+    end
+  end
 end

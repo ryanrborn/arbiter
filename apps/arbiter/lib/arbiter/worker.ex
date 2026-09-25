@@ -116,6 +116,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
@@ -5812,6 +5813,14 @@ defmodule Arbiter.Worker do
         # (`escalate_review_gate/3`) already went out, so stay silent rather than
         # paging twice about the same verdict.
         :ok
+
+      # bd-80talz: the reviewer says the work fabricated or falsified its
+      # evidence. A fix round would put that back to the same provider; a
+      # human has to judge it (the reviewer can be wrong about provenance
+      # too). Read off the gate's marker, or the raw text of a review that
+      # came some other way.
+      EvidenceIntegrity.escalation?(findings) ->
+        give_up_fix_round(dispatcher, state, attempts, :fabricated_evidence)
 
       attempts >= cap ->
         give_up_fix_round(dispatcher, state, attempts, :budget_exhausted)

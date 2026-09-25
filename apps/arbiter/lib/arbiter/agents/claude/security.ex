@@ -208,6 +208,23 @@ defmodule Arbiter.Agents.Claude.Security do
     ["Monitor", "ScheduleWakeup"]
   end
 
+  # bd-80talz: public, anonymous file and paste hosts. `WebFetch(domain:...)`
+  # takes a `*.` subdomain wildcard. The Bash rules use the CLI's `*` wildcard,
+  # which matches anywhere in the command, scoped to the network tools that
+  # would carry an upload. They are deliberately not a bare `Bash(*<host>*)`,
+  # which would also deny a `git commit -m` or `grep` that only names the host.
+  # As with every Bash rule here this is a safety net, not a proof: a
+  # `python -c` upload is not matched.
+  @upload_tools ~w(curl wget http nc)
+
+  defp expand_category(:no_public_upload) do
+    hosts = SecurityPolicy.public_upload_hosts()
+
+    Enum.flat_map(hosts, &["WebFetch(domain:#{&1})", "WebFetch(domain:*.#{&1})"]) ++
+      for(tool <- @upload_tools, host <- hosts, do: "Bash(#{tool} *#{host}*)") ++
+      ["Bash(gh gist create:*)", "Bash(gh gist edit:*)", "Bash(gh issue comment:*)"]
+  end
+
   defp expand_category(_unknown), do: []
 
   # When the policy cuts network, deny the agent's network-egress tools.

@@ -113,6 +113,18 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       assert memory =~ "Do not retry"
     end
 
+    # bd-80talz: the incident was an agy worker, so its standing memory says it
+    # in full rather than leaving it to the prompt alone.
+    test "GEMINI.md forbids fabricated evidence and public uploads" do
+      memory = ConfigDir.worker_memory()
+
+      assert memory =~ "Never fabricate evidence"
+      assert memory =~ "report it as unmet"
+      assert memory =~ "public or anonymous file or paste host"
+      assert memory =~ "catbox.moe"
+      assert memory =~ "gist"
+    end
+
     test "the operator's ~/.gemini skills and plugins are not reachable (AC2)", %{worktree: wt} do
       assert {:ok, home} = ConfigDir.ensure(worktree: wt)
 

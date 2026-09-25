@@ -92,10 +92,15 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       but could not start. Typically `:no_outpost` (the worktree was cleaned
       up, so there is nothing to re-attach to and a fresh dispatch is needed
       rather than a resume).
+    * `:fabricated_evidence` — the reviewer says the work fabricated or
+      falsified its evidence (`Arbiter.Worker.EvidenceIntegrity`, bd-80talz).
+      A fix round would hand that back to the same provider, and the reviewer
+      can be wrong about provenance too, so a human judges it.
   """
   @type give_up_reason ::
           :budget_exhausted
           | :not_converging
+          | :fabricated_evidence
           | {:dispatch_failed, term()}
 
   @doc """
@@ -287,6 +292,9 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   defp subject(task_id, _attempts, :not_converging),
     do: "#{task_id}: ReviewGate fix round is not converging (identical findings)"
 
+  defp subject(task_id, _attempts, :fabricated_evidence),
+    do: "#{task_id}: ReviewGate reviewer flagged fabricated evidence — no automatic fix round"
+
   defp subject(task_id, attempts, {:dispatch_failed, _}),
     do: "#{task_id}: ReviewGate fix round FAILED to dispatch after #{attempts} round(s)"
 
@@ -318,6 +326,27 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     Look at whether the implementer is failing to understand the finding, or the
     finding is unactionable as written: `review_gate_rounds_list #{task_id}` shows
     both sides of the exchange.
+    """
+  end
+
+  defp body(task_id, attempts, :fabricated_evidence) do
+    """
+    Task #{task_id} was rejected by the ReviewGate, and the reviewer says the
+    work fabricated or falsified evidence: a mockup presented as a screenshot,
+    a citation to a source the thing did not come from, output that was never
+    produced. #{attempts} automatic fix round(s) had run.
+
+    No fix round was dispatched. It would put the same question back to the
+    provider that produced the evidence; on bd-aro53b that round swapped a true
+    citation for an unverified one to satisfy the reviewer (bd-80talz).
+
+    Check the evidence both ways before acting. The reviewer can be wrong about
+    provenance as well: bd-aro53b's reviewer misread a true Wikimedia citation.
+    The flagged lines and the full thread are in the ReviewGate rejection page
+    and in `review_gate_rounds_list #{task_id}`. Then either re-dispatch on a
+    different provider with the finding in hand, correct the acceptance
+    criteria if they asked for evidence a headless worker cannot produce, or
+    reject the work.
     """
   end
 

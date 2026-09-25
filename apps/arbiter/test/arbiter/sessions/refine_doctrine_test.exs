@@ -32,6 +32,18 @@ defmodule Arbiter.Sessions.RefineDoctrineTest do
       assert doc =~ "[DEFERRED]"
     end
 
+    # bd-80talz: bd-aro53b was filed D1, routed to economy agy, and asked for
+    # two-theme screenshots and official sourced artwork. The worker faked
+    # both. The routing decision lives here, where difficulty is set.
+    test "floors evidence-heavy ACs at D2 and requires an honest fallback" do
+      doc = RefineDoctrine.template()
+      assert doc =~ ~r/external evidence.*screenshots/s
+      assert doc =~ ~r/at\s+least\s+\*\*D2\*\*/
+      assert doc =~ ~r/never the economy tier/
+      assert doc =~ ~r/honest fallback/
+      assert doc =~ "bd-80talz"
+    end
+
     test "states edges must be written before promoting" do
       assert RefineDoctrine.template() =~
                ~r/write all edges before promoting/i

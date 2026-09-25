@@ -141,16 +141,22 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       assert "command(arb)" in settings["permissions"]["deny"]
     end
 
-    test "a policy with network: false denies url(*) as well as the curl/wget commands" do
+    # bd-80talz: agy's URL rule kinds are `read_url(<domain>)` and
+    # `execute_url(<domain>)`. Probed on agy 1.2.11: agy rewrites settings.json
+    # on load and silently DROPS a `url(*)` rule, so the old network-off deny
+    # never reached the tool. `read_url(*)` survives the rewrite and blocks.
+    test "a policy with network: false denies read_url(*) as well as the curl/wget commands" do
       p = policy(%{"sandbox" => %{"network" => false}})
       deny = Security.settings(p)["permissions"]["deny"]
 
-      assert "url(*)" in deny
+      assert "read_url(*)" in deny
+      assert "execute_url(*)" in deny
       assert "command(curl)" in deny
+      refute "url(*)" in deny
     end
 
-    test "network: true leaves url(*) alone" do
-      refute "url(*)" in Security.settings(policy())["permissions"]["deny"]
+    test "network: true leaves read_url(*) alone" do
+      refute "read_url(*)" in Security.settings(policy())["permissions"]["deny"]
     end
 
     test "a known worktree is trusted so agy never gates on folder trust" do
@@ -197,7 +203,8 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
         )
 
       assert "read_file(**)" in deny
-      assert "url(*)" in deny
+      assert "read_url(*)" in deny
+      refute "url(*)" in deny
     end
 
     test "a bare tool name in `allow` translates too (load-bearing under :strict)" do
@@ -323,6 +330,52 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
 
       assert step["state"] == "ERROR"
       assert step["tool_info"]["error"]["message"] =~ "permission check failed"
+    end
+  end
+
+  describe "no_public_upload (bd-80talz)" do
+    test "the resolved default policy denies read_url/execute_url for every documented host" do
+      deny = Security.deny_rules(SecurityPolicy.resolve(nil))
+
+      # Probed on agy 1.2.11: `read_url(catbox.moe)` blocked files.catbox.moe,
+      # so a bare domain covers its subdomains (litter.catbox.moe too).
+      for host <- SecurityPolicy.public_upload_hosts() do
+        assert "read_url(#{host})" in deny
+        assert "execute_url(#{host})" in deny
+      end
+    end
+
+    test "denies gists, issue comments and upload-shaped curl by prefix" do
+      deny = Security.deny_rules(policy())
+
+      assert "command(gh gist create)" in deny
+      assert "command(gh gist edit)" in deny
+      assert "command(gh issue comment)" in deny
+      assert "command(curl -F)" in deny
+      assert "command(curl --upload-file)" in deny
+      refute Enum.any?(deny, &(&1 =~ "gh pr comment"))
+    end
+
+    test "never emits a glob inside command(...) — agy matches it literally, not as a pattern" do
+      deny = Security.deny_rules(policy())
+      refute Enum.any?(deny, &(String.starts_with?(&1, "command(") and &1 =~ "*"))
+    end
+
+    test "a Claude WebFetch domain rule translates to the same agy domain rule" do
+      deny =
+        Security.deny_rules(
+          policy(%{"permissions" => %{"deny" => ["WebFetch(domain:example.com)"]}})
+        )
+
+      assert "read_url(example.com)" in deny
+      refute "read_url(*)" in deny
+    end
+
+    test "an operator's legacy url(...) rule is rewritten to read_url(...)" do
+      deny = Security.deny_rules(policy(%{"permissions" => %{"deny" => ["url(example.org)"]}}))
+
+      assert "read_url(example.org)" in deny
+      refute "url(example.org)" in deny
     end
   end
 end
