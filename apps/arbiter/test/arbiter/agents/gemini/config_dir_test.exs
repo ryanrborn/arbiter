@@ -102,6 +102,17 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       assert File.read!(Path.join(source, ".gemini/GEMINI.md")) =~ "Darth Persona"
     end
 
+    # bd-7wymls: under :strict a soft-denied command ends agy's turn, and a
+    # chained line is denied if any part is — so the standing memory steers
+    # the model away from both before the first denial happens.
+    test "GEMINI.md tells the worker how to live with a denied command" do
+      memory = ConfigDir.worker_memory()
+
+      assert memory =~ "one command per `run_command` call"
+      assert memory =~ "denied"
+      assert memory =~ "Do not retry"
+    end
+
     test "the operator's ~/.gemini skills and plugins are not reachable (AC2)", %{worktree: wt} do
       assert {:ok, home} = ConfigDir.ensure(worktree: wt)
 

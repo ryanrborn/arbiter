@@ -115,6 +115,7 @@ defmodule Arbiter.Worker do
   require Logger
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
+  alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
   alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
@@ -2880,6 +2881,9 @@ defmodule Arbiter.Worker do
           # `arb`) reports that concretely instead of the generic
           # `:blank_notes_at_completion`.
           |> maybe_put(:denied_command, Map.get(session, :denied_command))
+          # bd-7wymls: the full denied line, so the notes-gate escalation can
+          # show what was actually run and whether it was a bootstrap command.
+          |> maybe_put(:denied_command_line, Map.get(session, :denied_command_line))
           # bd-1eb6fc: task ids from an agy `manage_task status` check whose
           # last-known result was RUNNING — read by `on_claude_done/1` to note
           # (not block) an `arb done` that fired while one was outstanding.
@@ -4230,12 +4234,29 @@ defmodule Arbiter.Worker do
   # session. Only a clean exit routes a task-type worker through the notes gate;
   # every other category stays on the resume/fail_stopped path so its specific
   # escalation (credential watchdog, host-health) still fires.
-  defp clean_exit_without_done?(session) do
+  defp clean_exit_without_done?(session),
+    do: classify_stop(session).category == :exited_without_done
+
+  # `StopReason.classify/3` on the session that just exited, plus the one
+  # refinement it cannot make from the output tail alone. bd-7wymls: a clean
+  # exit whose agy turn was ended by a headless permission soft-deny
+  # (`ClaudeSession.denial_ended_turn?/1`, set from agy's structured
+  # `result.denied_actions` / its own stderr notice) is `:permission_denied` —
+  # resumable with a "that was denied, carry on without it" prompt, not an
+  # ordinary early quit. A non-zero exit keeps its own classification.
+  defp classify_stop(session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
 
-    Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider)).category ==
-      :exited_without_done
+    reason =
+      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
+
+    if reason.category in [:exited_without_done, :async_wait_abandoned] and
+         Arbiter.Worker.ClaudeSession.denial_ended_turn?(session) do
+      Arbiter.Worker.StopReason.permission_denied(Map.get(session, :denied_command_line))
+    else
+      reason
+    end
   end
 
   # bd-2da6ay: finalize a task-type worker that exited without `arb done` by
@@ -4311,7 +4332,10 @@ defmodule Arbiter.Worker do
     :exited_without_done,
     :gateway_error,
     :quota_exhausted,
-    :async_wait_abandoned
+    :async_wait_abandoned,
+    # bd-7wymls: headless agy ended the turn on a `:strict` soft-deny; the
+    # conversation is intact and the model only needs telling to carry on.
+    :permission_denied
   ]
 
   defp maybe_resume_continuation(%State{} = state, session) do
@@ -4326,11 +4350,7 @@ defmodule Arbiter.Worker do
   end
 
   defp do_maybe_resume_continuation(%State{meta: meta} = state, session) do
-    exit_status = Map.get(session, :exit_status)
-    output_lines = Enum.reverse(Map.get(session, :output_lines, []))
-
-    reason =
-      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
+    reason = classify_stop(session)
 
     session_id =
       session |> Arbiter.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
@@ -4377,9 +4397,22 @@ defmodule Arbiter.Worker do
           )
         end
 
-        fail_stopped(state, session)
+        fail_unresumable(state, session, reason)
     end
   end
+
+  # bd-7wymls: a task-type worker that can no longer be resumed after a
+  # denial still finalizes through the notes gate, exactly as its clean exit
+  # would have before (bd-2da6ay) — notes recorded in an earlier resumed turn
+  # still complete the directive, and blank notes still fail with the
+  # concrete "strict policy denied command" reason.
+  defp fail_unresumable(%State{} = state, session, %{category: :permission_denied}) do
+    if task_type?(state.meta) and not review_only?(state.meta),
+      do: finalize_task_type_stop(state),
+      else: fail_stopped(state, session)
+  end
+
+  defp fail_unresumable(state, session, _reason), do: fail_stopped(state, session)
 
   # Pure resume/fail decision — isolated so the guard logic (hard cap +
   # no-progress) is unit-testable without spawning a session. Returns `:resume`
@@ -4408,6 +4441,11 @@ defmodule Arbiter.Worker do
   # cap above still bounds the retries.
   defp no_progress?(:async_wait_abandoned, _attempts, _prev_fp, _cur_fp), do: false
 
+  # bd-7wymls: same reasoning — a turn ended by a denial says nothing about
+  # whether the agent is stuck, and a notes-only (task-type) run legitimately
+  # never touches the worktree. The hard cap still bounds it.
+  defp no_progress?(:permission_denied, _attempts, _prev_fp, _cur_fp), do: false
+
   defp no_progress?(_category, attempts, prev_fp, cur_fp),
     do: attempts > 0 and not is_nil(prev_fp) and cur_fp == prev_fp
 
@@ -4420,7 +4458,11 @@ defmodule Arbiter.Worker do
   # latest session id, so we never stack multiple `--resume` flags.
   defp respawn_with_resume(%State{meta: meta} = state, session_id, fingerprint, session) do
     spawn_args = meta && Map.get(meta, :claude_spawn)
-    prompt = resume_continue_prompt(session_stop_category(session), state.task_id)
+
+    prompt =
+      resume_continue_prompt(session_stop_category(session), state.task_id,
+        denied_command: Map.get(session, :denied_command_line)
+      )
 
     {provider, model} = respawn_routing(state)
 
@@ -4653,13 +4695,8 @@ defmodule Arbiter.Worker do
 
   # Re-classify the session that just exited so the resume nudge can address
   # the actual cause. Mirrors `clean_exit_without_done?/1`.
-  defp session_stop_category(session) when is_map(session) do
-    Arbiter.Worker.StopReason.classify(
-      Map.get(session, :exit_status),
-      Enum.reverse(Map.get(session, :output_lines, [])),
-      Map.get(session, :provider)
-    ).category
-  end
+  defp session_stop_category(session) when is_map(session),
+    do: classify_stop(session).category
 
   defp session_stop_category(_), do: :exited_without_done
 
@@ -4671,8 +4708,44 @@ defmodule Arbiter.Worker do
   corrective wording is the actual fix for bd-606zlr, so it deserves a test
   that does not have to spawn a session.
   """
-  @spec resume_continue_prompt(atom(), String.t()) :: String.t()
-  def resume_continue_prompt(:async_wait_abandoned, task_id) do
+  @spec resume_continue_prompt(atom(), String.t(), keyword()) :: String.t()
+  def resume_continue_prompt(category, task_id, opts \\ [])
+
+  # bd-7wymls: agy ends a headless turn on a `:strict` soft-deny, before the
+  # model can act on agy's own "Proceed without performing this action" — so
+  # the resume has to say it. Run fc54ef4a's retry (a fresh session with the
+  # notes nudge) chained `pwd && git status`, got soft-denied again, and died.
+  # Hence the explicit "don't retry / one command per call / record notes"
+  # guidance.
+  def resume_continue_prompt(:permission_denied, task_id, opts) do
+    denied =
+      case Keyword.get(opts, :denied_command) do
+        cmd when is_binary(cmd) and cmd != "" -> "Your command `#{cmd}` was"
+        _ -> "An action you attempted was"
+      end
+
+    """
+    Your previous turn for task #{task_id} was cut short. #{denied} denied by
+    this workspace's strict permission policy, and a non-interactive session
+    cannot ask for approval, so the turn ended. Your work so far is preserved.
+
+    That denial is the policy working as intended. Do NOT retry the command,
+    rephrase it, or reach the same result another way (another tool, a script,
+    `sh -c`, python, curl). Carry on without it:
+
+      1. Run one command per `run_command` call. Every part of a chained
+         command (`a && b`, `a; b`, `a | b`) must be allowed on its own, so one
+         disallowed part denies the whole line and ends your turn again.
+      2. If the task cannot be finished without the denied action, say so in
+         your findings: what you could not do, and why.
+      3. Record your findings or results in the task's `notes` with the
+         `task_update_progress` MCP tool (`arb` is also allowed).
+
+    Then finish the remaining work and print `arb done` on its own line.
+    """
+  end
+
+  def resume_continue_prompt(:async_wait_abandoned, task_id, _opts) do
     """
     Your previous session for task #{task_id} ended before you finished — you
     did not print `arb done`. Your work so far is preserved in this worktree.
@@ -4709,7 +4782,7 @@ defmodule Arbiter.Worker do
     """
   end
 
-  def resume_continue_prompt(_category, task_id) do
+  def resume_continue_prompt(_category, task_id, _opts) do
     """
     Your previous session for task #{task_id} ended before you finished — you
     did not print `arb done`. Your work so far is preserved in this worktree.
@@ -4937,13 +5010,27 @@ defmodule Arbiter.Worker do
   # because a required command was denied, not because the agent simply
   # forgot to write findings — report that concretely rather than folding it
   # into the generic `:blank_notes_at_completion` catch-all.
+  #
+  # bd-7wymls: "required" only when the denied line really is one of the
+  # worker-protocol bootstrap commands — run fc54ef4a reported "strict policy
+  # denied required command `pwd`" for a `pwd && git status` nobody requires.
+  # A meta without the full line (pre-bd-7wymls) keeps the old wording.
   defp notes_gate_failure_reason(meta) do
     case Map.get(meta || %{}, :denied_command) do
       cmd when is_binary(cmd) and cmd != "" ->
-        "strict policy denied required command `#{cmd}`"
+        if denied_bootstrap_command?(meta),
+          do: "strict policy denied required command `#{cmd}`",
+          else: "strict policy denied command `#{cmd}`"
 
       _ ->
         :blank_notes_at_completion
+    end
+  end
+
+  defp denied_bootstrap_command?(meta) do
+    case Map.get(meta, :denied_command_line) do
+      line when is_binary(line) -> GeminiSecurity.bootstrap_command?(line)
+      _ -> true
     end
   end
 
@@ -4979,12 +5066,21 @@ defmodule Arbiter.Worker do
   end
 
   defp notes_gate_denial_blurb(meta) do
-    case Map.get(meta || %{}, :denied_command) do
+    meta = meta || %{}
+
+    case Map.get(meta, :denied_command) do
       cmd when is_binary(cmd) and cmd != "" ->
-        "\n\nbd-25ivqe: this looks like a strict-policy bootstrap failure, not a " <>
-          "missing deliverable — the worker's `#{cmd}` call was auto-denied under " <>
-          ":strict permissions before it could do any work. Check the workspace's " <>
-          "`permissions.allow` for a `command(#{cmd})` rule."
+        if denied_bootstrap_command?(meta) do
+          "\n\nbd-25ivqe: this looks like a strict-policy bootstrap failure, not a " <>
+            "missing deliverable — the worker's `#{cmd}` call was auto-denied under " <>
+            ":strict permissions before it could do any work. Check the workspace's " <>
+            "`permissions.allow` for a `command(#{cmd})` rule."
+        else
+          "\n\nbd-7wymls: the worker's `#{Map.get(meta, :denied_command_line) || cmd}` " <>
+            "was denied under :strict permissions (not a worker-protocol command). " <>
+            "If the task genuinely needs it, add a `permissions.allow` rule; otherwise " <>
+            "the worker should have carried on without it."
+        end
 
       _ ->
         ""

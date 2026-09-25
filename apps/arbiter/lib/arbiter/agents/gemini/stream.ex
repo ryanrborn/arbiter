@@ -506,7 +506,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
   @doc """
   The base command token a denied `run_command` ERROR step named — `"arb"`
   out of `"arb inbox bd-ci0y74"` — for surfacing a concrete "strict policy
-  denied required command `<x>`" failure reason
+  denied [required] command `<x>`" failure reason
   (`Arbiter.Worker.ClaudeSession.capture_steps/2`) instead of a generic
   blank-notes failure. Returns the tool name verbatim for a non-command tool;
   `nil` only when the step carried no tool name at all.
@@ -525,22 +525,37 @@ defmodule Arbiter.Agents.Gemini.Stream do
   defp agy_result_summary(result) do
     status = result["status"] || "done"
     usage = result["usage"] || %{}
-    parts = ["⚙ gemini session #{status}"]
 
-    parts =
-      case number(result["duration_seconds"]) do
-        s when is_number(s) -> parts ++ ["#{Float.round(s * 1.0, 1)}s"]
-        _ -> parts
-      end
-
-    parts =
-      case number(usage["total_tokens"]) do
-        t when is_number(t) and t > 0 -> parts ++ ["#{t} tok"]
-        _ -> parts
-      end
-
-    Enum.join(parts, " · ")
+    (["⚙ gemini session #{status}"] ++
+       duration_part(number(result["duration_seconds"])) ++
+       tokens_part(number(usage["total_tokens"])) ++
+       denied_part(denied_action_names(result["denied_actions"])))
+    |> Enum.join(" · ")
   end
+
+  defp duration_part(s) when is_number(s), do: ["#{Float.round(s * 1.0, 1)}s"]
+  defp duration_part(_), do: []
+
+  defp tokens_part(t) when is_number(t) and t > 0, do: ["#{t} tok"]
+  defp tokens_part(_), do: []
+
+  # bd-7wymls: headless agy ends the turn on a permission soft-deny and
+  # reports the refused actions on the result — name them so the transcript
+  # shows why the session ended.
+  defp denied_part([]), do: []
+  defp denied_part(names), do: ["denied: " <> Enum.join(names, ", ")]
+
+  defp denied_action_names(actions) when is_list(actions) do
+    actions
+    |> Enum.map(fn
+      %{"action" => a} when is_binary(a) -> a
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp denied_action_names(_), do: []
 
   defp error_message(%{"message" => m}) when is_binary(m), do: m
   defp error_message(_), do: nil

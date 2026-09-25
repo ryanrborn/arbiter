@@ -78,6 +78,15 @@ defmodule Arbiter.Worker.StopReason do
       Distinct from a plain early quit because the remediation is a
       `--resume` carrying corrective guidance, never a re-dispatch: the
       worktree usually holds real, uncommitted work.
+    * `:permission_denied` — another *refinement* of `:exited_without_done`
+      (bd-7wymls), never produced by `classify/3` itself: headless `agy`
+      soft-denied a command its `:strict` allowlist does not name and then
+      ended the turn, so the model never got to carry on without it.
+      `Arbiter.Worker` builds it via `permission_denied/1` from the session's
+      structured denial flag (`Arbiter.Worker.ClaudeSession.denial_ended_turn?/1`),
+      not from the output tail. Resumable: the conversation is intact and the
+      remediation is a `--conversation` resume telling the model the command
+      was denied.
     * `:stalled` — no exit at all; the subprocess is alive within the watchdog
       window (caller passes `exit_status: nil`). The summary distinguishes a
       wholly silent subprocess from one that was mid-flight: "produced no
@@ -157,6 +166,7 @@ defmodule Arbiter.Worker.StopReason do
           | :agent_print_timeout
           | :exited_without_done
           | :async_wait_abandoned
+          | :permission_denied
           | :stalled
           | :preflight_timeout
           | :missing_worktree
@@ -767,6 +777,7 @@ defmodule Arbiter.Worker.StopReason do
         :agent_print_timeout -> "agy print-mode turn timed out (partial output only)"
         :exited_without_done -> "exited without completing"
         :async_wait_abandoned -> "abandoned an async wait (background task never drained)"
+        :permission_denied -> "strict permission policy denied a command (agy ended the turn)"
         :stalled -> "stalled (no output)"
         :preflight_timeout -> "auth pre-flight probe timed out"
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
@@ -778,6 +789,29 @@ defmodule Arbiter.Worker.StopReason do
       nil -> base
       code -> "#{base} (exit #{code})"
     end
+  end
+
+  @doc """
+  The `:permission_denied` stop (bd-7wymls): an agy turn ended by a headless
+  permission soft-deny under `:strict`. `denied` is the denied command line
+  when the session could attribute one, else `nil`.
+  """
+  @spec permission_denied(String.t() | nil) :: t()
+  def permission_denied(denied) do
+    what = if is_binary(denied) and denied != "", do: "command `#{denied}`", else: "an action"
+
+    %__MODULE__{
+      category: :permission_denied,
+      summary:
+        "strict policy denied #{what}, and headless agy ended the turn instead of " <>
+          "letting the agent continue without it",
+      remediation:
+        "Not an agent failure: the workspace's `:strict` permissions do not allow it. " <>
+          "The session is resumed in place and told not to retry; if the command is " <>
+          "genuinely needed, add a `permissions.allow` rule for it.",
+      exit_status: 0,
+      signal: nil
+    }
   end
 
   @doc """
