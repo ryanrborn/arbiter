@@ -17,7 +17,14 @@ defmodule Arbiter.Usage.Event do
   session's running total, not a delta. `Arbiter.Worker.record_usage_event/3`
   handles this by refreshing the existing row for a repeated
   `(task_id, session_id)` (the `:refresh_snapshot` action) instead of
-  inserting a second one — see bd-28t80i.
+  inserting a second one — see bd-28t80i. This refresh is gated to
+  non-Claude providers only (a resumed Claude `--resume` launch reports only
+  that launch's own usage, not a running total, so it must keep inserting a
+  row per launch) and only replaces the stored token/cache/cost fields when
+  the new snapshot actually has tokens and is no smaller than what is
+  already stored — a token-less or partial snapshot (e.g. a relaunch killed
+  before its `result` event) only refreshes bookkeeping fields and leaves
+  the real numbers alone.
 
   ## Step
 

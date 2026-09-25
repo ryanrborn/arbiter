@@ -304,7 +304,7 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
               "input_tokens" => 2_187_044,
               "output_tokens" => 28_973,
               "thinking_tokens" => 0,
-              "cache_read_tokens" => 17_769_451,
+              "cache_read_tokens" => 17_500_000,
               "total_tokens" => 2_216_017
             }
           }
@@ -344,6 +344,13 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
               "thinking_tokens" => 0,
               "cache_read_tokens" => 17_769_451,
               "total_tokens" => 2_303_771
+              # cache_read_tokens deliberately differs from the first
+              # snapshot (17,500,000) so the assertion below proves the
+              # refresh actually replaced the value rather than a fixture
+              # coincidentally matching. `cache_creation_tokens` is never
+              # sent by agy's stream — see `Gemini.Stream.usage_fields/2` —
+              # so it stays nil on both snapshots; that's the real value,
+              # not an untested gap.
             }
           }
         })
@@ -377,6 +384,166 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert event.tokens_in == 2_273_134
     assert event.tokens_out == 30_637
     assert event.cache_read_tokens == 17_769_451
+    assert event.cache_creation_tokens == nil
+  end
+
+  # bd-28t80i round 2, finding 2: a relaunch that dies before agy's `result`
+  # event (or is caught by the `:cryhwk` terminate backstop) reaches
+  # `record_usage_event/3` with a token-less `usage` map. The refresh must
+  # not let that blank snapshot overwrite the full one already stored —
+  # confirmed live in bd-2exkl0 (session 83f1659d) and bd-42rnnq (session
+  # 1051ae2d), where the later row for the same session_id had NULL tokens.
+  test "a token-less refresh for an already-recorded agy session keeps the full snapshot" do
+    task_id = "bd-ledgeragy-blank-#{System.unique_integer([:positive])}"
+    session_id = "83f1659d-0000-4000-8000-000000000000"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    full_events =
+      [
+        Jason.encode!(%{"event" => "init", "conversation_id" => session_id}),
+        Jason.encode!(%{
+          "event" => "result",
+          "result" => %{
+            "status" => "SUCCESS",
+            "duration_seconds" => 300.0,
+            "usage" => %{
+              "input_tokens" => 1_000_000,
+              "output_tokens" => 20_000,
+              "thinking_tokens" => 0,
+              "cache_read_tokens" => 5_000_000,
+              "total_tokens" => 1_020_000
+            }
+          }
+        })
+      ]
+      |> Enum.join("\n")
+
+    full_path = Path.join(cwd, "agy-blank-full-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(full_path, full_events <> "\n")
+
+    {:ok, _port1} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", full_path],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    assert [full_event] = events_for(task_id)
+    assert full_event.tokens_in == 1_000_000
+    first_occurred_at = full_event.occurred_at
+
+    # The relaunch's port exits (crashes/killed) before agy ever emits a
+    # `result` — only the `init` line lands, so `usage` carries no tokens.
+    # Sleep briefly before exiting so the bookkeeping refresh below has a
+    # later `occurred_at` than the first row, which is how we detect that
+    # the second (token-less) launch was actually processed.
+    blank_events = [Jason.encode!(%{"event" => "init", "conversation_id" => session_id})]
+    blank_path = Path.join(cwd, "agy-blank-second-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(blank_path, Enum.join(blank_events, "\n") <> "\n")
+
+    {:ok, _port2} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["sh", "-c", "cat #{blank_path}; sleep 0.2"],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok =
+      wait_until(fn ->
+        case events_for(task_id) do
+          [event] -> DateTime.compare(event.occurred_at, first_occurred_at) == :gt
+          _ -> false
+        end
+      end)
+
+    :ok = GenServer.stop(pid, :normal)
+
+    assert [event] = events_for(task_id)
+    assert event.session_id == session_id
+    assert event.tokens_in == 1_000_000
+    assert event.tokens_out == 20_000
+    assert event.cache_read_tokens == 5_000_000
+  end
+
+  # bd-28t80i round 2, finding 1: a Claude `--resume` relaunch (a nudge or
+  # auto-resume, `worker.ex:1964`/`:4482-4501`) keeps the SAME session_id but,
+  # unlike agy, its `result.usage` covers only that launch — not a running
+  # total. `maybe_reconcile_usage_from_disk/3`'s `since: session.started_at`
+  # bound already depends on this. Two Claude `result` events sharing a
+  # session_id must therefore stay two separate rows whose tokens/cost add
+  # up, never collapse into one refreshed row (which would silently drop the
+  # first launch's spend).
+  test "two Claude result events with the same session_id (a --resume relaunch) stay two rows and add up" do
+    task_id = "bd-ledgerclaude-resume-#{System.unique_integer([:positive])}"
+    session_id = "claude-resume-session-cccc"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    build_result = fn cost, tokens_in ->
+      [
+        Jason.encode!(%{
+          "type" => "system",
+          "subtype" => "init",
+          "session_id" => session_id
+        }),
+        Jason.encode!(%{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "result" => "done",
+          "total_cost_usd" => cost,
+          "usage" => %{"input_tokens" => tokens_in, "output_tokens" => 50}
+        })
+      ]
+      |> Enum.join("\n")
+    end
+
+    first_path = Path.join(cwd, "claude-resume-first-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(first_path, build_result.(0.30, 1000) <> "\n")
+
+    {:ok, _port1} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", first_path],
+        provider: "claude"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+
+    second_path =
+      Path.join(cwd, "claude-resume-second-#{System.unique_integer([:positive])}.jsonl")
+
+    File.write!(second_path, build_result.(0.15, 200) <> "\n")
+
+    {:ok, _port2} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", second_path],
+        provider: "claude"
+      )
+
+    :ok = wait_until(fn -> length(events_for(task_id)) == 2 end)
+
+    :ok = GenServer.stop(pid, :normal)
+
+    events = events_for(task_id)
+    assert length(events) == 2
+    assert Enum.all?(events, &(&1.session_id == session_id))
+    assert Enum.map(events, & &1.cost_usd) |> Enum.sort() == [0.15, 0.30]
+    assert Enum.map(events, & &1.tokens_in) |> Enum.sort() == [200, 1000]
+    assert Enum.reduce(events, 0, &(&1.tokens_in + &2)) == 1200
   end
 
   # bd-28t80i AC6/AC7 regression: the `(task_id, session_id)` refresh must

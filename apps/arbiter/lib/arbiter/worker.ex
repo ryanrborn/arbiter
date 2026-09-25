@@ -1788,6 +1788,24 @@ defmodule Arbiter.Worker do
     :raw
   ]
 
+  # bd-28t80i round 2, finding 2: the fields that actually carry "the
+  # session's numbers" as opposed to bookkeeping metadata. A relaunch that
+  # dies before its `result` event (or the terminate backstop) reaches
+  # `record_usage_event/3` with a token-less `usage` map — see
+  # `flush_unterminated_sessions/1` and the `:cryhwk` backstop below. Blindly
+  # copying that onto an existing refreshed row would replace a complete
+  # snapshot with nils. These fields are only carried onto the refresh when
+  # the new snapshot actually has tokens.
+  @refresh_snapshot_usage_fields [
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note
+  ]
+
   # Pre-existing complexity 10 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -1856,7 +1874,7 @@ defmodule Arbiter.Worker do
       role: role_to_usage_step(role)
     }
 
-    case existing_session_event(attrs.session_id, attrs.task_id) do
+    case existing_session_event(attrs) do
       nil ->
         case Ash.create(Arbiter.Usage.Event, attrs) do
           {:ok, _row} ->
@@ -1871,7 +1889,7 @@ defmodule Arbiter.Worker do
         end
 
       existing ->
-        refresh_attrs = Map.take(attrs, @refresh_snapshot_fields)
+        refresh_attrs = refresh_snapshot_attrs(attrs, existing)
 
         case Ash.update(existing, refresh_attrs, action: :refresh_snapshot) do
           {:ok, _row} ->
@@ -1894,22 +1912,53 @@ defmodule Arbiter.Worker do
       :error
   end
 
-  # bd-28t80i: a repeated `(task_id, session_id)` means agy resumed the SAME
-  # conversation and is re-reporting its whole running total — see the
-  # `:refresh_snapshot` action's moduledoc note on `Arbiter.Usage.Event`. A
-  # nil/blank `session_id` (most fixtures, and any adapter whose stream never
-  # carries one) always inserts a fresh row, matching the pre-existing
-  # behavior. Claude's distinct-session_id-per-pass property means this never
-  # matches across genuinely separate sessions.
-  defp existing_session_event(session_id, _task_id) when session_id in [nil, ""], do: nil
+  # bd-28t80i round 2, finding 1: the running-total re-report is a property of
+  # agy's stream, confirmed live only for agy-dispatched runs (provider !=
+  # "claude" here, since agy always sets `session.provider` explicitly — see
+  # the `attrs.provider` derivation above). Claude's own `--resume` relaunches
+  # (nudges, auto-resume) report only THAT launch's usage, not a running
+  # total — `maybe_reconcile_usage_from_disk/3`'s `since: session.started_at`
+  # bound on the disk fallback already depends on this being true. Refreshing
+  # a Claude row in place would silently drop every earlier resume's tokens
+  # and cost instead of accumulating them, so Claude always inserts a new row
+  # per launch, exactly like before this fix existed.
+  defp existing_session_event(%{session_id: session_id}) when session_id in [nil, ""], do: nil
+  defp existing_session_event(%{provider: "claude"}), do: nil
 
-  defp existing_session_event(session_id, task_id) do
+  defp existing_session_event(%{session_id: session_id, task_id: task_id}) do
     Arbiter.Usage.Event
     |> Ash.Query.filter(session_id == ^session_id and task_id == ^task_id)
     |> Ash.Query.sort(inserted_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> List.first()
+  end
+
+  # bd-28t80i round 2, finding 2: only carry the usage fields onto a refresh
+  # when the new snapshot actually reports tokens, and only when it is at
+  # least as large as what is already stored (agy's counters are monotonic
+  # running totals, so a smaller number means this `result` is stale/partial,
+  # not a real new total). Otherwise keep the existing row's numbers exactly
+  # as they were and only refresh bookkeeping fields (exit_status,
+  # occurred_at, duration_ms, worker_run_id, raw, model/provider/account
+  # identity) — this still lets a killed-before-`result` relaunch update
+  # "when this session was last touched" without erasing a real snapshot.
+  defp refresh_snapshot_attrs(attrs, existing) do
+    bookkeeping = Map.take(attrs, @refresh_snapshot_fields -- @refresh_snapshot_usage_fields)
+
+    if usage_snapshot_supersedes?(attrs, existing) do
+      Map.merge(bookkeeping, Map.take(attrs, @refresh_snapshot_usage_fields))
+    else
+      bookkeeping
+    end
+  end
+
+  defp usage_snapshot_supersedes?(%{tokens_in: nil}, _existing), do: false
+
+  defp usage_snapshot_supersedes?(%{tokens_in: _new_tokens_in}, %{tokens_in: nil}), do: true
+
+  defp usage_snapshot_supersedes?(%{tokens_in: new_tokens_in}, %{tokens_in: existing_tokens_in}) do
+    new_tokens_in >= existing_tokens_in
   end
 
   # bd-cryhwk: terminate-time backstop for `record_usage_event/3`. Every
