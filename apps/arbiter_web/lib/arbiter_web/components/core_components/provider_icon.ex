@@ -20,7 +20,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
   #   Monochrome mark switching black on light theme, white on dark theme via `text-[var(--text-title)]`.
   #   Nominative use to identify the OpenAI/Codex provider.
   # - Antigravity (Gemini): Official brand mark for Google Antigravity from Google LLC.
-  #   Sourced via Wikimedia Commons (Google Antigravity Logo.svg).
+  #   Sourced from official Google Antigravity press kit and brand assets (antigravity.google/press).
   #   Full-colour Google gradient on blue arch. Nominative use to identify Google Antigravity.
   # - Ollama: Placeholder slot for future Ollama adapter (bd-942qbz).
 
