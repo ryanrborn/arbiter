@@ -525,31 +525,25 @@ defmodule Arbiter.Agents.Gemini.Stream do
   defp agy_result_summary(result) do
     status = result["status"] || "done"
     usage = result["usage"] || %{}
-    parts = ["⚙ gemini session #{status}"]
 
-    parts =
-      case number(result["duration_seconds"]) do
-        s when is_number(s) -> parts ++ ["#{Float.round(s * 1.0, 1)}s"]
-        _ -> parts
-      end
-
-    parts =
-      case number(usage["total_tokens"]) do
-        t when is_number(t) and t > 0 -> parts ++ ["#{t} tok"]
-        _ -> parts
-      end
-
-    # bd-7wymls: headless agy ends the turn on a permission soft-deny and
-    # reports the refused actions here — name them so the transcript shows
-    # why the session ended.
-    parts =
-      case denied_action_names(result["denied_actions"]) do
-        [] -> parts
-        names -> parts ++ ["denied: " <> Enum.join(names, ", ")]
-      end
-
-    Enum.join(parts, " · ")
+    (["⚙ gemini session #{status}"] ++
+       duration_part(number(result["duration_seconds"])) ++
+       tokens_part(number(usage["total_tokens"])) ++
+       denied_part(denied_action_names(result["denied_actions"])))
+    |> Enum.join(" · ")
   end
+
+  defp duration_part(s) when is_number(s), do: ["#{Float.round(s * 1.0, 1)}s"]
+  defp duration_part(_), do: []
+
+  defp tokens_part(t) when is_number(t) and t > 0, do: ["#{t} tok"]
+  defp tokens_part(_), do: []
+
+  # bd-7wymls: headless agy ends the turn on a permission soft-deny and
+  # reports the refused actions on the result — name them so the transcript
+  # shows why the session ended.
+  defp denied_part([]), do: []
+  defp denied_part(names), do: ["denied: " <> Enum.join(names, ", ")]
 
   defp denied_action_names(actions) when is_list(actions) do
     actions

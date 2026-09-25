@@ -115,6 +115,7 @@ defmodule Arbiter.Worker do
   require Logger
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
+  alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
   alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
@@ -5028,7 +5029,7 @@ defmodule Arbiter.Worker do
 
   defp denied_bootstrap_command?(meta) do
     case Map.get(meta, :denied_command_line) do
-      line when is_binary(line) -> Arbiter.Agents.Gemini.Security.bootstrap_command?(line)
+      line when is_binary(line) -> GeminiSecurity.bootstrap_command?(line)
       _ -> true
     end
   end
