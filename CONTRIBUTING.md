@@ -45,8 +45,8 @@ mix precommit
 mix audit
 ```
 
-Run `mix precommit` before opening a pull request, and `mix audit` if you've
-touched anything security-sensitive.
+Before opening a pull request (or committing for review), run `mix precommit && mix audit`
+and fix any issues. If you make further edits after running these, re-run to catch any new issues.
 
 ## Reporting security issues
 

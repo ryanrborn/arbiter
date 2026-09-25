@@ -48,6 +48,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @unaddressed Path.expand("../../fixtures/review_unaddressed_finding.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @revise_commit_dotfile Path.expand("../../fixtures/revise_commit_dotfile.sh", __DIR__)
   @revise_commit_once Path.expand("../../fixtures/revise_commit_once.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @revise_dirty Path.expand("../../fixtures/revise_dirty.sh", __DIR__)
@@ -3082,6 +3083,67 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert approve.dispositions == ~s({"F1.1":"addressed"})
       assert approve.undispositioned_count == 0
       assert approve.converged == true
+    end
+
+    # bd-bm6bfs (emr-8fqbng, MR !294): a real park cost a re-prompt and a
+    # coordinator hand-ruling on a green, correct D0 fix. Round 1's finding
+    # cites a DOTFILE (`.gitlab-ci.yml`, not `guard.txt`); round 2's
+    # `- [ADDRESSED]` disposition cites the same dotfile and the implementer
+    # really touched it. The guard must match `.gitlab-ci.yml` against
+    # `git diff --name-only`'s own `.gitlab-ci.yml` — not the dotless
+    # `gitlab-ci.yml` a leading-dot-dropping path regex would extract — so
+    # the approval is honored on the first pass, no re-prompt needed.
+    test "round-2 APPROVE dispositioning a finding that cites a dotfile merges without a re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@unaddressed, "DOTFILE"],
+            revise_command: [@revise_commit_dotfile],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 1
+
+      require Ash.Query
+
+      approve =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+        |> Enum.find(&(&1.role == :review and &1.verdict == :approve))
+
+      # Converged on the FIRST attempt — no re-prompt was needed, unlike the
+      # production incident where the guard's false rejection burned a retry.
+      assert approve.dispositions == ~s({"F1.1":"addressed"})
+      assert approve.undispositioned_count == 0
+      assert approve.converged == true
+
+      # AC2: the guard evaluated exactly the text this round persisted — not a
+      # differently-captured attempt. The round row's `findings` column is the
+      # reviewer's own APPROVE output verbatim.
+      assert approve.findings =~ "VERDICT: APPROVE"
+      assert approve.findings =~ "- [ADDRESSED] F1.1 — `.gitlab-ci.yml:1`"
     end
 
     # bd-6bg54c / #1573 AC1 — the reviewed-SHA baseline the merge guard reads

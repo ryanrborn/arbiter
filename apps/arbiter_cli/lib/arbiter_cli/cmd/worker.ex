@@ -7,7 +7,7 @@ defmodule ArbiterCli.Cmd.Worker do
       arb worker runs <task-id>   — list every historical run for the task
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
-      arb worker resume <task-id> [<repo>] [--model <name>] [--force-quota] — resume the prior session
+      arb worker resume <task-id> [<repo>] [--model <name>] [--force-quota] [--force] — resume the prior session
       arb worker review <task-id> [--repo <repo>] [--model <name>] — spawn a review worker
 
   Use `arb dispatch` to start a worker in the first place.
@@ -20,6 +20,11 @@ defmodule ArbiterCli.Cmd.Worker do
   fails with a clear message rather than silently starting fresh. The repo is
   optional — it's inherited from the task's most recent run when omitted. The
   top-level `arb resume <task-id>` alias behaves identically.
+
+  A task that released its worker slot — parked for you, stopped, completed —
+  must re-acquire one to resume (bd-92mx1m). When the concurrency cap is full
+  the server refuses, naming the cap and the tasks holding it; `--force` goes
+  over the cap anyway, and the override is recorded.
 
   `show` reports a live worker's full snapshot when one is running. When no
   live worker exists for the task it falls back to the most recent historical
@@ -38,7 +43,13 @@ defmodule ArbiterCli.Cmd.Worker do
 
   alias ArbiterCli.{Client, Output}
 
-  @switches [json: :boolean, repo: :string, model: :string, force_quota: :boolean]
+  @switches [
+    json: :boolean,
+    repo: :string,
+    model: :string,
+    force_quota: :boolean,
+    force: :boolean
+  ]
 
   # Pre-existing complexity 18 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -162,6 +173,7 @@ defmodule ArbiterCli.Cmd.Worker do
       |> maybe_put("repo", repo || flags[:repo])
       |> maybe_put("model", flags[:model])
       |> maybe_put("force_quota", if(flags[:force_quota], do: true))
+      |> maybe_put("force", if(flags[:force], do: true))
 
     case Client.post("/api/workers/#{task_id}/resume", body) do
       {:ok, payload} -> emit_resume(payload, mode)

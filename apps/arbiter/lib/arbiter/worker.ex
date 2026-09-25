@@ -400,6 +400,16 @@ defmodule Arbiter.Worker do
     end
   end
 
+  @doc """
+  The first subordinate worker for `task_id` — a `<task_id>:fixpass` or
+  `<task_id>:conflict` pass, i.e. the exclusive family minus the task's own key
+  — that is still driving an agent, as `%{registry_key:, pid:, status:, ...}`,
+  or `nil`. Same probe (and same "unresponsive counts as active" rule) as the
+  single-active-worker guard in `start/1`.
+  """
+  @spec active_subordinate(String.t()) :: map() | nil
+  def active_subordinate(task_id) when is_binary(task_id), do: active_sibling(task_id, task_id)
+
   # The first worker for `task_id` — under any key in the exclusive family
   # except the one we are asking for — that is still driving an agent.
   #
@@ -952,9 +962,29 @@ defmodule Arbiter.Worker do
 
   @doc """
   Mark the workflow failed. Valid from `:running` or `:awaiting`.
+
+  `slot_handoff: true` (bd-92mx1m) marks a failure that exists only so an
+  automatic round can replace this worker — the Watchdog's awaiting_review
+  auto-resume. The task keeps its slot through the hand-off
+  (`Arbiter.Worker.Phase` reads it as `:handing_off`, not `:waiting_on_you`)
+  until the round starts or `clear_slot_handoff/1` gives it up.
   """
-  @spec fail(ref(), term()) :: :ok | {:error, term()}
-  def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
+  @spec fail(ref(), term(), keyword()) :: :ok | {:error, term()}
+  def fail(ref, reason \\ nil, opts \\ [])
+
+  def fail(ref, reason, []), do: call(ref, {:fail, reason})
+
+  def fail(ref, reason, opts) when is_list(opts),
+    do: call(ref, {:fail, reason, Keyword.get(opts, :slot_handoff) == true})
+
+  @doc """
+  Drop a pending slot hand-off (`fail/3`'s `slot_handoff: true`, or the
+  ReviewGate fix round's): the automatic round it was waiting for will not
+  run, so the worker is parked for a human now and its task releases its slot.
+  A no-op on a worker that carries no hand-off.
+  """
+  @spec clear_slot_handoff(ref()) :: :ok | {:error, term()}
+  def clear_slot_handoff(ref), do: call(ref, :clear_slot_handoff)
 
   @doc """
   Deliver a ReviewGate (review-gate) verdict. Only valid from `:awaiting_review_gate`
@@ -1734,6 +1764,48 @@ defmodule Arbiter.Worker do
   # implementer (meta.role == :implementer) a `:impl` row; everything else
   # writes `:work`. Missing fields are fine — we record what we have rather
   # than dropping the row.
+  # Mirrors `Arbiter.Usage.Event`'s `:refresh_snapshot` accept list — the
+  # identity fields (`task_id`, `session_id`, `step`, `base_task_id`, `role`,
+  # `source`) never change on a refresh, only the measured/known fields do.
+  @refresh_snapshot_fields [
+    :workspace_id,
+    :repo,
+    :model,
+    :provider,
+    :provider_account_id,
+    :provider_credential_id,
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note,
+    :duration_ms,
+    :exit_status,
+    :worker_run_id,
+    :occurred_at,
+    :raw
+  ]
+
+  # bd-28t80i round 2, finding 2: the fields that actually carry "the
+  # session's numbers" as opposed to bookkeeping metadata. A relaunch that
+  # dies before its `result` event (or the terminate backstop) reaches
+  # `record_usage_event/3` with a token-less `usage` map — see
+  # `flush_unterminated_sessions/1` and the `:cryhwk` backstop below. Blindly
+  # copying that onto an existing refreshed row would replace a complete
+  # snapshot with nils. These fields are only carried onto the refresh when
+  # the new snapshot actually has tokens.
+  @refresh_snapshot_usage_fields [
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note
+  ]
+
   # Pre-existing complexity 10 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -1802,16 +1874,34 @@ defmodule Arbiter.Worker do
       role: role_to_usage_step(role)
     }
 
-    case Ash.create(Arbiter.Usage.Event, attrs) do
-      {:ok, _row} ->
-        :ok
+    case existing_session_event(attrs) do
+      nil ->
+        case Ash.create(Arbiter.Usage.Event, attrs) do
+          {:ok, _row} ->
+            :ok
 
-      {:error, reason} ->
-        Logger.warning(
-          "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
-        )
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
 
-        :error
+            :error
+        end
+
+      existing ->
+        refresh_attrs = refresh_snapshot_attrs(attrs, existing)
+
+        case Ash.update(existing, refresh_attrs, action: :refresh_snapshot) do
+          {:ok, _row} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 refresh swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
+
+            :error
+        end
     end
   rescue
     e ->
@@ -1820,6 +1910,87 @@ defmodule Arbiter.Worker do
       )
 
       :error
+  end
+
+  # bd-28t80i round 3, finding 1: gate positively on the provider *shown* to
+  # re-report a running total (agy/gemini — see the bd-gjw1ze payloads quoted
+  # in the PR), not negatively on "not claude". Codex's own relaunches
+  # (`codex exec resume <thread_id>`) reuse the same `session_id` but each
+  # launch's `turn.completed` usage covers only that launch
+  # (`agents/codex/stream.ex:134-137`), so Codex must keep inserting a new
+  # row per launch exactly like Claude — refreshing in place would drop or
+  # clobber real per-launch tokens instead of accumulating them. Only widen
+  # this allowlist for a provider once its stream has been shown, from a real
+  # run, to report cumulative-since-start totals the way agy/gemini does.
+  @running_total_providers ["gemini"]
+
+  defp existing_session_event(%{session_id: session_id}) when session_id in [nil, ""], do: nil
+
+  defp existing_session_event(%{provider: provider})
+       when provider not in @running_total_providers,
+       do: nil
+
+  defp existing_session_event(%{session_id: session_id, task_id: task_id}) do
+    Arbiter.Usage.Event
+    |> Ash.Query.filter(session_id == ^session_id and task_id == ^task_id)
+    |> Ash.Query.sort(inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  end
+
+  # bd-28t80i round 2, finding 2: only carry the usage fields onto a refresh
+  # when the new snapshot actually reports tokens, and only when it is at
+  # least as large as what is already stored (agy's counters are monotonic
+  # running totals, so a smaller number means this `result` is stale/partial,
+  # not a real new total). Otherwise keep the existing row's numbers exactly
+  # as they were and only refresh bookkeeping fields (exit_status,
+  # occurred_at, worker_run_id, model/provider/account identity) — this
+  # still lets a killed-before-`result` relaunch update "when this session
+  # was last touched" without erasing a real snapshot.
+  #
+  # `duration_ms` and `raw` are carved out of that bookkeeping set (round 2
+  # finding 2): a relaunch killed before its `result` event reports its OWN
+  # short wall-clock `duration_ms` (see `wall_clock_duration_ms/2` above) and
+  # a `raw` with no tokens in it. Blindly overwriting the stored row with
+  # those would shrink a real 421s cumulative duration down to a few seconds
+  # and desync `raw` from the tokens that were kept. `duration_ms` always
+  # keeps the larger of the two so it only ever grows; `raw` only moves when
+  # the usage snapshot itself does, so it always describes the tokens on the
+  # row.
+  defp refresh_snapshot_attrs(attrs, existing) do
+    non_usage_fields = @refresh_snapshot_fields -- @refresh_snapshot_usage_fields
+    bookkeeping_fields = non_usage_fields -- [:duration_ms, :raw]
+
+    bookkeeping =
+      attrs
+      |> Map.take(bookkeeping_fields)
+      |> Map.put(
+        :duration_ms,
+        max_duration_ms(Map.get(attrs, :duration_ms), existing.duration_ms)
+      )
+
+    if usage_snapshot_supersedes?(attrs, existing) do
+      bookkeeping
+      |> Map.put(:raw, Map.get(attrs, :raw))
+      |> Map.merge(Map.take(attrs, @refresh_snapshot_usage_fields))
+    else
+      bookkeeping
+    end
+  end
+
+  defp max_duration_ms(nil, existing_duration_ms), do: existing_duration_ms
+  defp max_duration_ms(new_duration_ms, nil), do: new_duration_ms
+
+  defp max_duration_ms(new_duration_ms, existing_duration_ms),
+    do: max(new_duration_ms, existing_duration_ms)
+
+  defp usage_snapshot_supersedes?(%{tokens_in: nil}, _existing), do: false
+
+  defp usage_snapshot_supersedes?(%{tokens_in: _new_tokens_in}, %{tokens_in: nil}), do: true
+
+  defp usage_snapshot_supersedes?(%{tokens_in: new_tokens_in}, %{tokens_in: existing_tokens_in}) do
+    new_tokens_in >= existing_tokens_in
   end
 
   # bd-cryhwk: terminate-time backstop for `record_usage_event/3`. Every
@@ -2151,6 +2322,19 @@ defmodule Arbiter.Worker do
 
   def handle_call({:fail, _reason}, _from, %State{status: status} = state) do
     {:reply, {:error, {:invalid_transition, status, :failed}}, state}
+  end
+
+  def handle_call({:fail, reason, handoff?}, _from, %State{status: status} = state)
+      when status in [:idle, :running, :awaiting, :awaiting_review] do
+    {:reply, :ok, fail_now(put_slot_handoff(state, handoff?), reason)}
+  end
+
+  def handle_call({:fail, _reason, _handoff?}, _from, %State{status: status} = state) do
+    {:reply, {:error, {:invalid_transition, status, :failed}}, state}
+  end
+
+  def handle_call(:clear_slot_handoff, _from, %State{} = state) do
+    {:reply, :ok, drop_slot_handoff(state)}
   end
 
   def handle_call(
@@ -2528,8 +2712,17 @@ defmodule Arbiter.Worker do
   # `park_rejected/4` so it lands after that call's reply, with `status` already
   # `:failed`. Never crashes the worker: the whole decision is best-effort.
   def handle_info({:__review_gate_fix_round__, verdict, findings}, %State{} = state) do
-    maybe_dispatch_fix_round(state, verdict, findings)
-    {:noreply, state}
+    case maybe_dispatch_fix_round(state, verdict, findings) do
+      :started -> {:noreply, state}
+      _ -> {:noreply, drop_slot_handoff(state)}
+    end
+  end
+
+  # bd-92mx1m: the fix round's resume failed before it could replace this
+  # worker (a missing worktree, an unresolvable repo…). Nothing will run, so
+  # this is a park for a human now, and the task gives its slot up.
+  def handle_info(:__fix_round_dispatch_failed__, %State{} = state) do
+    {:noreply, drop_slot_handoff(state)}
   end
 
   # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
@@ -5439,7 +5632,14 @@ defmodule Arbiter.Worker do
       |> Map.put(:failure_summary, review_gate_failure_summary(verdict, findings))
       |> put_park_reason(park_reason)
 
-    failed = fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
+    # bd-92mx1m: a rejection that may yet get a fix round is a hand-off, not a
+    # park — the task keeps its slot until `maybe_dispatch_fix_round/3` either
+    # starts the round (whose resume then passes `ResumeSlot` uncapped) or
+    # gives up on it (`drop_slot_handoff/1`, and the slot is released).
+    handoff? = is_nil(park_reason) and verdict == :request_changes
+    state = put_slot_handoff(%State{state | meta: meta}, handoff?)
+
+    failed = fail_now(state, fail_reason_for(verdict))
 
     # bd-a9zb7w: the rejection is recorded and paged — now schedule the
     # implementer. Deferred to a self-message rather than run inline because the
@@ -5457,6 +5657,19 @@ defmodule Arbiter.Worker do
 
     failed
   end
+
+  # bd-92mx1m: see `fail/3` and `Arbiter.Worker.Phase`. Set on the way into a
+  # hand-off failure; dropped (and the new phase announced, so the board and
+  # the autopilot see the slot come free) when the round will not run.
+  defp put_slot_handoff(%State{} = state, true),
+    do: %State{state | meta: Map.put(state.meta, :slot_handoff, true)}
+
+  defp put_slot_handoff(%State{} = state, _), do: state
+
+  defp drop_slot_handoff(%State{meta: %{slot_handoff: true} = meta} = state),
+    do: announce_phase(%State{state | meta: Map.delete(meta, :slot_handoff)})
+
+  defp drop_slot_handoff(%State{} = state), do: state
 
   defp put_park_reason(meta, nil), do: Map.delete(meta, :review_park_reason)
   defp put_park_reason(meta, reason), do: Map.put(meta, :review_park_reason, reason)
@@ -5541,6 +5754,7 @@ defmodule Arbiter.Worker do
     task_id = state.task_id
     workspace_id = state.workspace_id
     prior_attempts = attempt - 1
+    worker = self()
 
     run = fn ->
       case dispatcher.dispatch(args) do
@@ -5553,6 +5767,8 @@ defmodule Arbiter.Worker do
               "task=#{task_id}: #{inspect(reason)}"
           )
 
+          send(worker, :__fix_round_dispatch_failed__)
+
           dispatcher.escalate_exhausted(
             task_id,
             workspace_id,
@@ -5564,7 +5780,7 @@ defmodule Arbiter.Worker do
 
     case Task.Supervisor.start_child(Arbiter.TaskSupervisor, run) do
       {:ok, _pid} ->
-        :ok
+        :started
 
       other ->
         Logger.warning(

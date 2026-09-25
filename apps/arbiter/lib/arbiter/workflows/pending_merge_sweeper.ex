@@ -22,7 +22,8 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
   carrying a retryable stamp and, for each:
 
     * leaves it alone while a live lane owns it: a registered Watchdog, a
-      worker that is still working, or a retry already running;
+      worker that is still working (including a `:fixpass` / `:conflict`
+      subordinate pass), or a retry already running;
     * restarts the Watchdog of a worker still parked at `:awaiting_review`
       whose Watchdog died (`Arbiter.Worker.Watchdog.restart/1`) — that is the
       live lane's own repair;
@@ -216,6 +217,10 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
   end
 
   defp route(_task, _pending, {:worker, _status}, _opts), do: {:skipped, :live_worker}
+
+  # A fix pass / conflict resolver is still pushing to the PR; once it exits,
+  # a later sweep re-arms the retry against whatever head it left.
+  defp route(_task, _pending, {:subordinate, _key}, _opts), do: {:skipped, :live_worker}
 
   defp route(task, pending, nil, opts) do
     with {:ok, %Workspace{} = ws} <- Ash.get(Workspace, task.workspace_id),

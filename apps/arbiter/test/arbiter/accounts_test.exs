@@ -266,6 +266,58 @@ defmodule Arbiter.AccountsTest do
     end
   end
 
+  describe "detach_workspace/2" do
+    test "deletes the workspace's link to the account for the account's provider" do
+      ws = create_workspace!("detach-ws-1")
+      account = create_account!(%{provider: :claude, slug: "detach-acct"})
+      {:ok, link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      assert {:ok, detached} = Accounts.detach_workspace(ws.id, "claude:detach-acct")
+      assert detached.id == link.id
+
+      assert [] =
+               WorkspaceProviderAccount
+               |> Ash.Query.filter(workspace_id == ^ws.id)
+               |> Ash.read!()
+    end
+
+    test "leaves the workspace's links for other providers alone" do
+      ws = create_workspace!("detach-ws-2")
+      claude = create_account!(%{provider: :claude, slug: "detach-claude"})
+      codex = create_account!(%{provider: :codex, slug: "detach-codex"})
+      {:ok, _} = Accounts.attach_workspace(ws.id, :claude, claude.id)
+      {:ok, codex_link} = Accounts.attach_workspace(ws.id, :codex, codex.id)
+
+      assert {:ok, _} = Accounts.detach_workspace(ws.id, claude.id)
+
+      assert [%{id: id}] =
+               WorkspaceProviderAccount
+               |> Ash.Query.filter(workspace_id == ^ws.id)
+               |> Ash.read!()
+
+      assert id == codex_link.id
+    end
+
+    test "refuses to delete a link that points at a different account" do
+      ws = create_workspace!("detach-ws-3")
+      a = create_account!(%{provider: :claude, slug: "detach-a"})
+      b = create_account!(%{provider: :claude, slug: "detach-b"})
+      {:ok, _} = Accounts.attach_workspace(ws.id, :claude, b.id)
+
+      assert {:error, :not_attached} = Accounts.detach_workspace(ws.id, a.id)
+      assert Arbiter.Accounts.Resolver.account_id(ws.id, :claude) == b.id
+    end
+
+    test "an unattached workspace or unknown account is a plain error tuple" do
+      ws = create_workspace!("detach-ws-4")
+      account = create_account!(%{provider: :claude, slug: "detach-none"})
+
+      assert {:error, :not_attached} = Accounts.detach_workspace(ws.id, account.id)
+      assert {:error, :not_found} = Accounts.detach_workspace(ws.id, "claude:nope")
+      assert {:error, :not_found} = Accounts.detach_workspace("ws-does-not-exist", account.id)
+    end
+  end
+
   describe "rotate_credential/2" do
     test "inserts a new active credential and retires the previous one, never returning the secret in a loggable form" do
       account = create_account!(%{provider: :claude, slug: "rotate-acct"})

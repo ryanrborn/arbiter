@@ -81,7 +81,8 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "{:error, :not_supported} from a tracker adapter that cannot link"},
 
     # --- worker.ex ---
-    {Arbiter.Worker, :fail, 2,
+    # fail/3 since bd-92mx1m (`slot_handoff:`); /1 and /2 are its defaults.
+    {Arbiter.Worker, :fail, 3,
      "the public sink every failure arrives at, not a guard of its own"},
     {Arbiter.Worker, :fail_stopped, 2, "records an externally stopped worker"},
     {Arbiter.Worker, :fail_missing_worktree, 1,

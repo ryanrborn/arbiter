@@ -302,6 +302,86 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
     test "no open findings means no gap — a round-1 APPROVE is untouched by this guard" do
       refute ReviewFindings.gap?(ReviewFindings.approval_gap([], "VERDICT: APPROVE", nil))
     end
+
+    test "an ADDRESSED claim citing a dotfile survives the backstop when that dotfile was touched",
+         %{open: open} do
+      # bd-bm6bfs (emr-8fqbng, MR !294): the finding and its disposition both
+      # cite `.gitlab-ci.yml`. `git diff --name-only` reports the leading dot
+      # too, so the touched set below is exactly what a real diff produces.
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — `.gitlab-ci.yml:57` now includes the missing glob
+      VERIFICATION: FULL
+      """
+
+      touched = MapSet.new([".gitlab-ci.yml"])
+
+      refute ReviewFindings.gap?(ReviewFindings.approval_gap(open, approve, touched))
+    end
+  end
+
+  describe "approval_gap/3 — bd-bm6bfs (emr-8fqbng round 2, false park on a dispositioned APPROVE)" do
+    setup do
+      # The exact round-1 findings text persisted for emr-8fqbng (MR !294),
+      # read verbatim from `review_gate_rounds.findings` for
+      # run_id=0ddfed09-50cc-43df-aa38-8b9d59a2f2d9 (round 1, 2026-09-24
+      # 00:56:40Z) — the round the incident's round-2 APPROVE was actually
+      # judged against, not the later request-changes round at 01:12:29Z.
+      round1 = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [MET] No `minio/minio` or `minio/mc` Docker Hub references remain in `.gitlab-ci.yml` or other CI/dev config; every one points to a pinned `quay.io/minio/...` tag — confirmed via repo-wide grep (`.gitlab-ci.yml:35`, `.gitlab-ci.yml:108`, `docker-compose.yml:14` all use `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`; no other hits anywhere, including `ansible/`).
+      - [NOT MET] The MR's own pipeline gets past 'prepare environment' on the test, coverage and visual jobs, and those jobs pass — only `visual` actually ran and passed (job 16696508264, pipeline 2877022362, confirmed live: successfully pulled `quay.io/minio/minio:RELEASE...` and completed). `test` and `coverage` never appear in the pipeline's job list at all (verified twice via `GET /pipelines/2877022362/jobs?per_page=100`) because their `rules: changes:` globs (`.gitlab-ci.yml:48-56`, `.gitlab-ci.yml:199-208`) don't include `.gitlab-ci.yml`/`docker-compose.yml`, unlike `visual`'s rule (`.gitlab-ci.yml:113-121`) which does. So this MR's pipeline supplies zero direct evidence that the fixed image works under the `test`/`coverage` jobs' execution context.
+      Findings:
+      1. **Major** — `.gitlab-ci.yml:48-56` (and mirrored at `.gitlab-ci.yml:199-208` for `coverage`, which additionally `needs: test`): the `test` job's rule `changes:` list (`lib/**/*`, `test/**/*`, `mix.exs`, `mix.lock`, `config/**/*`, `priv/**/*`, `assets/**/*`, `rel/**/*`) omits `.gitlab-ci.yml`, so for an MR that only edits `.gitlab-ci.yml`/`docker-compose.yml` — exactly this MR — GitLab CI never creates the `test` or `coverage` jobs. Live confirmation: pipeline `2877022362` for HEAD `2218e545` contains only `visual` and the five `audit:*` jobs; no `test`/`coverage` job exists in the run at all.
+         - Failure scenario: acceptance criterion 2 requires this MR's own pipeline to show `test`, `coverage`, and `visual` getting past 'prepare environment' and passing. Since `test`/`coverage` never start, there is no pipeline evidence — only inference from `visual`'s success — that the image pull, `MINIO_KMS_SECRET_KEY` handshake, and SSE-S3 behavior work correctly under the `test` job's 4-way `parallel` matrix or the `coverage` merge step.
+         - Suggested fix: add `".gitlab-ci.yml"` to the `changes:` globs for the `test` job (`.gitlab-ci.yml:49-56`) and `coverage` job (`.gitlab-ci.yml:200-207`), mirroring what `visual`'s rule already does at `.gitlab-ci.yml:113-121`. Push that as part of this MR (or a fixup commit) so the pipeline actually exercises `test`/`coverage`, then attach their passing results as evidence before merge. This also fixes the underlying gap for any future CI-only change.
+      The image-reference change itself is correct and minimal: `command`, `alias`, and the SSE/KMS variables are untouched in both `.gitlab-ci.yml` services, `docker-compose.yml` was updated identically, and I independently confirmed the pinned tag `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` exists and is pullable (`docker manifest inspect` succeeded) and that the `visual` job in this MR's real pipeline pulled it and passed. The blocking issue is purely that criterion 2's required pipeline evidence for `test`/`coverage` doesn't exist yet due to a pre-existing rules gap, not a defect in the image substitution itself.
+      VERIFICATION: FULL
+      arb done
+      """
+
+      {:ok, open: ReviewFindings.extract(round1, 1)}
+    end
+
+    test "the round's own DISPOSITIONS block dispositions every open finding and the APPROVE is accepted",
+         %{open: open} do
+      # The exact round-2 findings text persisted for emr-8fqbng, read
+      # verbatim from `review_gate_rounds.findings` for
+      # run_id=0d06cc85-7653-48e3-bf21-850a77f109d3 (round 2, 2026-09-24
+      # 01:09:26Z) — the APPROVE the verdict guard wrongly parked because it
+      # thought F1.2/F1.4 were undispositioned, even though the DISPOSITIONS
+      # block plainly addresses them. `.gitlab-ci.yml` is the file both the
+      # findings and the dispositions cite, and it really was touched by the
+      # revise round.
+      round2 = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] No `minio/minio` or `minio/mc` Docker Hub references remain in `.gitlab-ci.yml` or other CI/dev config; every one points to a pinned `quay.io/minio/...` tag — repo-wide grep confirms zero remaining Docker Hub references; `.gitlab-ci.yml:35` (test), `.gitlab-ci.yml:109` (visual), and `docker-compose.yml` all use `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`.
+      - [MET] The MR's own pipeline gets past 'prepare environment' on the test, coverage and visual jobs, and those jobs pass — pipeline `2877033012` (MR !294, commit `313f5efdc7872a58f329815021436aa5c2422432`) shows `test 1/4` through `4/4`, `coverage`, and `visual` all with status `success`. Job traces confirm real execution, not stubs: job `16696573577` (`test 1/4`) shows `Using effective pull policy of [] for container minio` → `Preparing environment` → `Finished in 116.8 seconds`; job `16696573582` (`coverage`) shows `Preparing environment` → `[TOTAL] 84.0%` → `Job succeeded`; job `16696573581` (`visual`) shows the same minio pull → `Preparing environment` → `Job succeeded`. This is the pipeline evidence that was missing in round 1 and is now present because the `changes:` rule gap (F1.2/F1.4) is fixed.
+      Findings: none.
+      VERIFICATION: FULL
+      DISPOSITIONS:
+      - [ADDRESSED] F1.2 — `.gitlab-ci.yml:57` (test job) and `.gitlab-ci.yml:209` (coverage job) now include `".gitlab-ci.yml"` in their `changes:` globs, mirroring `visual`'s existing rule. Confirmed by `git diff e48cfee..HEAD -- .gitlab-ci.yml` (commit `313f5ef`) and by re-reading the current file at both lines.
+      - [ADDRESSED] F1.4 — same fix as F1.2, same locations (`.gitlab-ci.yml:57`, `.gitlab-ci.yml:209`); this id's suggested fix is identical to F1.2's and was implemented verbatim.
+      - [ADDRESSED] F1.3 — the missing pipeline evidence for `test`/`coverage` under the real execution context now exists: live pipeline `2877033012` for commit `313f5ef` shows `test 1/4`-`4/4`, `coverage`, and `visual` all succeeding, with job traces confirming the `quay.io` minio image pulled and the KMS/SSE handshake worked (tests ran to completion, coverage computed `[TOTAL] 84.0%`). This evidence exists because the `.gitlab-ci.yml:57`/`209` fix (same as F1.2) let the jobs actually run.
+      - [OBSOLETE] F1.1 — this id carried no file citation and an empty findings body (just a bare "Findings:" header with no content), duplicating the round-1 reviewer output structure rather than naming a distinct problem. Its only substantive content is captured by F1.2/F1.4, which are addressed above.
+      arb done
+      """
+
+      d = ReviewFindings.dispositions(round2)
+      assert %{status: :addressed} = d["F1.2"]
+      assert %{status: :addressed} = d["F1.3"]
+      assert %{status: :addressed} = d["F1.4"]
+      assert %{status: :obsolete} = d["F1.1"]
+
+      # The revise round's real `git diff --name-only` output — it only
+      # touched `.gitlab-ci.yml`.
+      touched = MapSet.new([".gitlab-ci.yml"])
+
+      refute ReviewFindings.gap?(ReviewFindings.approval_gap(open, round2, touched))
+    end
   end
 
   describe "approval_gap/3 — the bd-1xss5z deadlock shape (bd-c6tdbu)" do
@@ -452,6 +532,43 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
       assert ["VERDICT: APPROVE", "", line | _] = String.split(banner, "\n")
       assert line =~ "PRIOR FINDINGS NOT ACCOUNTED FOR"
       assert banner =~ "F1.1"
+    end
+
+    test "prepend_disposition_banner/2 quotes the disposition line it DID parse for an unproven claim, " <>
+           "so a coordinator can tell a parser miss from a real omission (bd-bm6bfs)" do
+      open =
+        ReviewFindings.extract(
+          "VERDICT: REQUEST_CHANGES\n- **Medium**: x (.gitlab-ci.yml:1)",
+          1
+        )
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — `.gitlab-ci.yml:57` now includes the missing glob
+      """
+
+      # An empty touched set makes the disposition "unproven" even though the
+      # parser plainly saw and parsed it — the false-park shape.
+      gap = ReviewFindings.approval_gap(open, approve, MapSet.new())
+
+      # Isolate the BANNER text itself (not the untouched findings text it
+      # gets spliced next to) — the banner is what a coordinator actually
+      # reads in the park message.
+      banner_text = ReviewFindings.disposition_banner_text(gap, approve)
+
+      assert banner_text =~
+               "[ADDRESSED] F1.1 — `.gitlab-ci.yml:57` now includes the missing glob"
+    end
+
+    test "prepend_disposition_banner/2 says plainly when a finding has no parsed line at all" do
+      open = ReviewFindings.extract("VERDICT: REQUEST_CHANGES\n- **Medium**: x (a/b.ex:1)", 1)
+      gap = ReviewFindings.approval_gap(open, "VERDICT: APPROVE\nok", nil)
+
+      banner_text = ReviewFindings.disposition_banner_text(gap, "VERDICT: APPROVE\nok")
+
+      assert banner_text =~ "no disposition at all"
+      refute banner_text =~ "[ADDRESSED]"
     end
   end
 end

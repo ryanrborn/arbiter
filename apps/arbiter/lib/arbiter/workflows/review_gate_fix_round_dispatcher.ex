@@ -183,7 +183,12 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       [
         revise_feedback: briefing(args),
         review_gate_fix_round_attempts: attempt,
-        review_gate_findings_digest: Map.get(args, :findings_digest)
+        review_gate_findings_digest: Map.get(args, :findings_digest),
+        # bd-92mx1m: automatic. The rejected author carries a slot hand-off
+        # (`meta[:slot_handoff]`), so the round re-enters its task uncapped —
+        # the #1969/#1995 no-deadlock rule. Only a task that released its slot
+        # meanwhile would be deferred, never refused.
+        resume_origin: :automatic
       ]
       |> maybe_put(:claude_command, Map.get(args, :claude_command))
 

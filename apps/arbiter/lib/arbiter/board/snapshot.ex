@@ -688,9 +688,29 @@ defmodule Arbiter.Board.Snapshot do
   # produced the card.
   defp waiting(workers, issues, issues_by_id, worked, now, watchdog_live, all_workers) do
     (waiting_cards(workers, issues_by_id, watchdog_live, all_workers) ++
-       orphaned_cards(issues, worked, now) ++
+       orphaned_cards(issues, orphan_worked(workers, worked), now) ++
        awaiting_verification_cards(issues))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
+  end
+
+  # bd-6lvc1r: `worked` counts every author row for a task regardless of
+  # status, but `:completed` sits in neither `@running_statuses` nor
+  # `@waiting_statuses` — it produces no card of its own. A task whose ONLY
+  # author rows are `:completed` (e.g. a finished CI fix pass, with the issue
+  # still `in_progress`) must not count as worked here, or `orphaned_cards`
+  # skips it and the task vanishes from the board entirely, even though
+  # `classify_columns/2` still calls it `:waiting`. A task with at least one
+  # non-`:completed` row keeps its `waiting_cards`/`running_cards` card, so it
+  # stays in `worked` and `orphaned_cards` correctly leaves it alone.
+  defp orphan_worked(workers, worked) do
+    completed_only =
+      workers
+      |> Enum.group_by(& &1.task_id)
+      |> Enum.filter(fn {_task_id, rows} -> Enum.all?(rows, &(&1.status == :completed)) end)
+      |> Enum.map(&elem(&1, 0))
+      |> MapSet.new()
+
+    MapSet.difference(worked, completed_only)
   end
 
   # bd-9so315: a task merged but parked until someone restarts the server and
@@ -842,7 +862,7 @@ defmodule Arbiter.Board.Snapshot do
         difficulty: Map.get(issue, :difficulty),
         workspace_id: Map.get(issue, :workspace_id),
         status: :in_progress,
-        reason: "worker stopped — resume or close",
+        reason: orphan_reason(issue),
         mr_ref: Map.get(issue, :pr_ref),
         merger_url: nil,
         merger_status: nil,
@@ -855,6 +875,20 @@ defmodule Arbiter.Board.Snapshot do
       }
       |> workerless_phase()
     end)
+  end
+
+  # bd-6lvc1r: names the park when one is on record (`review_park_reason`,
+  # e.g. `resume_blocked`) so a card produced from a stale/terminal worker row
+  # reads as a specific park rather than the generic "gone" message a truly
+  # workerless issue gets.
+  defp orphan_reason(issue) do
+    case Map.get(issue, :review_park_reason) do
+      reason when is_binary(reason) and reason != "" ->
+        "review-parked (#{reason}) — resume or close"
+
+      _ ->
+        "worker stopped — resume or close"
+    end
   end
 
   @doc """

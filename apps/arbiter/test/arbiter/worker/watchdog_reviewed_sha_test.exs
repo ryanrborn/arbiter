@@ -255,6 +255,11 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
 
       # One poll's worth of forge traffic, not an unbounded retry storm.
       assert StubMerger.get_count("!rsha5") <= 2
+
+      # bd-92mx1m: the worker was failed only so the review round can replace
+      # it — a slot hand-off, not a park — so the approved task keeps its slot
+      # and the round re-enters it uncapped.
+      assert Worker.state(pid).meta[:slot_handoff] == true
     end
   end
 

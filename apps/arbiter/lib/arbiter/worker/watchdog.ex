@@ -530,15 +530,31 @@ defmodule Arbiter.Worker.Watchdog do
     * `{:worker, status}` — no Watchdog, but a worker is still active
       (`:awaiting_review` here means a parked worker whose Watchdog died —
       `restart/1` is the repair for that, not a worker-less retry);
+    * `{:subordinate, registry_key}` — a fix pass or conflict resolver
+      (`<task_id>:fixpass` / `<task_id>:conflict`) is still working the PR.
+      It is about to push to the branch, and the task's own key may hold no
+      active worker at all while it runs — the v0.1.72 incident, where the
+      retry started beside a live `:fixpass` and gave up on the red pipeline
+      that pass was fixing;
     * `nil` — nobody: no Watchdog, and no worker, or only a terminal one.
   """
-  @spec live_merge_owner(String.t()) :: :watchdog | {:worker, atom()} | nil
+  @spec live_merge_owner(String.t()) ::
+          :watchdog | {:worker, atom()} | {:subordinate, String.t()} | nil
   def live_merge_owner(task_id) when is_binary(task_id) do
     cond do
       is_pid(whereis(task_id)) -> :watchdog
       (status = worker_status(task_id)) in @active_worker_statuses -> {:worker, status}
+      (sub = active_subordinate(task_id)) != nil -> {:subordinate, sub.registry_key}
       true -> nil
     end
+  end
+
+  defp active_subordinate(task_id) do
+    Worker.active_subordinate(task_id)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp worker_status(task_id) do
@@ -1499,15 +1515,17 @@ defmodule Arbiter.Worker.Watchdog do
   # no auto-resume): nobody is attached to the PR any more, so anything that
   # needs a new commit or a new review round is a human's call. What it does:
   #
-  #   * waits out the transient blockers — a draft PR, CI running / queued, a
-  #     not-yet-created check suite (bounded by `@not_started_grace_polls`, as
-  #     live), undecided coverage;
+  #   * waits out the transient blockers — a draft PR, CI running / queued,
+  #     CI red (a re-run or a new pipeline can clear it; see
+  #     `detached_ci_red/1`), a not-yet-created check suite (bounded by
+  #     `@not_started_grace_polls`, as live), undecided coverage;
   #   * merges through `guarded_merge_decision/1` + the zero-net-diff guard —
   #     the stale-reviewed-SHA guard, the coverage decision, the
   #     base-merge-only exemption, exactly as a live Watchdog would;
   #   * retries transient forge refusals (405/409/5xx/network), bounded;
-  #   * on anything else — a stale head, an empty diff, red CI, a conflict, a
-  #     non-transient refusal that keeps failing — pages the coordinator ONCE
+  #   * on anything else — a stale head, an empty diff, a conflict, a
+  #     non-transient refusal that keeps failing, a wait past `max_wait_ms` —
+  #     pages the coordinator ONCE
   #     and latches the stamp escalated, so no later sweep or boot re-arms it.
   #
   # The baseline is the stamp's `reviewed_sha`, seeded into `reviewed_sha` at
@@ -1587,13 +1605,50 @@ defmodule Arbiter.Worker.Watchdog do
         )
 
       ci_failed?(result) ->
-        give_up_retry(state, :ci_failed)
+        detached_ci_red(state)
 
       not is_nil(block) ->
         give_up_retry(state, {:blocked, block})
 
       true ->
         detached_merge(%{state | not_started_polls: 0})
+    end
+  end
+
+  # Red CI on an approved PR is a wait, not a verdict: a re-run on the same
+  # head, a fix on the base branch followed by a fresh pipeline, or a new head
+  # (which the stale-SHA guard in `detached_merge/1` still has to accept) can
+  # all turn it green, and nobody attached to the PR will tell us. Giving up
+  # here was the v0.1.72 regression — emricare/tonic !292 sat green and
+  # unmerged for half an hour after an infra failure cleared, because the
+  # retry had paged "abandoned" on the red pipeline and latched the stamp.
+  #
+  # The coordinator hears about the red pipeline once per pending merge (the
+  # stamp records it, so neither a restart nor the sweeper re-arming the retry
+  # repeats it) and the wait stays bounded by `max_wait_ms` like every other.
+  defp detached_ci_red(state) do
+    unless retry_wait_exhausted?(state), do: notify_ci_red_once(state)
+    detached_wait(state, "CI is failing; waiting for a re-run or a new pipeline")
+  end
+
+  defp notify_ci_red_once(state) do
+    case PendingMerge.note_block(state.task_id, :ci_failed) do
+      :first ->
+        Logger.info(
+          "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} CI is red " <>
+            "on the approved PR; watching for a green pipeline"
+        )
+
+        safe(fn ->
+          Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+            snapshot(state),
+            state.mr_ref,
+            :ci_failed
+          )
+        end)
+
+      _already_or_error ->
+        :ok
     end
   end
 
@@ -3179,9 +3234,25 @@ defmodule Arbiter.Worker.Watchdog do
   # requires the prior worker to be in a terminal state before it re-attaches).
   # What changes is what happens next — a bounded auto-resume, or, once that
   # budget is spent, an escalation that names the spent budget explicitly.
+  #
+  # bd-92mx1m: the failure is a hand-off (`slot_handoff: true`), not a park —
+  # the task keeps its slot so the auto-resume re-enters it uncapped, exactly
+  # as it would a fix round. Every arm that gives up on the resume drops the
+  # hand-off (`release_slot_handoff/1`) before paging, and only then is the
+  # worker parked for a human.
   defp handle_review_timeout(state, cap) do
-    safe(fn -> Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}) end)
+    safe(fn ->
+      Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}, slot_handoff: true)
+    end)
+
     attempt_auto_resume(state)
+  end
+
+  # The worker may already be gone — a deferred retry's own resume stops it —
+  # in which case there is nothing left holding the slot to release.
+  defp release_slot_handoff(state) do
+    safe(fn -> Worker.clear_slot_handoff(state.worker_pid) end)
+    :ok
   end
 
   # bd-di4t6d: one auto-resume decision, reachable twice — once from the poll
@@ -3518,6 +3589,8 @@ defmodule Arbiter.Worker.Watchdog do
   # "awaiting_review is stuck" notification is deliberately NOT also sent here,
   # because the whole point of this arm is one actionable message.
   defp park_and_escalate_resume_block(state, attempts, reason) do
+    release_slot_handoff(state)
+
     case safe(fn -> Arbiter.Tasks.ReviewPark.park(state.task_id, :resume_blocked) end) do
       {:ok, :already_parked, _issue} ->
         Logger.info(
@@ -3560,6 +3633,8 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp escalate_auto_resume_give_up(state, snap, attempts, reason) do
+    release_slot_handoff(state)
+
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} not auto-resumed " <>
         "(#{inspect(reason)}, #{attempts}/#{state.max_auto_resumes} attempts used); " <>
@@ -4332,8 +4407,12 @@ defmodule Arbiter.Worker.Watchdog do
 
     if state.max_auto_resumes > 0 and attempts < state.max_auto_resumes do
       # `Dispatch.resume/2` requires the prior worker to be terminal before it
-      # re-attaches, exactly as on the awaiting-review-timeout path.
-      safe(fn -> Worker.fail(state.worker_pid, {:unreviewed_head, head}) end)
+      # re-attaches, exactly as on the awaiting-review-timeout path — and, as
+      # there, the failure is a slot hand-off (bd-92mx1m), released by every
+      # give-up arm.
+      safe(fn ->
+        Worker.fail(state.worker_pid, {:unreviewed_head, head}, slot_handoff: true)
+      end)
 
       state = %{
         state

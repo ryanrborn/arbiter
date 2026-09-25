@@ -106,6 +106,11 @@ defmodule ArbiterWeb.Router do
 
       live("/skills", SkillIndexLive)
 
+      # Provider accounts (bd-cb86s4): pools, pace, concurrency, credential
+      # health and cost per account. Read-only while
+      # `:provider_accounts_enabled` is off.
+      live("/providers", ProvidersLive)
+
       # The loop-engineering proposal queue (bd-9j2g3x). Read + decide only —
       # nothing here applies itself.
       live("/loop", LoopProposalIndexLive)

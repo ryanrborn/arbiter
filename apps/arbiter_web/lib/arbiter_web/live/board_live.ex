@@ -94,6 +94,7 @@ defmodule ArbiterWeb.BoardLive do
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
+  alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.Watchdog
 
   @tasks_topic "tasks"
@@ -325,7 +326,33 @@ defmodule ArbiterWeb.BoardLive do
   # and let it finish its own way to review and a merge request. The FSM, not
   # the board, decides whether that is legal from where the card actually sits
   # — a review rejection parks at :failed and refuses.
+  #
+  # bd-92mx1m: a worker parked on a question released its task's slot, so
+  # letting it carry on is a new admission — at a full cap it stays parked and
+  # the flash names the cap and what holds it. No override here: going over the
+  # cap is `arb worker resume --force` / MCP `force: true`, which is recorded.
   defp proceed(socket, id) do
+    case proceed_slot(id) do
+      :ok -> do_proceed(socket, id)
+      {:error, message} -> put_flash(socket, :error, "#{id} could not proceed: #{message}")
+    end
+  end
+
+  # Only a worker the FSM would actually un-park (`:awaiting`) is gated: any
+  # other status gets `Worker.resume/1`'s own, more useful, refusal.
+  defp proceed_slot(id) do
+    with %{status: :awaiting} <- Worker.state(id),
+         {:ok, %Issue{} = task} <- Ash.get(Issue, id),
+         {:error, {:slot_cap_full, info}} <- ResumeSlot.admit(task, origin: :human) do
+      {:error, ResumeSlot.refusal_message(info)}
+    else
+      _ -> :ok
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp do_proceed(socket, id) do
     case Worker.resume(id) do
       :ok ->
         socket
