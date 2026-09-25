@@ -431,7 +431,12 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
 
     events = events_for(task_id)
     assert length(events) == 2
-    assert Enum.map(events, & &1.session_id) |> Enum.sort() == ["session-review-bbbb", "session-work-aaaa"]
+
+    assert Enum.map(events, & &1.session_id) |> Enum.sort() == [
+             "session-review-bbbb",
+             "session-work-aaaa"
+           ]
+
     assert Enum.map(events, & &1.cost_usd) |> Enum.sort() == [0.11, 0.22]
   end
 

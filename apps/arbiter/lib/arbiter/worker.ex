@@ -1764,10 +1764,6 @@ defmodule Arbiter.Worker do
   # implementer (meta.role == :implementer) a `:impl` row; everything else
   # writes `:work`. Missing fields are fine — we record what we have rather
   # than dropping the row.
-  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   # Mirrors `Arbiter.Usage.Event`'s `:refresh_snapshot` accept list — the
   # identity fields (`task_id`, `session_id`, `step`, `base_task_id`, `role`,
   # `source`) never change on a refresh, only the measured/known fields do.
@@ -1792,6 +1788,10 @@ defmodule Arbiter.Worker do
     :raw
   ]
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp record_usage_event(%State{} = state, %{} = session, exit_status) do
     usage =
       session
