@@ -70,15 +70,18 @@ defmodule Arbiter.Worker.StepSummary do
   # is what makes a new shape discoverable instead of silently swallowed —
   # grep worker logs for this message to find shapes worth a proper clause.
   def output_summary(term, redact_values) do
+    summary =
+      term
+      |> stringify_unrecognized_output()
+      |> redact(redact_values)
+      |> truncate(@output_summary_max)
+
     Logger.warning(
       "Arbiter.Worker.StepSummary.output_summary/2: unrecognized step output shape, " <>
-        "degrading instead of crashing: #{inspect(term, limit: 20)}"
+        "degrading instead of crashing: #{summary}"
     )
 
-    term
-    |> stringify_unrecognized_output()
-    |> redact(redact_values)
-    |> truncate(@output_summary_max)
+    summary
   end
 
   defp stringify_unrecognized_output(%{"message" => message}) when is_binary(message),

@@ -75,6 +75,22 @@ defmodule Arbiter.Worker.StepSummaryTest do
     end
   end
 
+  describe "output_summary/2 redacts before logging unrecognized shapes" do
+    test "a secret embedded in an unrecognized payload is redacted in the log line" do
+      payload = %{"message" => "cannot kill task: token=super-secret-value failed"}
+
+      log =
+        capture_log(fn ->
+          result = StepSummary.output_summary(payload, ["super-secret-value"])
+          assert result =~ "[REDACTED]"
+          refute result =~ "super-secret-value"
+        end)
+
+      assert log =~ "[REDACTED]"
+      refute log =~ "super-secret-value"
+    end
+  end
+
   describe "output_summary/2 known shapes are unchanged (regression)" do
     test "nil still summarizes to an empty string" do
       assert StepSummary.output_summary(nil) == ""

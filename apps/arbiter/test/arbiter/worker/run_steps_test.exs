@@ -375,4 +375,49 @@ defmodule Arbiter.Worker.RunStepsTest do
     assert step.is_error == false
     assert step.output_summary =~ "cannot kill task"
   end
+
+  # bd-9isnkx finding 2: the real crash (bd-2exkl0) hit `output_summary/2` via
+  # the ERROR-state clause at `claude_session.ex:850`, not the DONE-state one
+  # above. `tool_step_error_reason/1` falls back to `tool_info.output` when
+  # `tool_info.error` is absent, which is how the kill-failure map reached
+  # `output_summary/2` as `error` on the crash stack. This fixture reproduces
+  # that exact path.
+  test "an agy ERROR tool step whose output falls back to a `cannot kill task` object writes a row instead of crashing (bd-9isnkx)" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    run_id = Ash.UUID.generate()
+
+    kill_failure = %{
+      "message" =>
+        "cannot kill task \"d36d3e03-6627-4b7a-892e-0e8d80f5f65c/task-46\": task not found"
+    }
+
+    error_event = %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 3,
+        "state" => "ERROR",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "duration_seconds" => 0.01,
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "some-background-command"},
+          "output" => kill_failure
+        }
+      }
+    }
+
+    session = new_session(task_id, run_id: run_id, provider: "gemini")
+
+    log =
+      capture_log(fn ->
+        _session = feed(session, [error_event])
+      end)
+
+    assert log =~ "output_summary"
+
+    assert [step] = steps_for(task_id)
+    assert step.is_error == true
+    assert step.output_summary =~ "cannot kill task"
+  end
 end
