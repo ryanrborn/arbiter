@@ -1768,6 +1768,30 @@ defmodule Arbiter.Worker do
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  # Mirrors `Arbiter.Usage.Event`'s `:refresh_snapshot` accept list — the
+  # identity fields (`task_id`, `session_id`, `step`, `base_task_id`, `role`,
+  # `source`) never change on a refresh, only the measured/known fields do.
+  @refresh_snapshot_fields [
+    :workspace_id,
+    :repo,
+    :model,
+    :provider,
+    :provider_account_id,
+    :provider_credential_id,
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note,
+    :duration_ms,
+    :exit_status,
+    :worker_run_id,
+    :occurred_at,
+    :raw
+  ]
+
   defp record_usage_event(%State{} = state, %{} = session, exit_status) do
     usage =
       session
@@ -1832,16 +1856,34 @@ defmodule Arbiter.Worker do
       role: role_to_usage_step(role)
     }
 
-    case Ash.create(Arbiter.Usage.Event, attrs) do
-      {:ok, _row} ->
-        :ok
+    case existing_session_event(attrs.session_id, attrs.task_id) do
+      nil ->
+        case Ash.create(Arbiter.Usage.Event, attrs) do
+          {:ok, _row} ->
+            :ok
 
-      {:error, reason} ->
-        Logger.warning(
-          "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
-        )
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
 
-        :error
+            :error
+        end
+
+      existing ->
+        refresh_attrs = Map.take(attrs, @refresh_snapshot_fields)
+
+        case Ash.update(existing, refresh_attrs, action: :refresh_snapshot) do
+          {:ok, _row} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 refresh swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
+
+            :error
+        end
     end
   rescue
     e ->
@@ -1850,6 +1892,24 @@ defmodule Arbiter.Worker do
       )
 
       :error
+  end
+
+  # bd-28t80i: a repeated `(task_id, session_id)` means agy resumed the SAME
+  # conversation and is re-reporting its whole running total — see the
+  # `:refresh_snapshot` action's moduledoc note on `Arbiter.Usage.Event`. A
+  # nil/blank `session_id` (most fixtures, and any adapter whose stream never
+  # carries one) always inserts a fresh row, matching the pre-existing
+  # behavior. Claude's distinct-session_id-per-pass property means this never
+  # matches across genuinely separate sessions.
+  defp existing_session_event(session_id, _task_id) when session_id in [nil, ""], do: nil
+
+  defp existing_session_event(session_id, task_id) do
+    Arbiter.Usage.Event
+    |> Ash.Query.filter(session_id == ^session_id and task_id == ^task_id)
+    |> Ash.Query.sort(inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
   end
 
   # bd-cryhwk: terminate-time backstop for `record_usage_event/3`. Every

@@ -267,6 +267,174 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert event.cost_note =~ "error"
   end
 
+  # bd-28t80i: agy's `result.usage` is a running total *since session start*,
+  # not a per-invocation delta — confirmed live on task bd-gjw1ze, where one
+  # `session_id` produced two ledger rows (18:05:35Z in=2,187,044 out=28,973
+  # dur=384.8s; 18:06:11Z in=2,273,134 out=30,637 dur=421.2s) and the second
+  # row's duration was measured from session start exactly like the first's,
+  # not a ~36s increment — proof the CLI re-reports the whole session's
+  # counters on every terminal event, not just the latest turn's. A worker
+  # respawn (nudge / auto-resume) that resumes the same agy session_id then
+  # produces a second `result` carrying that same running total, and naively
+  # inserting it as a second row makes every aggregate sum double-counts the
+  # first row's tokens (and `cache_read_tokens` identically) while also
+  # inflating the reported session count. Fixed by having
+  # `record_usage_event/3` update the existing row for a repeated
+  # `(task_id, session_id)` in place instead of inserting a new one — this
+  # session_id is unique to genuinely-resumed agy runs; a real Claude
+  # multi-pass task keeps a distinct `session_id` per pass (see
+  # `respawn_provider_test.exs`) and is unaffected.
+  test "a resumed agy session (same session_id) updates the existing ledger row instead of adding a second one" do
+    task_id = "bd-ledgeragy-resume-#{System.unique_integer([:positive])}"
+    session_id = "7fea938d-8f4e-4093-a086-305e5f39b379"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    first_events =
+      [
+        Jason.encode!(%{"event" => "init", "conversation_id" => session_id}),
+        Jason.encode!(%{
+          "event" => "result",
+          "result" => %{
+            "status" => "SUCCESS",
+            "duration_seconds" => 384.8,
+            "usage" => %{
+              "input_tokens" => 2_187_044,
+              "output_tokens" => 28_973,
+              "thinking_tokens" => 0,
+              "cache_read_tokens" => 17_769_451,
+              "total_tokens" => 2_216_017
+            }
+          }
+        })
+      ]
+      |> Enum.join("\n")
+
+    first_path = Path.join(cwd, "agy-resume-first-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(first_path, first_events <> "\n")
+
+    {:ok, _port1} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", first_path],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    assert [first_event] = events_for(task_id)
+    assert first_event.tokens_in == 2_187_044
+
+    # The worker respawns the same conversation (same session_id) — agy
+    # re-reports the WHOLE session's running total, not just the delta.
+    second_events =
+      [
+        Jason.encode!(%{"event" => "init", "conversation_id" => session_id}),
+        Jason.encode!(%{
+          "event" => "result",
+          "result" => %{
+            "status" => "SUCCESS",
+            "duration_seconds" => 421.2,
+            "usage" => %{
+              "input_tokens" => 2_273_134,
+              "output_tokens" => 30_637,
+              "thinking_tokens" => 0,
+              "cache_read_tokens" => 17_769_451,
+              "total_tokens" => 2_303_771
+            }
+          }
+        })
+      ]
+      |> Enum.join("\n")
+
+    second_path = Path.join(cwd, "agy-resume-second-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(second_path, second_events <> "\n")
+
+    {:ok, _port2} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", second_path],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok =
+      wait_until(fn ->
+        case events_for(task_id) do
+          [event] -> event.tokens_in == 2_273_134
+          _ -> false
+        end
+      end)
+
+    :ok = GenServer.stop(pid, :normal)
+
+    assert [event] = events_for(task_id)
+    assert event.session_id == session_id
+    assert event.tokens_in == 2_273_134
+    assert event.tokens_out == 30_637
+    assert event.cache_read_tokens == 17_769_451
+  end
+
+  # bd-28t80i AC6/AC7 regression: the `(task_id, session_id)` refresh must
+  # only collapse a genuinely REPEATED session_id, never two real, distinct
+  # sessions on the same task (e.g. a Claude work pass followed by a
+  # ReviewGate review/impl pass, each with its own session_id). Two Claude
+  # `result` events on the same task_id but different session_ids must
+  # remain two separate rows.
+  test "two distinct sessions on the same task (multi-pass) each keep their own ledger row" do
+    task_id = "bd-ledgermultipass-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    build_result = fn session_id, cost ->
+      [
+        Jason.encode!(%{
+          "type" => "system",
+          "subtype" => "init",
+          "session_id" => session_id
+        }),
+        Jason.encode!(%{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "result" => "done",
+          "total_cost_usd" => cost,
+          "usage" => %{"input_tokens" => 100, "output_tokens" => 50}
+        })
+      ]
+      |> Enum.join("\n")
+    end
+
+    first_path = Path.join(cwd, "multipass-first-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(first_path, build_result.("session-work-aaaa", 0.11) <> "\n")
+
+    {:ok, _port1} =
+      ClaudeSession.start(owner: pid, worktree_path: cwd, command: ["cat", first_path])
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+
+    second_path = Path.join(cwd, "multipass-second-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(second_path, build_result.("session-review-bbbb", 0.22) <> "\n")
+
+    {:ok, _port2} =
+      ClaudeSession.start(owner: pid, worktree_path: cwd, command: ["cat", second_path])
+
+    :ok = wait_until(fn -> length(events_for(task_id)) == 2 end)
+
+    :ok = GenServer.stop(pid, :normal)
+
+    events = events_for(task_id)
+    assert length(events) == 2
+    assert Enum.map(events, & &1.session_id) |> Enum.sort() == ["session-review-bbbb", "session-work-aaaa"]
+    assert Enum.map(events, & &1.cost_usd) |> Enum.sort() == [0.11, 0.22]
+  end
+
   # P9 (bd-al9qqe, docs/provider-account-design.md §8): every code path that
   # writes `usage_events.workspace_id` must also write `provider_account_id`.
   test "a task session's ledger row carries the workspace's linked provider_account_id" do
