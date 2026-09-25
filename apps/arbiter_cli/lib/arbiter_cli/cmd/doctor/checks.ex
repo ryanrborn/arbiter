@@ -473,7 +473,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp security_defaults_result(offenders) do
     detail =
-      Enum.map_join(offenders, "; ", fn {name, missing} -> "#{name}: #{Enum.join(missing, ", ")}" end)
+      Enum.map_join(offenders, "; ", fn {name, missing} ->
+        "#{name}: #{Enum.join(missing, ", ")}"
+      end)
 
     %Result{
       name: "workspace safe-default categories",

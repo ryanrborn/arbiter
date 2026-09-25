@@ -265,7 +265,12 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       p =
         SecurityPolicy.merge(SecurityPolicy.base(), %{
           "permissions" => %{
-            "safe_defaults" => ["no_destructive_fs", "no_force_push", "no_secret_reads", "no_outside_writes"]
+            "safe_defaults" => [
+              "no_destructive_fs",
+              "no_force_push",
+              "no_secret_reads",
+              "no_outside_writes"
+            ]
           }
         })
 
@@ -273,14 +278,17 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert :no_pr_create in p.permissions.safe_defaults
       assert :no_async_wait in p.permissions.safe_defaults
       assert :no_gh_publish in p.permissions.safe_defaults
-      assert Enum.sort(p.permissions.safe_defaults) == Enum.sort(SecurityPolicy.safe_default_categories())
+
+      assert Enum.sort(p.permissions.safe_defaults) ==
+               Enum.sort(SecurityPolicy.safe_default_categories())
     end
 
     test "an empty legacy safe_defaults no longer opts the domain out (must exclude by name now)" do
       p =
         SecurityPolicy.merge(SecurityPolicy.base(), %{"permissions" => %{"safe_defaults" => []}})
 
-      assert Enum.sort(p.permissions.safe_defaults) == Enum.sort(SecurityPolicy.safe_default_categories())
+      assert Enum.sort(p.permissions.safe_defaults) ==
+               Enum.sort(SecurityPolicy.safe_default_categories())
     end
 
     test "unknown category names in safe_defaults_exclude are dropped" do
@@ -512,7 +520,10 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
       summary = SecurityPolicy.resolve(%{config: config}) |> SecurityPolicy.summary()
 
-      assert Enum.sort(summary["safe_defaults_exclude"]) == ["no_public_upload", "no_secret_reads"]
+      assert Enum.sort(summary["safe_defaults_exclude"]) == [
+               "no_public_upload",
+               "no_secret_reads"
+             ]
     end
   end
 end

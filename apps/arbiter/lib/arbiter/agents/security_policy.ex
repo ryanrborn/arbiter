@@ -475,7 +475,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
   end
 
   defp merge_permissions(base, raw) do
-    exclude = union(base.safe_defaults_exclude, parse_category_list(get(raw, :safe_defaults_exclude)))
+    exclude =
+      union(base.safe_defaults_exclude, parse_category_list(get(raw, :safe_defaults_exclude)))
 
     %{
       mode: parse_mode(get(raw, :mode), base.mode),
