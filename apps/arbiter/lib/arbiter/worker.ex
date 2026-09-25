@@ -4457,6 +4457,7 @@ defmodule Arbiter.Worker do
   # latest session id, so we never stack multiple `--resume` flags.
   defp respawn_with_resume(%State{meta: meta} = state, session_id, fingerprint, session) do
     spawn_args = meta && Map.get(meta, :claude_spawn)
+
     prompt =
       resume_continue_prompt(session_stop_category(session), state.task_id,
         denied_command: Map.get(session, :denied_command_line)

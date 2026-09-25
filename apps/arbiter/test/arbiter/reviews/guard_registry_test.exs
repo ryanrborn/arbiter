@@ -85,6 +85,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker, :fail, 3,
      "the public sink every failure arrives at, not a guard of its own"},
     {Arbiter.Worker, :fail_stopped, 2, "records an externally stopped worker"},
+    {Arbiter.Worker, :fail_unresumable, 3,
+     "bd-7wymls: routes a stop the resume path gave up on to fail_stopped/2, or a " <>
+       "denied task-type run to the notes gate; not a review/merge refusal"},
     {Arbiter.Worker, :fail_missing_worktree, 1,
      "no worktree was ever provisioned for the run: infrastructure"},
     {Arbiter.Worker, :fail_workspace_destroyed, 3,
