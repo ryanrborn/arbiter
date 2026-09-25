@@ -176,7 +176,9 @@ defmodule Arbiter.Worker.DriverTest do
 
     test "a :shutdown exit leaves the worker for its own terminate/2", ctx do
       ref = Process.monitor(ctx.driver_pid)
-      :ok = DynamicSupervisor.terminate_child(Arbiter.Workflows.MachineSupervisor, ctx.machine_pid)
+
+      :ok =
+        DynamicSupervisor.terminate_child(Arbiter.Workflows.MachineSupervisor, ctx.machine_pid)
 
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
       assert Worker.state(ctx.worker_pid).status == :running

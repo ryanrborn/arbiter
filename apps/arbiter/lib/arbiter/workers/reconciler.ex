@@ -174,7 +174,10 @@ defmodule Arbiter.Workers.Reconciler do
     {:ok, restamped}
   rescue
     e ->
-      Logger.warning("Workers.Reconciler: shutdown-casualty sweep failed: #{Exception.message(e)}")
+      Logger.warning(
+        "Workers.Reconciler: shutdown-casualty sweep failed: #{Exception.message(e)}"
+      )
+
       {:error, e}
   end
 
