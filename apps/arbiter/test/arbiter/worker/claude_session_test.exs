@@ -1228,6 +1228,74 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       refute "" in lines
     end
 
+    # bd-9isnkx: reproduces the bd-2exkl0 sequence end to end — a reviewer
+    # abandons a background task, agy reports the kill failure as a DONE
+    # tool step whose `tool_info.output` is an object instead of a string,
+    # and (before this fix) `StepSummary.output_summary/2` raised
+    # `FunctionClauseError` from inside `on_port_data/4`, crashing the
+    # worker GenServer before it ever reached the reviewer's `VERDICT:`
+    # line. The review round is recorded by parsing this same rendered
+    # output (`Arbiter.Worker.route_reviewer_completion/1`), so proving the
+    # VERDICT line still renders — and the worker still completes normally —
+    # is what proves the round survives.
+    test "a tool step's kill-failure object payload does not crash the worker, and a later VERDICT still renders (bd-9isnkx AC4)" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-kill-failure")
+      topic = "worker:#{task_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_index" => 7,
+            "state" => "DONE",
+            "step_type" => "tool",
+            "tool_name" => "run_command",
+            "duration_seconds" => 0.01,
+            "tool_info" => %{
+              "name" => "run_command",
+              "parameters" => %{"CommandLine" => "sleep 999 &"},
+              "output" => %{
+                "message" =>
+                  "cannot kill task \"d36d3e03-6627-4b7a-892e-0e8d80f5f65c/task-46\": task not found"
+              }
+            }
+          }
+        },
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "DONE",
+            "text_delta" => "VERDICT: REQUEST_CHANGES\narb done\n"
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+
+      lines = Worker.state(pid).meta.output_lines
+      assert "VERDICT: REQUEST_CHANGES" in lines
+    end
+
     test "abnormal exit before DONE/result still flushes buffered agy text (bd-2fzwlc round 2)" do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("agy-sj-exit-flush")
