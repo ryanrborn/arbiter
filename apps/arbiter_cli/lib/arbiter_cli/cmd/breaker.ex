@@ -126,6 +126,7 @@ defmodule ArbiterCli.Cmd.Breaker do
     end
 
     print_auth_holds(body["auth_holds"] || [])
+    print_credential_watchdog(body["credential_watchdog"] || [])
 
     IO.puts("")
     IO.puts("REGISTERED CALL SITES")
@@ -144,6 +145,28 @@ defmodule ArbiterCli.Cmd.Breaker do
     do: IO.puts("Cleared the #{provider} auth hold.")
 
   defp print_reset(resp), do: IO.puts("Closed #{resp["reset"]} circuit breaker(s).")
+
+  # bd-3kg53c: `CredentialWatchdog`'s own outstanding expiries — including a
+  # `:periodic_probe`-only mark that never opened an `AuthHold` and so never
+  # shows under AUTH HOLDS above. `--auth-hold <provider>` clears these too
+  # (whether or not the hold itself was open), so the same hint line applies.
+  defp print_credential_watchdog([]), do: :ok
+
+  defp print_credential_watchdog(entries) do
+    IO.puts("")
+    IO.puts("CREDENTIAL WATCHDOG (adapters CredentialWatchdog still marks expired)")
+
+    Enum.each(entries, fn e ->
+      gate = if e["gated?"], do: "dispatch REFUSED", else: "escalated only"
+      IO.puts("  [#{gate}] #{e["provider"]}")
+
+      Enum.each(e["sources"] || [], fn s ->
+        IO.puts("      #{s["source"]}: #{s["summary"]}")
+      end)
+
+      IO.puts("      arb breaker reset --auth-hold #{e["provider"]}")
+    end)
+  end
 
   defp print_auth_holds([]), do: :ok
 

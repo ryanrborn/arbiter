@@ -215,6 +215,32 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     :exit, _ -> :ok
   end
 
+  @doc """
+  Unconditionally clear every outstanding expired mark for `adapter`, regardless
+  of which `source` raised it.
+
+  `mark_recovered/3` only clears a mark when the recovering source matches the
+  raising one (`recovers?/2`) — by design, so an unrelated passing signal can't
+  paper over a genuinely expired credential. That means `arb breaker reset
+  --auth-hold <provider>` (which calls `mark_recovered/3` with the default
+  `:worker_report` source via `AuthHold`) silently did nothing for a
+  `:usage_poll`-only mark: `recovers?(:usage_poll, :worker_report)` is `false`,
+  so the CLI printed "cleared" while the mark, and the escalation naming it,
+  stayed outstanding (bd-3kg53c round 2 finding 2). An explicit operator reset
+  is a deliberate override, not a recovery signal that needs to be trusted the
+  same way — so it clears every source's mark for the adapter. Fire-and-forget;
+  best-effort.
+  """
+  @spec clear(module(), GenServer.server()) :: :ok
+  def clear(adapter, server \\ __MODULE__) when is_atom(adapter) do
+    GenServer.cast(server, {:clear, adapter})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   @doc false
   # Point this instance's recovery forwarding at a specific `AuthHold` (tests
   # pairing a private hold with a private watchdog).
@@ -230,6 +256,28 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   @spec reset(GenServer.server()) :: :ok
   def reset(server \\ __MODULE__) do
     GenServer.call(server, :reset)
+  end
+
+  @doc """
+  Every adapter with an outstanding expiry, as a display map — the operator
+  inspection surface bd-3kg53c adds so "what does the Watchdog know" has an
+  answer that doesn't require guessing which adapter to ask `expired?/2`
+  about. `[]` when nothing is expired anywhere, or if the Watchdog cannot be
+  reached (fails open, like `AuthHold.list/1`; a display read).
+
+  Each entry: `%{adapter:, provider:, gated?:, sources: [%{source:, summary:}]}`.
+  `gated?` mirrors `expired?/1` for this adapter (only `:periodic_probe` /
+  `:worker_report` close the dispatch gate — see the moduledoc's `gate_source?/1`
+  discussion); a `:usage_poll`-only entry is an outstanding mailbox episode
+  that is not currently blocking dispatch.
+  """
+  @spec list(GenServer.server()) :: [map()]
+  def list(server \\ __MODULE__) do
+    GenServer.call(server, :list_expired, 1_000)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   @doc """
@@ -304,6 +352,16 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @impl true
+  def handle_call(:list_expired, _from, state) do
+    entries =
+      state.adapters
+      |> Enum.map(fn {adapter, per_source} -> list_entry(state, adapter, per_source) end)
+      |> Enum.reject(&(&1.sources == []))
+
+    {:reply, entries, state}
+  end
+
+  @impl true
   def handle_cast({:mark_expired, adapter, reason, source}, state) do
     if already_expired?(state, adapter, source) do
       # Still outstanding — don't touch `state.adapters`/`state.gate`, but do
@@ -324,6 +382,30 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   @impl true
   def handle_cast({:mark_recovered, adapter, source}, state) do
     {:noreply, on_probe_ok(state, adapter, source)}
+  end
+
+  @impl true
+  def handle_cast({:clear, adapter}, state) do
+    per_source = Map.get(state.adapters, adapter, %{})
+    raised_sources = for {source, status} <- per_source, match?({:expired, _}, status), do: source
+
+    if raised_sources == [] do
+      {:noreply, state}
+    else
+      Logger.info(
+        "CredentialWatchdog: #{adapter_name(adapter)} credentials cleared by operator reset"
+      )
+
+      AuthHold.recovered(adapter, state.auth_hold)
+      Enum.each(raised_sources, &recover_all(adapter, &1))
+
+      {:noreply,
+       %{
+         state
+         | adapters: Map.delete(state.adapters, adapter),
+           gate: Map.put(state.gate, adapter, :ok)
+       }}
+    end
   end
 
   @impl true
@@ -499,8 +581,19 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     |> Enum.any?(&match?({:expired, _}, &1))
   end
 
-  # Send a coordinator escalation to every active workspace. Best-effort — a DB
-  # hiccup or an empty workspace table must not crash the Watchdog.
+  # Send a single coordinator escalation for this expiry event. Best-effort —
+  # a DB hiccup or an empty workspace table must not crash the Watchdog.
+  #
+  # Credentials are host-wide, not per-workspace (the same worker binary and
+  # keyring back every workspace), so one genuinely expired credential is one
+  # event, not one-per-workspace: fanning out to every workspace (the
+  # pre-fix behavior) sent 3 identical escalations for the install's 3
+  # workspaces from a single expiry, which the per-(workspace, adapter,
+  # source) dedupe in `CoordinatorNotifier` can't collapse since each row has
+  # a different `workspace_id`. We pick one workspace — the oldest by its
+  # uuid_v7 id, so the choice is stable across calls — as the addressed
+  # mailbox for the episode; `credential_restored/2` below targets the same
+  # one so the clear lands on the escalation that was actually raised.
   #
   # `gate_closed?` is this adapter's *actual* dispatch-gate state right after
   # this expiry was recorded (see `record_expiry/4` / `gate_source?/1`), not
@@ -509,21 +602,23 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   # never claims dispatches are suspended when they are not (bd-6jjgk0 finding 1).
   defp escalate_all(adapter, %StopReason{} = reason, source, gate_closed?) do
     safe(fn ->
-      workspaces = Ash.read!(Arbiter.Tasks.Workspace)
+      case primary_workspace_id() do
+        nil ->
+          :ok
 
-      Enum.each(workspaces, fn ws ->
-        CoordinatorNotifier.credential_expired(
-          %{workspace_id: ws.id},
-          adapter,
-          reason,
-          source,
-          gate_closed?
-        )
-      end)
+        ws_id ->
+          CoordinatorNotifier.credential_expired(
+            %{workspace_id: ws_id},
+            adapter,
+            reason,
+            source,
+            gate_closed?
+          )
+      end
     end)
   end
 
-  # Mirrors `escalate_all/3`: tells every active workspace's coordinator
+  # Mirrors `escalate_all/3`: tells the same primary workspace's coordinator
   # mailbox that `adapter` recovered, clearing whatever `credential_expired/4`
   # escalation is still outstanding for it (bd-6jjgk0) so the next expiry
   # starts a fresh episode rather than looking like a continuation of this
@@ -533,12 +628,20 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   # `escalate_all/3`.
   defp recover_all(adapter, source) do
     safe(fn ->
-      workspaces = Ash.read!(Arbiter.Tasks.Workspace)
-
-      Enum.each(workspaces, fn ws ->
-        CoordinatorNotifier.credential_restored(%{workspace_id: ws.id}, adapter, source)
-      end)
+      case primary_workspace_id() do
+        nil -> :ok
+        ws_id -> CoordinatorNotifier.credential_restored(%{workspace_id: ws_id}, adapter, source)
+      end
     end)
+  end
+
+  # uuid_v7 primary keys sort chronologically, so the lexically smallest id is
+  # the oldest workspace — a stable, deterministic pick with no extra schema.
+  defp primary_workspace_id do
+    Arbiter.Tasks.Workspace
+    |> Ash.read!()
+    |> Enum.map(& &1.id)
+    |> Enum.min(&<=/2, fn -> nil end)
   end
 
   # Scoped to the adapters we actually probe: an adapter that was marked expired
@@ -612,6 +715,33 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   defp adapter_name(adapter) when is_atom(adapter) do
     adapter |> Module.split() |> List.last()
+  end
+
+  defp list_entry(state, adapter, per_source) do
+    sources =
+      per_source
+      |> Enum.filter(fn {_source, status} -> match?({:expired, _}, status) end)
+      |> Enum.map(fn {source, {:expired, reason_map}} ->
+        %{source: source, summary: Map.get(reason_map, :summary)}
+      end)
+
+    %{
+      adapter: adapter,
+      provider: provider_key(adapter),
+      gated?: Map.get(state.gate, adapter, :ok) != :ok,
+      sources: sources
+    }
+  end
+
+  # The agent-type key ("claude", "codex", "gemini") an operator types —
+  # mirrors `Arbiter.Agents.AuthHold.provider_key/1` so the two operator
+  # surfaces (`arb breaker list`'s `auth_holds` and this `credential_watchdog`
+  # inspection) name providers the same way.
+  defp provider_key(adapter) do
+    case Enum.find(Arbiter.Agents.adapters(), fn {_type, mod} -> mod == adapter end) do
+      {type, _} -> Atom.to_string(type)
+      nil -> adapter_name(adapter) |> String.downcase()
+    end
   end
 
   # opts › Arbiter.Settings › app env › hardcoded default. `nil` at any layer

@@ -1168,6 +1168,52 @@ defmodule Arbiter.Quota.CloudProbeTest do
       send(pid, {:antigravity_refresh_result, antigravity_healthy_result()})
 
       wait_until(fn -> not AuthHold.open?(Arbiter.Agents.Gemini, h) end)
+      wait_until(fn -> not CredentialWatchdog.expired?(Arbiter.Agents.Gemini, w) end)
+    end
+
+    # bd-3kg53c: reproduces the live incident directly — with
+    # `credential_watchdog_adapters: []` (here, the equivalent `adapters: []`
+    # start_link opt: no periodic CLI probe ever runs for this watchdog
+    # instance, same as the Settings override in production), a worker dying
+    # on auth still opens the AuthHold and marks the gate expired, and
+    # dispatch stays refused (`CredentialWatchdog.expired?/1`) until
+    # something clears it. Before bd-21bmdh/bd-1fpjgx that recovery signal
+    # did not exist for Gemini/Antigravity, so the mark was write-once. This
+    # asserts CloudProbe's independent `agy --print "/usage"` poll — which
+    # reads the same credential a worker actually dispatches with, unlike the
+    # retired billed pre-flight probe — is what clears it, with no restart
+    # and no re-enabling the watchdog's own probe.
+    test "Gemini: recovers via the agy usage poll when credential_watchdog_adapters is empty" do
+      {:ok, watchdog} =
+        start_supervised(%{
+          id: make_ref(),
+          start: {CredentialWatchdog, :start_link, [[name: nil, enabled: true, adapters: []]]}
+        })
+
+      {:ok, h} =
+        start_supervised(%{
+          id: make_ref(),
+          start: {AuthHold, :start_link, [[name: nil, credential_watchdog: watchdog]]}
+        })
+
+      :ok = CredentialWatchdog.set_auth_hold(h, watchdog)
+
+      open_hold!(Arbiter.Agents.Gemini, h, watchdog)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+
+      # Nothing probes this adapter — a periodic tick must not (and, per
+      # `adapters: []`, cannot) clear it on its own.
+      send(watchdog, :check)
+      _ = :sys.get_state(watchdog)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog)
+      assert AuthHold.open?(Arbiter.Agents.Gemini, h)
+
+      pid = probe_with(watchdog, h)
+      CloudProbe.probe(pid)
+      send(pid, {:antigravity_refresh_result, antigravity_healthy_result()})
+
+      wait_until(fn -> not AuthHold.open?(Arbiter.Agents.Gemini, h) end)
+      wait_until(fn -> not CredentialWatchdog.expired?(Arbiter.Agents.Gemini, watchdog) end)
     end
 
     test "a neutral outcome does not clear it", %{watchdog: w, hold: h} do
