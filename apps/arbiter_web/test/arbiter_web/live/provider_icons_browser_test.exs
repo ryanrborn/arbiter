@@ -4,12 +4,10 @@ defmodule ArbiterWeb.ProviderIconsBrowserTest do
   browser (bd-aro53b).
 
   `ArbiterWeb.CoreComponents.ProviderIconTest` and `WorkerIndexLiveTest` prove
-  the markup — an `<svg>`, a `<title>`, an `aria-label`. Neither can prove the
-  Antigravity PNG referenced by its embedded `<image>` actually resolves and
-  loads (a 404'd `href` still renders valid, matching markup), or that all
-  three marks paint at a legible, distinct size on a real Running-card-style
-  list in both themes. `ConnCase` has no layout engine and never fetches an
-  image.
+  the markup — an `<svg>`, a `<title>`, an `aria-label`, filter/mask ids. They
+  cannot prove that all three marks actually paint vector content and render
+  at a legible, distinct size on a real Running-card-style list in both
+  themes; `ConnCase` has no layout engine.
 
   So this boots the real endpoint on a real port, starts one worker per
   provider, and drives `scripts/verify_provider_icons.mjs` against it.

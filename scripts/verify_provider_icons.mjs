@@ -116,7 +116,6 @@ function stateScript() {
   return `(() => {
   const icons = [...document.querySelectorAll('#workers svg[role="img"]')]
   const describe = (svg) => {
-    const img = svg.querySelector("image")
     return {
       ariaLabel: svg.getAttribute("aria-label"),
       title: svg.querySelector("title") ? svg.querySelector("title").textContent : null,
@@ -124,8 +123,7 @@ function stateScript() {
         const r = svg.getBoundingClientRect()
         return { width: r.width, height: r.height }
       })(),
-      hasEmbeddedImage: !!img,
-      imageHref: img ? img.getAttribute("href") : null
+      paintedNodes: svg.querySelectorAll("path, ellipse, rect, circle, polygon").length
     }
   }
   return JSON.stringify({
@@ -134,17 +132,6 @@ function stateScript() {
     errored: !!document.querySelector(".phx-error")
   })
 })()`
-}
-
-async function imageLoaded(page, href) {
-  return page.eval(`(() => {
-    return new Promise((resolve) => {
-      const img = new Image()
-      img.onload = () => resolve({ ok: true, w: img.naturalWidth, h: img.naturalHeight })
-      img.onerror = () => resolve({ ok: false })
-      img.src = ${JSON.stringify(href)}
-    })
-  })()`, true)
 }
 
 async function screenshot(cdp, sessionId, name) {
@@ -175,14 +162,7 @@ async function run(page, cdp, sessionId) {
     for (const icon of s.icons) {
       check(`${tag} ${icon.ariaLabel} has a non-zero rendered size`, icon.rect.width > 0 && icon.rect.height > 0, `${icon.rect.width}x${icon.rect.height}`)
       check(`${tag} ${icon.ariaLabel} title matches aria-label`, icon.title === icon.ariaLabel, `title=${icon.title}`)
-    }
-
-    const antigravity = s.icons.find((i) => i.ariaLabel === "Antigravity")
-    if (antigravity && antigravity.hasEmbeddedImage) {
-      const loaded = await imageLoaded(page, antigravity.imageHref)
-      check(`${tag} Antigravity PNG actually loads`, loaded.ok && loaded.w > 0, JSON.stringify(loaded))
-    } else {
-      check(`${tag} Antigravity PNG actually loads`, false, "no <image> found on the Antigravity svg")
+      check(`${tag} ${icon.ariaLabel} actually paints vector content`, icon.paintedNodes > 0, `${icon.paintedNodes} painted node(s)`)
     }
 
     check(`${tag} page healthy`, !s.errored, `phx-error present: ${s.errored}`)
