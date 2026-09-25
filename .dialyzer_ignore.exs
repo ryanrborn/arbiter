@@ -119,8 +119,7 @@
   #   * worker.ex, worker/dispatch.ex — nil-checks on `meta` maps and branch
   #     names that Ash and the mergers type as non-nil but that arrive from
   #     persisted task rows, where a NULL column is one migration away.
-  #   * loop/analysis.ex, arbiter_cli/cmd/self_update.ex — the same shape on
-  #     a report map and a version string.
+  #   * loop/analysis.ex — the same shape on a report map.
   #
   #   `arbiter_cli/cmd/doctor/checks.ex`'s `if dev_install?() do` is
   #   downstream of the same `ArbiterCli.Version.dev_build?/0` constant noted
@@ -130,7 +129,6 @@
   {"lib/arbiter/worker.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :neg_guard_fail},
-  {"lib/arbiter_cli/cmd/self_update.ex", :guard_fail},
 
   # ── 4. MapSet opaqueness (`contract_with_opaque`, `call_without_opaque`) ──
   #
