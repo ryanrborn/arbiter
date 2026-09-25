@@ -307,6 +307,23 @@ defmodule Arbiter.Accounts.ProviderSettingsTest do
     end
   end
 
+  describe "today's dispatch path" do
+    test "Arbiter.Agents resolves each role's adapter from the attached accounts" do
+      ws = workspace!(%{"agent" => %{"type" => "claude"}})
+      codex = account!(:codex, "ps-dispatch-codex")
+      claude = account!(:claude, "ps-dispatch-claude")
+
+      assert Arbiter.Agents.agent_type(ws, :agent) == :claude
+
+      {:ok, ws} = ProviderSettings.add(ws, :implementer, codex.id)
+      {:ok, ws} = ProviderSettings.add(ws, :reviewer, claude.id)
+
+      assert Arbiter.Agents.agent_type(ws, :agent) == :codex
+      assert Arbiter.Agents.agent_type(ws, :review_agent) == :claude
+      assert Arbiter.Agents.for_workspace(ws) == Arbiter.Agents.Codex
+    end
+  end
+
   describe "agent_type/1" do
     test "maps each account provider onto the adapter that runs it" do
       assert ProviderSettings.agent_type(:claude) == "claude"
