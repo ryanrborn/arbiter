@@ -232,6 +232,9 @@ defmodule Arbiter.Application do
   #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
   #     fail the live instance's running runs.
+  #   * reconcile_shutdown_casualties: re-stamp runs the previous node's stop
+  #     failed :machine_died as :interrupted, so the resume sweep below picks
+  #     them up with their slot held (bd-146u20 / #2053).
   #   * reconcile_open_prs: find :in_progress tasks with a pr_ref but no live
   #     worker — the server was killed between `arb done` and the Watchdog being
   #     established. Escalates each to the coordinator. bd-crqku8.
@@ -262,6 +265,7 @@ defmodule Arbiter.Application do
          fn ->
            primary? = Arbiter.SingleInstance.primary?()
            Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
+           Arbiter.Workers.Reconciler.reconcile_shutdown_casualties(primary?: primary?)
            Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(primary?: primary?)
            Arbiter.Workers.Reconciler.reconcile_resumable_tasks(primary?: primary?)
          end},

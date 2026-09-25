@@ -668,6 +668,156 @@ defmodule Arbiter.Workers.ReconcilerTest do
              Reconciler.reconcile_resumable_tasks(primary?: false, resume_fun: resume)
   end
 
+  # ---- bd-146u20 / #2053: work cut off by a restart, PR or not -------------
+
+  defp create_main_run(issue, attrs) do
+    Ash.create!(
+      Run,
+      Map.merge(
+        %{
+          task_id: issue.id,
+          repo: "arbiter",
+          workspace_id: issue.workspace_id,
+          worker_type: :main,
+          started_at: DateTime.add(DateTime.utc_now(), -600, :second)
+        },
+        attrs
+      )
+    )
+  end
+
+  test "resumes an open-PR task whose worker the restart cut off mid-flight" do
+    # The 2026-09-25 deploy restart: a worker revising an already-open PR was
+    # interrupted, and the resume sweep skipped it only because the task had a
+    # pr_ref — the open-PR sweep re-watched the PR and nothing resumed the work.
+    ws = create_workspace()
+    pr_ref = "#{System.unique_integer([:positive])}"
+    issue = create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref})
+    create_main_run(issue, %{status: :interrupted, failure_reason: "server shutdown"})
+
+    test_pid = self()
+    resume = fn %Issue{id: id} -> send(test_pid, {:resumed, id}) && {:ok, %{task_id: id}} end
+
+    assert {:ok, %{resumed: 1, escalated: 0}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+    assert_received {:resumed, id}
+    assert id == issue.id
+  end
+
+  test "still leaves an open-PR task whose last run ended on its own terms to the patrols" do
+    ws = create_workspace()
+    pr_ref = "#{System.unique_integer([:positive])}"
+    issue = create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref})
+    create_main_run(issue, %{status: :review_not_started})
+
+    resume = fn %Issue{} -> flunk("a parked open-PR task must not be resumed") end
+
+    assert {:ok, %{resumed: 0, escalated: 0}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+  end
+
+  describe "reconcile_shutdown_casualties/1" do
+    test "re-stamps a :machine_died run from the shutdown window as :interrupted / server shutdown" do
+      ws = create_workspace()
+      issue = create_issue(ws.id, %{status: :in_progress, pr_ref: "1956"})
+      booted_at = DateTime.utc_now()
+
+      run =
+        create_main_run(issue, %{
+          status: :failed,
+          failure_reason: ":machine_died",
+          exit_code: 143,
+          completed_at: DateTime.add(booted_at, -7, :second)
+        })
+
+      assert {:ok, 1} = Reconciler.reconcile_shutdown_casualties(booted_at: booted_at)
+
+      reloaded = Ash.get!(Run, run.id)
+      assert reloaded.status == :interrupted
+      assert reloaded.failure_reason == "server shutdown"
+      assert reloaded.exit_code == 143
+      assert reloaded.completed_at == run.completed_at
+    end
+
+    test "then the resume sweep resumes it, holding its slot" do
+      ws = create_workspace()
+      issue = create_issue(ws.id, %{status: :in_progress, pr_ref: "2052"})
+      booted_at = DateTime.utc_now()
+
+      create_main_run(issue, %{
+        status: :failed,
+        failure_reason: ":machine_died",
+        completed_at: DateTime.add(booted_at, -7, :second)
+      })
+
+      assert {:ok, 1} = Reconciler.reconcile_shutdown_casualties(booted_at: booted_at)
+      assert Arbiter.Worker.ResumeSlot.cut_off_by_restart?(issue.id)
+
+      test_pid = self()
+      resume = fn %Issue{id: id} -> send(test_pid, {:resumed, id}) && {:ok, %{task_id: id}} end
+
+      assert {:ok, %{resumed: 1, escalated: 0}} =
+               Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+      assert_received {:resumed, id}
+      assert id == issue.id
+    end
+
+    test "leaves a :machine_died run from well before the restart alone" do
+      ws = create_workspace()
+      issue = create_issue(ws.id, %{status: :in_progress})
+      booted_at = DateTime.utc_now()
+
+      run =
+        create_main_run(issue, %{
+          status: :failed,
+          failure_reason: ":machine_died",
+          completed_at: DateTime.add(booted_at, -3_600, :second)
+        })
+
+      assert {:ok, 0} = Reconciler.reconcile_shutdown_casualties(booted_at: booted_at)
+
+      reloaded = Ash.get!(Run, run.id)
+      assert reloaded.status == :failed
+      assert reloaded.failure_reason == ":machine_died"
+    end
+
+    test "leaves other failures from the shutdown window alone" do
+      ws = create_workspace()
+      issue = create_issue(ws.id, %{status: :in_progress})
+      booted_at = DateTime.utc_now()
+
+      run =
+        create_main_run(issue, %{
+          status: :failed,
+          failure_reason: ":auth_expired",
+          completed_at: DateTime.add(booted_at, -7, :second)
+        })
+
+      assert {:ok, 0} = Reconciler.reconcile_shutdown_casualties(booted_at: booted_at)
+      assert Ash.get!(Run, run.id).status == :failed
+    end
+
+    test "skips when primary?: false" do
+      ws = create_workspace()
+      issue = create_issue(ws.id, %{status: :in_progress})
+      booted_at = DateTime.utc_now()
+
+      run =
+        create_main_run(issue, %{
+          status: :failed,
+          failure_reason: ":machine_died",
+          completed_at: DateTime.add(booted_at, -7, :second)
+        })
+
+      assert {:ok, :skipped} =
+               Reconciler.reconcile_shutdown_casualties(primary?: false, booted_at: booted_at)
+
+      assert Ash.get!(Run, run.id).status == :failed
+    end
+  end
+
   # ---- acceptance regression: restart-with-in-flight-work ----------------
 
   test "restart with in-flight work: awaiting_review bead re-watched, un-resumable bead escalated" do

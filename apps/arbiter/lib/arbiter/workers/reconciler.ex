@@ -58,6 +58,13 @@ defmodule Arbiter.Workers.Reconciler do
   # and human-legible on the dashboard's "Completed Workers" view.
   @failure_reason "server restarted"
 
+  # bd-146u20: what `Arbiter.Worker` stamps on a graceful shutdown, and the
+  # `:machine_died` stamp a shutdown used to leave instead. The window covers
+  # systemd's 45s stop timeout plus the restart, with room for a slow deploy.
+  @shutdown_reason "server shutdown"
+  @machine_died_reason ":machine_died"
+  @shutdown_window_ms 300_000
+
   @doc """
   Sweep `:running` Run rows with no live worker and mark them `:failed`.
 
@@ -106,6 +113,90 @@ defmodule Arbiter.Workers.Reconciler do
     e ->
       Logger.warning("Workers.Reconciler: sweep failed: #{Exception.message(e)}")
       {:error, e}
+  end
+
+  @doc """
+  Re-stamp runs a server shutdown recorded as `:failed` / `:machine_died` as
+  what they were: `:interrupted` / "server shutdown". bd-146u20 / #2053.
+
+  Before bd-146u20 an application stop could fail a live worker `:machine_died`
+  (its `Arbiter.Worker.Driver` saw the workflow Machine shut down first and
+  failed the worker ahead of the worker's own terminate/2). That parked resumable
+  work as a failure: the resume sweep passed it over and the task lost its slot.
+  A release still carrying that bug is the one being stopped on the next deploy,
+  so the booting release corrects its rows.
+
+  A `:machine_died` run is a shutdown casualty when it completed within
+  `:shutdown_window_ms` (default #{div(@shutdown_window_ms, 1_000)}s) before this
+  node booted: the stop that killed it is what this boot follows. A genuine
+  machine crash that far from a restart is left alone.
+
+  Run it before `reconcile_resumable_tasks/1`, which then resumes the task with
+  its slot held (`Arbiter.Worker.ResumeSlot.cut_off_by_restart?/1`).
+
+  ## Options
+
+    * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+    * `:booted_at` — when this node booted. Defaults to the VM's start time.
+    * `:shutdown_window_ms` — how long before boot counts as the shutdown.
+  """
+  @spec reconcile_shutdown_casualties(keyword()) ::
+          {:ok, non_neg_integer() | :skipped} | {:error, term()}
+  def reconcile_shutdown_casualties(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      booted_at = Keyword.get_lazy(opts, :booted_at, &vm_booted_at/0)
+      window_ms = Keyword.get(opts, :shutdown_window_ms, @shutdown_window_ms)
+      do_reconcile_shutdown_casualties(DateTime.add(booted_at, -window_ms, :millisecond))
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  defp do_reconcile_shutdown_casualties(since) do
+    casualties =
+      Run
+      |> Ash.Query.filter(
+        status == :failed and failure_reason == ^@machine_died_reason and
+          completed_at >= ^since
+      )
+      |> Ash.read!()
+      |> Enum.reject(&live_worker?/1)
+
+    restamped = Enum.count(casualties, &restamp_interrupted/1)
+
+    if restamped > 0 do
+      Logger.info(
+        "Workers.Reconciler: re-stamped #{restamped} :machine_died run(s) from the " <>
+          "shutdown window as interrupted (server shutdown)"
+      )
+    end
+
+    {:ok, restamped}
+  rescue
+    e ->
+      Logger.warning("Workers.Reconciler: shutdown-casualty sweep failed: #{Exception.message(e)}")
+      {:error, e}
+  end
+
+  defp restamp_interrupted(%Run{} = run) do
+    case Ash.update(run, %{status: :interrupted, failure_reason: @shutdown_reason},
+           action: :update
+         ) do
+      {:ok, _} ->
+        true
+
+      {:error, reason} ->
+        Logger.warning(
+          "Workers.Reconciler: failed to re-stamp run for task=#{run.task_id}: #{inspect(reason)}"
+        )
+
+        false
+    end
+  end
+
+  defp vm_booted_at do
+    {uptime_ms, _} = :erlang.statistics(:wall_clock)
+    DateTime.add(DateTime.utc_now(), -uptime_ms, :millisecond)
   end
 
   @doc """
@@ -209,9 +300,14 @@ defmodule Arbiter.Workers.Reconciler do
   that cannot be safely resumed falls back to an escalation rather than being
   dropped.
 
-  Open-PR / awaiting_review tasks are intentionally **not** handled here — they
-  belong to the patrol layer via `reconcile_open_pr_tasks/1`; resuming them would
-  spawn a redundant worker to redo already-shipped work.
+  Open-PR / awaiting_review tasks whose last run ended on its own terms are
+  intentionally **not** handled here — they belong to the patrol layer via
+  `reconcile_open_pr_tasks/1`; resuming them would spawn a redundant worker to
+  redo already-shipped work. The exception (bd-146u20 / #2053) is an open-PR
+  task whose latest main run the restart itself cut off
+  (`Arbiter.Worker.ResumeSlot.cut_off_by_restart?/1` — a revision or fix pass on
+  the PR that was mid-flight): a patrol only watches the PR, so without a resume
+  that work is simply lost until an operator restarts it by hand.
 
   Returns `{:ok, %{resumed: non_neg_integer(), escalated: non_neg_integer()}}`,
   `{:ok, :skipped}` when not the primary instance, or `{:error, reason}`.
@@ -238,9 +334,10 @@ defmodule Arbiter.Workers.Reconciler do
   defp do_reconcile_resumable_tasks(resume_fun) do
     stuck =
       Issue
-      |> Ash.Query.filter(status == :in_progress and is_nil(pr_ref))
+      |> Ash.Query.filter(status == :in_progress)
       |> Ash.read!()
       |> Enum.reject(&(live_worker_for_issue?(&1) or review_only?(&1)))
+      |> Enum.filter(&(is_nil(&1.pr_ref) or ResumeSlot.cut_off_by_restart?(&1.id)))
       # bd-92mx1m: work the restart cut off mid-flight still holds its slot and
       # re-enters uncapped, so resume it first. A task that had parked or
       # stopped before the restart then competes for whatever is left, and is
