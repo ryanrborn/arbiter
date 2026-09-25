@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 //
-// bd-aro53b — the provider marks on the workers index, in a real browser.
+// bd-aro53b — the provider marks on the workers index and the board's
+// Running column, in a real browser.
 //
 // `ArbiterWeb.CoreComponents.ProviderIconTest` and `WorkerIndexLiveTest` prove
 // the markup (an <svg>/<image>, a title, an aria-label). Neither can show that
-// the Antigravity PNG actually loads and paints, or that all three marks are
-// visually distinct on a real Running card in both themes. `ConnCase` has no
-// layout engine and does not fetch images.
+// the Antigravity mark actually paints, or that all three marks are visually
+// distinct on a real Running card in both themes. `ConnCase` has no layout
+// engine and does not fetch images.
 //
 //   node scripts/verify_provider_icons.mjs --url http://127.0.0.1:PORT [--shots <dir>]
 //
@@ -40,6 +41,16 @@ const SHOTS = options.shots || null
 
 const WIDTH = 1280
 const HEIGHT = 900
+
+const PAGES = [
+  { path: "/workers", joinSelector: "#workers", iconSelector: '#workers svg[role="img"]', shotName: "workers" },
+  {
+    path: "/",
+    joinSelector: "#board-column-running",
+    iconSelector: '#board-column-running svg[role="img"]',
+    shotName: "board-running"
+  }
+]
 
 const checks = []
 const consoleErrors = []
@@ -112,9 +123,9 @@ process.exit(failed ? 1 : 0)
 
 // -- the run ------------------------------------------------------------------
 
-function stateScript() {
+function stateScript(selector) {
   return `(() => {
-  const icons = [...document.querySelectorAll('#workers svg[role="img"]')]
+  const icons = [...document.querySelectorAll('${selector}')]
   const describe = (svg) => {
     return {
       ariaLabel: svg.getAttribute("aria-label"),
@@ -143,31 +154,35 @@ async function screenshot(cdp, sessionId, name) {
 async function run(page, cdp, sessionId) {
   for (const theme of ["light", "dark"]) {
     const tag = `theme=${theme}`
-    await page.goto(`${BASE}/workers`)
-    await joined(page, `/workers at ${tag}`, "#workers")
-    await page.eval(`document.documentElement.setAttribute("data-theme", ${JSON.stringify(theme)})`)
-    await page.settle()
 
-    const s = JSON.parse(await page.eval(stateScript()))
+    for (const target of PAGES) {
+      const label = `${target.path} at ${tag}`
+      await page.goto(`${BASE}${target.path}`)
+      await joined(page, label, target.joinSelector)
+      await page.eval(`document.documentElement.setAttribute("data-theme", ${JSON.stringify(theme)})`)
+      await page.settle()
 
-    check(`${tag} three provider icons render`, s.count === 3, `found ${s.count}: ${s.icons.map((i) => i.ariaLabel).join(", ")}`)
+      const s = JSON.parse(await page.eval(stateScript(target.iconSelector)))
 
-    const labels = s.icons.map((i) => i.ariaLabel).sort()
-    check(
-      `${tag} labels are Claude/Codex/Antigravity`,
-      JSON.stringify(labels) === JSON.stringify(["Antigravity", "Claude", "Codex"]),
-      labels.join(", ")
-    )
+      check(`${label} three provider icons render`, s.count === 3, `found ${s.count}: ${s.icons.map((i) => i.ariaLabel).join(", ")}`)
 
-    for (const icon of s.icons) {
-      check(`${tag} ${icon.ariaLabel} has a non-zero rendered size`, icon.rect.width > 0 && icon.rect.height > 0, `${icon.rect.width}x${icon.rect.height}`)
-      check(`${tag} ${icon.ariaLabel} title matches aria-label`, icon.title === icon.ariaLabel, `title=${icon.title}`)
-      check(`${tag} ${icon.ariaLabel} actually paints vector content`, icon.paintedNodes > 0, `${icon.paintedNodes} painted node(s)`)
+      const labels = s.icons.map((i) => i.ariaLabel).sort()
+      check(
+        `${label} labels are Claude/Codex/Antigravity`,
+        JSON.stringify(labels) === JSON.stringify(["Antigravity", "Claude", "Codex"]),
+        labels.join(", ")
+      )
+
+      for (const icon of s.icons) {
+        check(`${label} ${icon.ariaLabel} has a non-zero rendered size`, icon.rect.width > 0 && icon.rect.height > 0, `${icon.rect.width}x${icon.rect.height}`)
+        check(`${label} ${icon.ariaLabel} title matches aria-label`, icon.title === icon.ariaLabel, `title=${icon.title}`)
+        check(`${label} ${icon.ariaLabel} actually paints vector content`, icon.paintedNodes > 0, `${icon.paintedNodes} painted node(s)`)
+      }
+
+      check(`${label} page healthy`, !s.errored, `phx-error present: ${s.errored}`)
+
+      await screenshot(cdp, sessionId, `provider-icons-${target.shotName}-${theme}`)
     }
-
-    check(`${tag} page healthy`, !s.errored, `phx-error present: ${s.errored}`)
-
-    await screenshot(cdp, sessionId, `provider-icons-workers-${theme}`)
   }
 
   check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | ") || "none")

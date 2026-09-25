@@ -103,6 +103,14 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
 
   def provider_icon(%{provider: "gemini"} = assigns) do
     # Google Antigravity: official full-colour mark
+    #
+    # The filter/mask ids below are per-instance (suffixed with a unique
+    # integer) because this component can render more than once on a page
+    # (Running cards, /workers, /providers); fixed ids would collide as
+    # duplicate DOM ids and every `url(#...)` reference would resolve to
+    # only the first instance in the document.
+    assigns = assign_new(assigns, :ag_id, fn -> System.unique_integer([:positive]) end)
+
     ~H"""
     <svg
       viewBox="0 0 112 112"
@@ -115,7 +123,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
       <title>Antigravity</title>
       <defs>
         <filter
-          id="ag-f0"
+          id={"ag-f0-#{@ag_id}"}
           x="2.49348"
           y="-26.5423"
           width="69.0899"
@@ -128,7 +136,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="3.89034" />
         </filter>
         <filter
-          id="ag-f1"
+          id={"ag-f1-#{@ag_id}"}
           x="28.7524"
           y="-32.0333"
           width="135.477"
@@ -141,7 +149,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="18.8078" />
         </filter>
         <filter
-          id="ag-f2"
+          id={"ag-f2-#{@ag_id}"}
           x="-62.2884"
           y="-21.9253"
           width="142.637"
@@ -154,7 +162,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="15.9884" />
         </filter>
         <filter
-          id="ag-f3"
+          id={"ag-f3-#{@ag_id}"}
           x="-62.2884"
           y="-21.9253"
           width="142.637"
@@ -167,7 +175,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="15.9884" />
         </filter>
         <filter
-          id="ag-f4"
+          id={"ag-f4-#{@ag_id}"}
           x="-52.5697"
           y="-20.8346"
           width="127.582"
@@ -180,7 +188,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="15.9884" />
         </filter>
         <filter
-          id="ag-f5"
+          id={"ag-f5-#{@ag_id}"}
           x="17.3619"
           y="45.4646"
           width="116.786"
@@ -193,7 +201,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="15.1937" />
         </filter>
         <filter
-          id="ag-f6"
+          id={"ag-f6-#{@ag_id}"}
           x="-7.44765"
           y="-60.4737"
           width="125.303"
@@ -206,7 +214,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="13.7698" />
         </filter>
         <filter
-          id="ag-f7"
+          id={"ag-f7-#{@ag_id}"}
           x="-27.7086"
           y="13.3597"
           width="157.119"
@@ -219,7 +227,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="12.297" />
         </filter>
         <filter
-          id="ag-f8"
+          id={"ag-f8-#{@ag_id}"}
           x="50.4638"
           y="16.981"
           width="87.3973"
@@ -232,7 +240,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="11.0036" />
         </filter>
         <filter
-          id="ag-f9"
+          id={"ag-f9-#{@ag_id}"}
           x="34.2604"
           y="-28.457"
           width="116.701"
@@ -245,7 +253,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="9.29385" />
         </filter>
         <filter
-          id="ag-f10"
+          id={"ag-f10-#{@ag_id}"}
           x="-15.1522"
           y="-15.9493"
           width="77.2941"
@@ -258,7 +266,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           <feGaussianBlur stdDeviation="11.5027" />
         </filter>
         <mask
-          id="ag-mask"
+          id={"ag-mask-#{@ag_id}"}
           maskUnits="userSpaceOnUse"
           x="13"
           y="18"
@@ -276,8 +284,8 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
         d="M89.6992 93.695C94.3659 97.195 101.366 94.8617 94.9492 88.445C75.6992 69.7783 79.7825 18.445 55.8659 18.445C31.9492 18.445 36.0325 69.7783 16.7825 88.445C9.78251 95.445 17.3658 97.195 22.0325 93.695C40.1159 81.445 38.9492 59.8617 55.8659 59.8617C72.7825 59.8617 71.6159 81.445 89.6992 93.695Z"
         fill="#3186FF"
       />
-      <g mask="url(#ag-mask)">
-        <g filter="url(#ag-f0)">
+      <g mask={"url(#ag-mask-#{@ag_id})"}>
+        <g filter={"url(#ag-f0-#{@ag_id})"}>
           <ellipse
             cx="22.7873"
             cy="26.8098"
@@ -287,7 +295,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#FFE432"
           />
         </g>
-        <g filter="url(#ag-f1)">
+        <g filter={"url(#ag-f1-#{@ag_id})"}>
           <ellipse
             cx="96.491"
             cy="35.1231"
@@ -297,7 +305,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#FC413D"
           />
         </g>
-        <g filter="url(#ag-f2)">
+        <g filter={"url(#ag-f2-#{@ag_id})"}>
           <ellipse
             cx="9.02988"
             cy="41.6647"
@@ -307,7 +315,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#00B95C"
           />
         </g>
-        <g filter="url(#ag-f3)">
+        <g filter={"url(#ag-f3-#{@ag_id})"}>
           <ellipse
             cx="9.02988"
             cy="41.6647"
@@ -317,7 +325,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#00B95C"
           />
         </g>
-        <g filter="url(#ag-f4)">
+        <g filter={"url(#ag-f4-#{@ag_id})"}>
           <ellipse
             cx="11.2212"
             cy="42.8915"
@@ -327,7 +335,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#00B95C"
           />
         </g>
-        <g filter="url(#ag-f5)">
+        <g filter={"url(#ag-f5-#{@ag_id})"}>
           <ellipse
             cx="75.7546"
             cy="104.822"
@@ -337,7 +345,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#3186FF"
           />
         </g>
-        <g filter="url(#ag-f6)">
+        <g filter={"url(#ag-f6-#{@ag_id})"}>
           <ellipse
             cx="33.5661"
             cy="35.4043"
@@ -347,19 +355,19 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#FBBC04"
           />
         </g>
-        <g filter="url(#ag-f7)">
+        <g filter={"url(#ag-f7-#{@ag_id})"}>
           <path
             d="M2.56802 149.695C-15.8116 142.48 15.5987 83.1163 23.4093 63.2203C31.22 43.3244 52.4514 33.0447 70.831 40.26C89.2107 47.4753 110.996 87.2162 103.185 107.112C95.3742 127.008 20.9477 156.91 2.56802 149.695Z"
             fill="#3186FF"
           />
         </g>
-        <g filter="url(#ag-f8)">
+        <g filter={"url(#ag-f8-#{@ag_id})"}>
           <path
             d="M113.934 75.8079C109.013 81.5509 96.1724 78.6224 85.253 69.2667C74.3335 59.911 69.4704 47.6711 74.391 41.928C79.3116 36.185 92.1525 39.1136 103.072 48.4692C113.991 57.8249 118.855 70.0648 113.934 75.8079Z"
             fill="#749BFF"
           />
         </g>
-        <g filter="url(#ag-f9)">
+        <g filter={"url(#ag-f9-#{@ag_id})"}>
           <ellipse
             cx="92.611"
             cy="23.7962"
@@ -369,7 +377,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
             fill="#FC413D"
           />
         </g>
-        <g filter="url(#ag-f10)">
+        <g filter={"url(#ag-f10-#{@ag_id})"}>
           <ellipse
             cx="23.4949"
             cy="29.5887"

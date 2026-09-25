@@ -1,19 +1,20 @@
 defmodule ArbiterWeb.ProviderIconsBrowserTest do
   @moduledoc """
-  The Claude, Codex and Antigravity marks on the workers index, in a real
-  browser (bd-aro53b).
+  The Claude, Codex and Antigravity marks on the workers index and the
+  board's Running column, in a real browser (bd-aro53b).
 
   `ArbiterWeb.CoreComponents.ProviderIconTest` and `WorkerIndexLiveTest` prove
   the markup — an `<svg>`, a `<title>`, an `aria-label`, filter/mask ids. They
   cannot prove that all three marks actually paint vector content and render
-  at a legible, distinct size on a real Running-card-style list in both
-  themes; `ConnCase` has no layout engine.
+  at a legible, distinct size on a real Running card in both themes;
+  `ConnCase` has no layout engine.
 
   So this boots the real endpoint on a real port, starts one worker per
-  provider, and drives `scripts/verify_provider_icons.mjs` against it.
+  provider, and drives `scripts/verify_provider_icons.mjs` against it, on
+  both `/workers` and the board's Running column at `/`.
   Skipped, not failed, where there is no Chromium (the script exits `3`) or no
   esbuild/tailwind binary. Set `ARB_PROVIDER_ICON_SHOTS=<dir>` to also get PNGs
-  of the workers index in both themes.
+  of both pages in both themes.
   """
   # async: false — Bandit's connection processes need the shared sandbox
   # connection to read the seeded workers, and the listener binds a real port.

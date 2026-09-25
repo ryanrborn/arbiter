@@ -21,7 +21,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       assert html =~ "<svg"
       assert html =~ ~s(<title>Codex</title>)
       assert html =~ ~s(aria-label="Codex")
-      assert html =~ "text-[var(--text-title)]" or html =~ "text-black dark:text-white"
+      assert html =~ "text-[var(--text-title)]"
     end
 
     test "renders the Google Antigravity mark for gemini, titled Antigravity" do
@@ -30,7 +30,24 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       assert html =~ "<svg"
       assert html =~ ~s(<title>Antigravity</title>)
       assert html =~ ~s(aria-label="Antigravity")
-      assert html =~ "filter" or html =~ "mask" or html =~ "#3186FF"
+      assert html =~ ~s(fill="#3186FF")
+      assert html =~ ~r/mask="url\(#ag-mask-\d+\)"/
+      assert html =~ ~r/filter="url\(#ag-f0-\d+\)"/
+    end
+
+    test "renders unique per-instance filter/mask ids so two gemini icons on the same page don't collide" do
+      html =
+        render_component(fn assigns ->
+          ~H"""
+          <.provider_icon provider="gemini" />
+          <.provider_icon provider="gemini" />
+          """
+        end)
+
+      mask_ids = Regex.scan(~r/<mask\s+id="(ag-mask-\d+)"/, html) |> Enum.map(&Enum.at(&1, 1))
+
+      assert length(mask_ids) == 2
+      assert Enum.uniq(mask_ids) == mask_ids
     end
 
     test "renders an svg for ollama slot" do
