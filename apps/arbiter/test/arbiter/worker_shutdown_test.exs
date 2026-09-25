@@ -277,6 +277,76 @@ defmodule Arbiter.WorkerShutdownTest do
     end
   end
 
+  # bd-146u20 / #2053: the application stops its children in reverse start
+  # order, and `Arbiter.Workflows.MachineSupervisor` is started after
+  # `Arbiter.Worker.Supervisor` — so every workflow Machine is shut down
+  # before the Worker and Driver it belongs to. The Driver monitors the
+  # Machine; it must read that `:DOWN` as the node going down, not as a
+  # machine crash to fail the worker over.
+  describe "application stop order: machines go down before their workers" do
+    alias Arbiter.Tasks.Issue
+    alias Arbiter.Tasks.Workspace
+    alias Arbiter.TestWorkflows
+    alias Arbiter.Worker.Driver
+    alias Arbiter.Workflows.Machine
+
+    test "the run is recorded :interrupted / \"server shutdown\", not :failed / :machine_died" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "shutdown-order-ws", prefix: "so"})
+      {:ok, task} = Ash.create(Issue, %{title: "shutdown order", workspace_id: ws.id})
+
+      # Started in the application's order: the worker supervisor first, the
+      # machine supervisor after it (so it is the first of the two to stop).
+      sup = start_sup!()
+
+      machine_sup =
+        start_supervised!({DynamicSupervisor, strategy: :one_for_one},
+          id: :shutdown_test_machine_sup
+        )
+
+      {:ok, pid} =
+        DynamicSupervisor.start_child(
+          sup,
+          {Worker, [task_id: task.id, repo: "arbiter", workspace_id: ws.id]}
+        )
+
+      :ok = Worker.advance(pid, :implement)
+
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = DynamicSupervisor.start_child(machine_sup, {Machine, machine_id})
+
+      {:ok, driver_pid} =
+        DynamicSupervisor.start_child(
+          sup,
+          {Driver,
+           [
+             task_id: task.id,
+             worker_pid: pid,
+             machine_id: machine_id,
+             machine_pid: machine_pid,
+             claude_driven: true,
+             interval_ms: 50
+           ]}
+        )
+
+      driver_ref = Process.monitor(driver_pid)
+
+      # The machine supervisor stops first. Wait for the Driver to finish
+      # reacting to its Machine's :DOWN before the worker supervisor stops —
+      # the interleaving the 2026-09-25 deploy restart hit, where the Driver's
+      # reaction reached the worker ahead of its own shutdown signal.
+      :ok = stop_supervised(:shutdown_test_machine_sup)
+      assert_receive {:DOWN, ^driver_ref, :process, ^driver_pid, _reason}, 2_000
+
+      assert Worker.state(pid).status == :running
+
+      stop_sup!()
+
+      run = run_for(task.id)
+      assert run.status == :interrupted
+      assert run.failure_reason == "server shutdown"
+    end
+  end
+
   defp non_empty([]), do: nil
   defp non_empty(list), do: list
 

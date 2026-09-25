@@ -284,11 +284,18 @@ defmodule Arbiter.Worker.Driver do
     {:stop, :normal, state}
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{machine_pid: pid} = state) do
-    Logger.warning("Worker.Driver: machine died for task=#{state.task_id}")
-    safe(fn -> Worker.fail(state.worker_pid, :machine_died) end)
-    maybe_cleanup_worktree(state)
-    {:stop, :normal, state}
+  # bd-146u20 / #2053: on an application stop the Machine goes down first —
+  # `Arbiter.Workflows.MachineSupervisor` is started after
+  # `Arbiter.Worker.Supervisor`, so it is stopped before it. That is the node
+  # stopping, not the machine crashing: stand down without failing the worker,
+  # whose own terminate/2 records the run :interrupted / "server shutdown" for
+  # the boot resume sweep. Failing it here won the race to the worker whenever
+  # the stop dawdled in between (a live Watchdog), stamping :machine_died.
+  # Leave the worktree alone too — the resume re-attaches to it.
+  def handle_info({:DOWN, _ref, :process, pid, reason}, %{machine_pid: pid} = state) do
+    if shutdown_exit?(reason) or Worker.node_stopping?(),
+      do: machine_stopped_with_node(state),
+      else: machine_died(state)
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -297,6 +304,30 @@ defmodule Arbiter.Worker.Driver do
   def terminate(_reason, state) do
     maybe_cleanup_worktree(state)
     teardown_review_checkout(state)
+  end
+
+  defp machine_stopped_with_node(state) do
+    Logger.info(
+      "Worker.Driver: machine stopped with the node for task=#{state.task_id}; " <>
+        "leaving the worker to record the run interrupted"
+    )
+
+    {:stop, :normal, %{state | cleanup_worktree: false}}
+  end
+
+  # Its supervisor shut it down. A Machine is `restart: :temporary` and nothing
+  # else terminates one, so that only happens when the node stops; a machine
+  # that overran its shutdown budget is `:killed` instead, which the
+  # node_stopping? check covers.
+  defp shutdown_exit?(:shutdown), do: true
+  defp shutdown_exit?({:shutdown, _}), do: true
+  defp shutdown_exit?(_reason), do: false
+
+  defp machine_died(state) do
+    Logger.warning("Worker.Driver: machine died for task=#{state.task_id}")
+    safe(fn -> Worker.fail(state.worker_pid, :machine_died) end)
+    maybe_cleanup_worktree(state)
+    {:stop, :normal, state}
   end
 
   # bd-199giy: reclaim the reviewer's throwaway checkout on every exit path —

@@ -3266,10 +3266,16 @@ defmodule Arbiter.Worker do
     Application.get_env(:arbiter, :worker_exit_grace_ms, @exit_grace_ms)
   end
 
-  # True once `init:stop/0` has begun — which is what the BEAM's SIGTERM handler
-  # calls, before a single application is taken down. Tests can't stop the node,
-  # so `config :arbiter, :worker_node_stopping_override` stands in for it.
-  defp node_stopping? do
+  @doc """
+  True once `init:stop/0` has begun — which is what the BEAM's SIGTERM handler
+  calls, before a single application is taken down. Tests can't stop the node,
+  so `config :arbiter, :worker_node_stopping_override` stands in for it.
+
+  Shared with `Arbiter.Worker.Driver` (bd-146u20), which must not fail a worker
+  over a Machine that died because the node is going down.
+  """
+  @spec node_stopping?() :: boolean()
+  def node_stopping? do
     case Application.get_env(:arbiter, :worker_node_stopping_override) do
       override when is_boolean(override) -> override
       _ -> match?({:stopping, _}, :init.get_status())

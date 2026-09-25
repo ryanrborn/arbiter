@@ -145,6 +145,65 @@ defmodule Arbiter.Worker.DriverTest do
     end
   end
 
+  # bd-146u20 / #2053: on an application stop the machine supervisor goes down
+  # before the worker supervisor, so the Driver sees its Machine die first. That
+  # is the node stopping, not a machine crash — the worker's own terminate/2
+  # records the run :interrupted moments later, and failing it first turned a
+  # resumable interruption into a :machine_died failure nobody resumed.
+  describe "monitor: machine shut down with the node" do
+    setup %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "mshutdown", workspace_id: ws.id})
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
+      :ok = Worker.advance(worker_pid, :implement)
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      :ok = Machine.pause(machine_pid)
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          claude_driven: true,
+          interval_ms: 10
+        )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+
+      {:ok, worker_pid: worker_pid, machine_pid: machine_pid, driver_pid: driver_pid}
+    end
+
+    test "a :shutdown exit leaves the worker for its own terminate/2", ctx do
+      ref = Process.monitor(ctx.driver_pid)
+
+      :ok =
+        DynamicSupervisor.terminate_child(Arbiter.Workflows.MachineSupervisor, ctx.machine_pid)
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+      assert Worker.state(ctx.worker_pid).status == :running
+    end
+
+    test "any exit while the node is stopping leaves the worker alone", ctx do
+      previous = Application.fetch_env(:arbiter, :worker_node_stopping_override)
+      Application.put_env(:arbiter, :worker_node_stopping_override, true)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:arbiter, :worker_node_stopping_override, v)
+          :error -> Application.delete_env(:arbiter, :worker_node_stopping_override)
+        end
+      end)
+
+      ref = Process.monitor(ctx.driver_pid)
+      # A machine that overran its shutdown budget is killed, not shut down.
+      Process.exit(ctx.machine_pid, :kill)
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+      assert Worker.state(ctx.worker_pid).status == :running
+    end
+  end
+
   describe "integration via Dispatch" do
     test "Dispatch with default opts starts a driver that closes the task", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "via-dispatch", workspace_id: ws.id})
