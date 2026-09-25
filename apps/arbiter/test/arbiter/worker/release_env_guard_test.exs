@@ -123,6 +123,7 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/mix/tasks/arbiter.import_from_dolt.ex" => :pure_tool,
     "apps/arbiter_web/lib/arbiter_web/application.ex" => :pure_tool,
     "apps/arbiter_cli/lib/arbiter_cli/version.ex" => :pure_tool,
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/doctor/checks.ex" => :pure_tool,
     "apps/arbiter_cli/lib/arbiter_cli/cmd/init.ex" => :pure_tool,
     "apps/arbiter_cli/lib/arbiter_cli/cmd/start.ex" => :scrubbed,
     # bd-3qkbch: opens a Port for tmux only (§4.7's CLI fallback) — scrubbed

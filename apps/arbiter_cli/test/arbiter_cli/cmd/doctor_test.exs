@@ -2,6 +2,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   use ArbiterCli.CliCase, async: true
 
   alias ArbiterCli.Cmd.Doctor
+  alias ArbiterCli.Cmd.Doctor.Checks
 
   @workspaces_resp %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
 
@@ -264,32 +265,79 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert Doctor.green?() == true
   end
 
-  test "dev/source install with version mismatch hints to restart, not reinstall from release" do
-    # When the CLI is a dev/source install (has git access), a version mismatch hint
-    # should say "restart the server" instead of "reinstall the CLI from a release asset".
-    # This test only runs if git is available.
-    {_, git_rc} = System.cmd("git", ["describe"], stderr_to_stdout: true)
+  test "dev/source install with server version newer than CLI hints to rebuild and reinstall CLI" do
+    # When the server is newer than the CLI (e.g. server 0.1.68, CLI 0.1.67),
+    # hint should tell operator to rebuild and reinstall the arb CLI, not restart the server.
+    res = Checks.check_versions("0.1.67", "41474cae", "0.1.68", "41474cae")
+    assert res.status == :fail
+    assert res.hint =~ "rebuild and reinstall the `arb` CLI"
+    refute res.hint =~ "restart the server"
 
-    if git_rc == 0 do
-      mismatched_version_resp = %{
-        "version" => "0.1.64",
-        "sha" => "eb0c8690",
-        "built_at" => "2024-01-01T00:00:00Z",
-        "booted_at" => "2024-01-01T00:01:00Z"
-      }
+    # Also test with different SHAs where CLI sha is ancestor of server sha
+    res_sha = Checks.check_versions("0.1.67", "f21bdd4d", "0.1.68", "41474cae")
+    assert res_sha.status == :fail
+    assert res_sha.hint =~ "rebuild and reinstall the `arb` CLI"
+    refute res_sha.hint =~ "restart the server"
 
-      stub_routes([
-        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
-        {{"get", "/api/repos"}, {@repos_resp, 200}},
-        {{"get", "/api/version"}, {mismatched_version_resp, 200}},
-        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
-      ])
+    # And verify via Doctor.run with a newer server version (same major)
+    Process.put(:bd2_app_version, "0.1.67")
 
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[fail] version"
-      refute out =~ "reinstall the CLI from"
-      assert out =~ "restart"
-    end
+    server_version_resp = %{
+      "version" => "0.1.68",
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {server_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+    assert out =~ "[fail] version"
+    assert out =~ "rebuild and reinstall the `arb` CLI"
+    refute out =~ "restart the server"
+  end
+
+  test "dev/source install with server version older than CLI hints to restart the server" do
+    # When the server is older than the CLI (e.g. server 0.1.64, CLI 0.1.68),
+    # hint should keep the restart-the-server instruction.
+    res = Checks.check_versions("0.1.68", "41474cae", "0.1.64", "41474cae")
+    assert res.status == :fail
+    assert res.hint =~ "The server's compiled version is stale — restart the server"
+    refute res.hint =~ "rebuild and reinstall"
+
+    # Also test with server sha older than CLI sha (CLI has newer sha)
+    res_sha = Checks.check_versions("0.1.68", "41474cae", "0.1.67", "f21bdd4d")
+    assert res_sha.status == :fail
+    assert res_sha.hint =~ "The server's compiled version is stale — restart the server"
+    refute res_sha.hint =~ "rebuild and reinstall"
+
+    # And verify via Doctor.run
+    Process.put(:bd2_app_version, "0.1.68")
+
+    mismatched_version_resp = %{
+      "version" => "0.1.64",
+      "sha" => "eb0c8690",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {mismatched_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+    assert out =~ "[fail] version"
+    refute out =~ "reinstall the CLI from"
+    refute out =~ "rebuild and reinstall"
+    assert out =~ "The server's compiled version is stale — restart the server"
   end
 
   test "workspace resolution failure is an operator-actionable exit 1, but must not block deploy readiness" do

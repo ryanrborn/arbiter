@@ -113,7 +113,11 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
-  defp check_versions do
+  @doc """
+  Check version alignment between CLI and server.
+  """
+  @spec check_versions() :: Result.t()
+  def check_versions do
     cli_sha = ArbiterCli.Version.git_sha_clean()
     cli_vsn = ArbiterCli.Version.app_version()
 
@@ -140,6 +144,11 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: true
         }
     end
+  end
+
+  @doc false
+  def check_versions(cli_vsn, cli_sha, server_vsn, server_sha) do
+    version_result(cli_vsn, cli_sha, server_vsn, server_sha)
   end
 
   # Always report both versions explicitly, and only claim a match when the
@@ -175,7 +184,11 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       true ->
         hint =
           if dev_install?() do
-            "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart arbiter`)."
+            if cli_behind?(cli_vsn, cli_sha, server_vsn, server_sha) do
+              "The `arb` CLI is older than the server — rebuild and reinstall the `arb` CLI (e.g. `arb install-cli`)."
+            else
+              "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart arbiter`)."
+            end
           else
             "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
               "the #{server_vsn} release asset to match the server."
@@ -189,6 +202,40 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+    end
+  end
+
+  defp cli_behind?(cli_vsn, cli_sha, server_vsn, server_sha) do
+    case {Version.parse(cli_vsn), Version.parse(server_vsn)} do
+      {{:ok, cli}, {:ok, server}} ->
+        case Version.compare(cli, server) do
+          :lt -> true
+          :gt -> false
+          :eq -> sha_behind?(cli_sha, server_sha)
+        end
+
+      _ ->
+        sha_behind?(cli_sha, server_sha)
+    end
+  end
+
+  defp sha_behind?(_cli_sha, "unknown"), do: false
+  defp sha_behind?("unknown", _server_sha), do: false
+
+  defp sha_behind?(cli_sha, server_sha) do
+    clean_cli = String.trim_trailing(cli_sha, "*")
+    clean_server = String.trim_trailing(server_sha, "*")
+
+    if clean_cli == clean_server do
+      false
+    else
+      # Check if cli_sha is an ancestor of server_sha in git
+      case System.cmd("git", ["merge-base", "--is-ancestor", clean_cli, clean_server],
+             stderr_to_stdout: true
+           ) do
+        {_, 0} -> true
+        _ -> false
+      end
     end
   end
 
