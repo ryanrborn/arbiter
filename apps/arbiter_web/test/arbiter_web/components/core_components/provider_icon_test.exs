@@ -30,7 +30,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       assert html =~ "<svg"
       assert html =~ ~s(<title>Antigravity</title>)
       assert html =~ ~s(aria-label="Antigravity")
-      assert html =~ "filter" or html =~ "mask" or html =~ "#3186FF"
+      assert html =~ "/images/provider-icons/antigravity-icon-full-color.png"
     end
 
     test "renders an svg for ollama slot" do
