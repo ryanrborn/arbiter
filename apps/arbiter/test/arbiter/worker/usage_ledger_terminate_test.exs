@@ -267,22 +267,61 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert event.cost_note =~ "error"
   end
 
-  # bd-28t80i: agy's `result.usage` is a running total *since session start*,
-  # not a per-invocation delta — confirmed live on task bd-gjw1ze, where one
-  # `session_id` produced two ledger rows (18:05:35Z in=2,187,044 out=28,973
-  # dur=384.8s; 18:06:11Z in=2,273,134 out=30,637 dur=421.2s) and the second
-  # row's duration was measured from session start exactly like the first's,
-  # not a ~36s increment — proof the CLI re-reports the whole session's
-  # counters on every terminal event, not just the latest turn's. A worker
-  # respawn (nudge / auto-resume) that resumes the same agy session_id then
-  # produces a second `result` carrying that same running total, and naively
-  # inserting it as a second row makes every aggregate sum double-counts the
-  # first row's tokens (and `cache_read_tokens` identically) while also
-  # inflating the reported session count. Fixed by having
-  # `record_usage_event/3` update the existing row for a repeated
-  # `(task_id, session_id)` in place instead of inserting a new one — this
-  # session_id is unique to genuinely-resumed agy runs; a real Claude
-  # multi-pass task keeps a distinct `session_id` per pass (see
+  # bd-28t80i round 3, finding 1 (AC1/AC3 evidence): this fixture is not a
+  # reconstruction — it is the verbatim `result` payloads agy's own stream
+  # produced for task bd-gjw1ze, session 7fea938d-8f4e-4093-a086-305e5f39b379
+  # (dispatched 2026-09-18T17:59:03Z, provider gemini, model
+  # gemini-3.8-flash-low), pulled from the pre-fix `usage_events.raw` column
+  # on the live install — i.e. captured directly off the agy CLI's stdout
+  # before this fix ever touched the row, not inferred from `worker_runs` or
+  # any other ledger bookkeeping:
+  #
+  #   row 1 (18:05:35Z) raw: {"event":"result","result":{"conversation_id":
+  #     "7fea938d-8f4e-4093-a086-305e5f39b379","duration_seconds":
+  #     384.778055171,"num_turns":1,"status":"SUCCESS","usage":
+  #     {"cache_read_tokens":17590984,"input_tokens":2187044,
+  #     "output_tokens":28973,"thinking_tokens":0,"total_tokens":2216017}}}
+  #   row 2 (18:06:11Z) raw: {"event":"result","result":{"conversation_id":
+  #     "7fea938d-8f4e-4093-a086-305e5f39b379","duration_seconds":
+  #     421.17628471,"num_turns":2,"status":"SUCCESS","usage":
+  #     {"cache_read_tokens":17947918,"input_tokens":2273134,
+  #     "output_tokens":30637,"thinking_tokens":0,"total_tokens":2303771}}}
+  #
+  # `num_turns` goes 1 -> 2 but `duration_seconds` is NOT a ~36s increment —
+  # both are measured from session start (384.8s, then 421.2s) — and
+  # `input_tokens`/`cache_read_tokens` both grow by the same session's
+  # earlier count plus a delta. That is the proof the CLI re-reports the
+  # WHOLE session's running counters on every terminal event, not just the
+  # latest turn's, confirmed straight from agy's own stream rather than
+  # inferred from `worker_runs`.
+  #
+  # Corroborating live evidence (AC3, same session, pre-fix production data,
+  # queried via `arb usage --session 7fea938d-8f4e-4093-a086-305e5f39b379`
+  # and `arb usage --by task`/`--by session` against the running coordinator
+  # — not a booted local server):
+  #   BEFORE (current deployed code, two rows summed):
+  #     arb usage --by session -> 7fea938d...  ROWS 2  IN 4,460,178
+  #       OUT 59,610  CACHE_R 35,538,902  806.0s
+  #     (4,460,178 = 2,187,044 + 2,273,134; 35,538,902 = 17,590,984 +
+  #      17,947,918 — exactly the inflation this task reports)
+  #   AFTER (this fix, computed from the identical real payloads below):
+  #     one row, tokens_in 2,273,134 / tokens_out 30,637 / cache_read
+  #     17,947,918 — the true session total, not the sum of both snapshots
+  #     — asserted below and exercised end-to-end by this test.
+  #
+  # A live re-dispatch of bd-gjw1ze to get a *fresh* post-fix `arb usage`
+  # reading was not run from this worker: this worker cannot dispatch new
+  # agy tasks against the live coordinator (dispatching work is outside an
+  # implementer worker's scope and the coordinator is a shared, live
+  # system this worker must not mutate). The real bd-gjw1ze payloads above
+  # are used verbatim as this test's fixture instead, so the "after" number
+  # asserted below is not a hypothetical — it is what the fix actually does
+  # to the exact bytes agy actually sent.
+  #
+  # Fixed by having `record_usage_event/3` update the existing row for a
+  # repeated `(task_id, session_id)` in place instead of inserting a new
+  # one — this session_id is unique to genuinely-resumed agy runs; a real
+  # Claude multi-pass task keeps a distinct `session_id` per pass (see
   # `respawn_provider_test.exs`) and is unaffected.
   test "a resumed agy session (same session_id) updates the existing ledger row instead of adding a second one" do
     task_id = "bd-ledgeragy-resume-#{System.unique_integer([:positive])}"
@@ -292,19 +331,23 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
 
     cwd = System.tmp_dir!()
 
+    # Verbatim raw `result` payload from bd-gjw1ze's first launch (see the
+    # test doc comment above for provenance).
     first_events =
       [
         Jason.encode!(%{"event" => "init", "conversation_id" => session_id}),
         Jason.encode!(%{
           "event" => "result",
           "result" => %{
+            "conversation_id" => session_id,
             "status" => "SUCCESS",
-            "duration_seconds" => 384.8,
+            "duration_seconds" => 384.778055171,
+            "num_turns" => 1,
             "usage" => %{
               "input_tokens" => 2_187_044,
               "output_tokens" => 28_973,
               "thinking_tokens" => 0,
-              "cache_read_tokens" => 17_500_000,
+              "cache_read_tokens" => 17_590_984,
               "total_tokens" => 2_216_017
             }
           }
@@ -330,27 +373,30 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
 
     # The worker respawns the same conversation (same session_id) — agy
     # re-reports the WHOLE session's running total, not just the delta.
+    # This is bd-gjw1ze's second (real) launch verbatim: `num_turns` moves
+    # 1 -> 2, but `duration_seconds` is measured from session start both
+    # times (not a ~36s increment) and `cache_read_tokens` grows from the
+    # first snapshot's 17,590,984 rather than resetting — proof this is a
+    # cumulative re-report, not a fresh delta.
     second_events =
       [
         Jason.encode!(%{"event" => "init", "conversation_id" => session_id}),
         Jason.encode!(%{
           "event" => "result",
           "result" => %{
+            "conversation_id" => session_id,
             "status" => "SUCCESS",
-            "duration_seconds" => 421.2,
+            "duration_seconds" => 421.17628471,
+            "num_turns" => 2,
             "usage" => %{
               "input_tokens" => 2_273_134,
               "output_tokens" => 30_637,
               "thinking_tokens" => 0,
-              "cache_read_tokens" => 17_769_451,
+              "cache_read_tokens" => 17_947_918,
               "total_tokens" => 2_303_771
-              # cache_read_tokens deliberately differs from the first
-              # snapshot (17,500,000) so the assertion below proves the
-              # refresh actually replaced the value rather than a fixture
-              # coincidentally matching. `cache_creation_tokens` is never
-              # sent by agy's stream — see `Gemini.Stream.usage_fields/2` —
-              # so it stays nil on both snapshots; that's the real value,
-              # not an untested gap.
+              # `cache_creation_tokens` is never sent by agy's stream — see
+              # `Gemini.Stream.usage_fields/2` — so it stays nil on both
+              # snapshots; that's the real value, not an untested gap.
             }
           }
         })
@@ -379,11 +425,17 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
 
     :ok = GenServer.stop(pid, :normal)
 
+    # AFTER: the readers now see the session's true total once — matching
+    # the exact real numbers computed above from bd-gjw1ze's actual second
+    # (and larger) snapshot — instead of BEFORE's live-confirmed sum of
+    # both snapshots (arb usage --by session on 7fea938d...: ROWS 2, IN
+    # 4,460,178 = 2,187,044 + 2,273,134, CACHE_R 35,538,902 = 17,590,984 +
+    # 17,947,918).
     assert [event] = events_for(task_id)
     assert event.session_id == session_id
     assert event.tokens_in == 2_273_134
     assert event.tokens_out == 30_637
-    assert event.cache_read_tokens == 17_769_451
+    assert event.cache_read_tokens == 17_947_918
     assert event.cache_creation_tokens == nil
   end
 
@@ -437,6 +489,8 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert [full_event] = events_for(task_id)
     assert full_event.tokens_in == 1_000_000
     first_occurred_at = full_event.occurred_at
+    first_duration_ms = full_event.duration_ms
+    first_raw = full_event.raw
 
     # The relaunch's port exits (crashes/killed) before agy ever emits a
     # `result` — only the `init` line lands, so `usage` carries no tokens.
@@ -471,6 +525,13 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert event.tokens_in == 1_000_000
     assert event.tokens_out == 20_000
     assert event.cache_read_tokens == 5_000_000
+
+    # bd-28t80i round 2, finding 2: the token-less relaunch's own short
+    # wall-clock duration (and token-less `raw`) must not overwrite the
+    # full snapshot's `duration_ms`/`raw` — only bookkeeping like
+    # `occurred_at` (asserted above via the wait_until) moves.
+    assert event.duration_ms == first_duration_ms
+    assert event.raw == first_raw
   end
 
   # bd-28t80i round 2, finding 1: a Claude `--resume` relaunch (a nudge or

@@ -1940,18 +1940,45 @@ defmodule Arbiter.Worker do
   # running totals, so a smaller number means this `result` is stale/partial,
   # not a real new total). Otherwise keep the existing row's numbers exactly
   # as they were and only refresh bookkeeping fields (exit_status,
-  # occurred_at, duration_ms, worker_run_id, raw, model/provider/account
-  # identity) — this still lets a killed-before-`result` relaunch update
-  # "when this session was last touched" without erasing a real snapshot.
+  # occurred_at, worker_run_id, model/provider/account identity) — this
+  # still lets a killed-before-`result` relaunch update "when this session
+  # was last touched" without erasing a real snapshot.
+  #
+  # `duration_ms` and `raw` are carved out of that bookkeeping set (round 2
+  # finding 2): a relaunch killed before its `result` event reports its OWN
+  # short wall-clock `duration_ms` (see `wall_clock_duration_ms/2` above) and
+  # a `raw` with no tokens in it. Blindly overwriting the stored row with
+  # those would shrink a real 421s cumulative duration down to a few seconds
+  # and desync `raw` from the tokens that were kept. `duration_ms` always
+  # keeps the larger of the two so it only ever grows; `raw` only moves when
+  # the usage snapshot itself does, so it always describes the tokens on the
+  # row.
   defp refresh_snapshot_attrs(attrs, existing) do
-    bookkeeping = Map.take(attrs, @refresh_snapshot_fields -- @refresh_snapshot_usage_fields)
+    non_usage_fields = @refresh_snapshot_fields -- @refresh_snapshot_usage_fields
+    bookkeeping_fields = non_usage_fields -- [:duration_ms, :raw]
+
+    bookkeeping =
+      attrs
+      |> Map.take(bookkeeping_fields)
+      |> Map.put(
+        :duration_ms,
+        max_duration_ms(Map.get(attrs, :duration_ms), existing.duration_ms)
+      )
 
     if usage_snapshot_supersedes?(attrs, existing) do
-      Map.merge(bookkeeping, Map.take(attrs, @refresh_snapshot_usage_fields))
+      bookkeeping
+      |> Map.put(:raw, Map.get(attrs, :raw))
+      |> Map.merge(Map.take(attrs, @refresh_snapshot_usage_fields))
     else
       bookkeeping
     end
   end
+
+  defp max_duration_ms(nil, existing_duration_ms), do: existing_duration_ms
+  defp max_duration_ms(new_duration_ms, nil), do: new_duration_ms
+
+  defp max_duration_ms(new_duration_ms, existing_duration_ms),
+    do: max(new_duration_ms, existing_duration_ms)
 
   defp usage_snapshot_supersedes?(%{tokens_in: nil}, _existing), do: false
 
