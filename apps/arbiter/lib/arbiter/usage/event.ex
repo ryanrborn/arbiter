@@ -11,6 +11,20 @@ defmodule Arbiter.Usage.Event do
   Multiple rows per task are the point of this table: a re-slung task writes
   a second `:work` row, a ReviewGate review adds a `:review` row, and so the
   spend-on-rework story falls out of `Arbiter.Usage.summarize/1` for free.
+  That is keyed on `session_id` being genuinely distinct per pass, which
+  holds for Claude but not for agy/Gemini: a worker respawn that resumes the
+  SAME agy `session_id` gets a `result` event re-reporting the whole
+  session's running total, not a delta. `Arbiter.Worker.record_usage_event/3`
+  handles this by refreshing the existing row for a repeated
+  `(task_id, session_id)` (the `:refresh_snapshot` action) instead of
+  inserting a second one — see bd-28t80i. This refresh is gated to
+  non-Claude providers only (a resumed Claude `--resume` launch reports only
+  that launch's own usage, not a running total, so it must keep inserting a
+  row per launch) and only replaces the stored token/cache/cost fields when
+  the new snapshot actually has tokens and is no smaller than what is
+  already stored — a token-less or partial snapshot (e.g. a relaunch killed
+  before its `result` event) only refreshes bookkeeping fields and leaves
+  the real numbers alone.
 
   ## Step
 
@@ -132,6 +146,44 @@ defmodule Arbiter.Usage.Event do
       # map-carrying update actions).
       require_atomic? false
       accept [:tokens_in, :tokens_out, :cache_read_tokens, :cost_note, :raw]
+    end
+
+    # bd-28t80i: agy/gemini's terminal `result.usage` is a running total since
+    # session start, not a per-invocation delta (confirmed live: a resumed
+    # agy conversation's second `result` event carries the first result's
+    # counts plus a small increment, with `duration_seconds` measured from
+    # session start both times). A worker respawn (nudge / auto-resume) that
+    # resumes the SAME agy `session_id` therefore reports the whole session's
+    # usage again — `Arbiter.Worker.record_usage_event/3` refreshes the
+    # existing row for that `(task_id, session_id)` in place with this action
+    # instead of inserting a second one, so the row always reflects the
+    # session's latest (most complete) snapshot exactly once. A genuine
+    # Claude multi-pass task keeps a distinct `session_id` per pass and never
+    # matches an existing row, so this never collapses real separate
+    # sessions together.
+    update :refresh_snapshot do
+      require_atomic? false
+
+      accept [
+        :workspace_id,
+        :repo,
+        :model,
+        :provider,
+        :provider_account_id,
+        :provider_credential_id,
+        :tokens_in,
+        :tokens_out,
+        :thinking_tokens,
+        :cache_creation_tokens,
+        :cache_read_tokens,
+        :cost_usd,
+        :cost_note,
+        :duration_ms,
+        :exit_status,
+        :worker_run_id,
+        :occurred_at,
+        :raw
+      ]
     end
   end
 
