@@ -1912,18 +1912,22 @@ defmodule Arbiter.Worker do
       :error
   end
 
-  # bd-28t80i round 2, finding 1: the running-total re-report is a property of
-  # agy's stream, confirmed live only for agy-dispatched runs (provider !=
-  # "claude" here, since agy always sets `session.provider` explicitly — see
-  # the `attrs.provider` derivation above). Claude's own `--resume` relaunches
-  # (nudges, auto-resume) report only THAT launch's usage, not a running
-  # total — `maybe_reconcile_usage_from_disk/3`'s `since: session.started_at`
-  # bound on the disk fallback already depends on this being true. Refreshing
-  # a Claude row in place would silently drop every earlier resume's tokens
-  # and cost instead of accumulating them, so Claude always inserts a new row
-  # per launch, exactly like before this fix existed.
+  # bd-28t80i round 3, finding 1: gate positively on the provider *shown* to
+  # re-report a running total (agy/gemini — see the bd-gjw1ze payloads quoted
+  # in the PR), not negatively on "not claude". Codex's own relaunches
+  # (`codex exec resume <thread_id>`) reuse the same `session_id` but each
+  # launch's `turn.completed` usage covers only that launch
+  # (`agents/codex/stream.ex:134-137`), so Codex must keep inserting a new
+  # row per launch exactly like Claude — refreshing in place would drop or
+  # clobber real per-launch tokens instead of accumulating them. Only widen
+  # this allowlist for a provider once its stream has been shown, from a real
+  # run, to report cumulative-since-start totals the way agy/gemini does.
+  @running_total_providers ["gemini"]
+
   defp existing_session_event(%{session_id: session_id}) when session_id in [nil, ""], do: nil
-  defp existing_session_event(%{provider: "claude"}), do: nil
+
+  defp existing_session_event(%{provider: provider}) when provider not in @running_total_providers,
+    do: nil
 
   defp existing_session_event(%{session_id: session_id, task_id: task_id}) do
     Arbiter.Usage.Event

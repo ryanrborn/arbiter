@@ -607,6 +607,163 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
     assert Enum.reduce(events, 0, &(&1.tokens_in + &2)) == 1200
   end
 
+  # bd-28t80i round 3, finding 1: `existing_session_event/1` now gates
+  # positively on `@running_total_providers` (gemini only), not negatively on
+  # "not claude" — so Codex, whose `turn.completed` usage covers only that
+  # one launch (see the moduledoc in `agents/codex/stream.ex` and its comment
+  # above `usage_fields(%{"type" => "turn.completed"}, ...)`: "a `codex exec
+  # resume` spawn opens its own port and its own usage row"), must keep
+  # inserting a new row per launch even though a resumed launch reuses the
+  # same `thread_id` as `session_id`. Refreshing in place here would either
+  # drop a smaller second launch's tokens (fails `usage_snapshot_supersedes?/2`)
+  # or silently replace the first launch's real spend with the second's.
+  test "two Codex turn.completed events sharing a thread_id (resume) stay two rows and add up" do
+    task_id = "bd-ledgercodex-resume-#{System.unique_integer([:positive])}"
+    thread_id = "codex-thread-dddd"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    build_events = fn tokens_in ->
+      [
+        Jason.encode!(%{"type" => "thread.started", "thread_id" => thread_id}),
+        Jason.encode!(%{
+          "type" => "turn.completed",
+          "usage" => %{
+            "input_tokens" => tokens_in,
+            "output_tokens" => 50,
+            "cached_input_tokens" => 10
+          }
+        })
+      ]
+      |> Enum.join("\n")
+    end
+
+    first_path = Path.join(cwd, "codex-resume-first-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(first_path, build_events.(1000) <> "\n")
+
+    {:ok, _port1} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", first_path],
+        provider: "codex"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+
+    second_path =
+      Path.join(cwd, "codex-resume-second-#{System.unique_integer([:positive])}.jsonl")
+
+    File.write!(second_path, build_events.(200) <> "\n")
+
+    {:ok, _port2} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", second_path],
+        provider: "codex"
+      )
+
+    :ok = wait_until(fn -> length(events_for(task_id)) == 2 end)
+
+    :ok = GenServer.stop(pid, :normal)
+
+    events = events_for(task_id)
+    assert length(events) == 2
+    assert Enum.all?(events, &(&1.session_id == thread_id))
+    assert Enum.all?(events, &(&1.provider == "codex"))
+    assert Enum.map(events, & &1.tokens_in) |> Enum.sort() == [200, 1000]
+    assert Enum.reduce(events, 0, &(&1.tokens_in + &2)) == 1200
+  end
+
+  # bd-28t80i round 3, finding 3: AC6's distinct-session guarantee must be
+  # exercised on the agy/gemini path itself, not just Claude — Claude never
+  # reaches `existing_session_event/1`'s lookup at all (it's gated out), so a
+  # Claude-only test proves nothing about whether two genuinely different
+  # agy conversations collapse into one row. Two `result` events with
+  # different `conversation_id`s must stay two rows, and the rollup
+  # (`Arbiter.Usage.summarize/1`) must report 2 rows/sessions with tokens
+  # that sum both.
+  test "two distinct agy sessions on the same task each keep their own ledger row" do
+    task_id = "bd-ledgeragy-multipass-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-ledger")
+
+    cwd = System.tmp_dir!()
+
+    build_result = fn session_id, tokens_in ->
+      [
+        Jason.encode!(%{"event" => "init", "conversation_id" => session_id}),
+        Jason.encode!(%{
+          "event" => "result",
+          "result" => %{
+            "conversation_id" => session_id,
+            "status" => "SUCCESS",
+            "duration_seconds" => 10.0,
+            "num_turns" => 1,
+            "usage" => %{
+              "input_tokens" => tokens_in,
+              "output_tokens" => 50,
+              "thinking_tokens" => 0,
+              "cache_read_tokens" => tokens_in * 2
+            }
+          }
+        })
+      ]
+      |> Enum.join("\n")
+    end
+
+    first_path = Path.join(cwd, "agy-multipass-first-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(first_path, build_result.("agy-session-work-aaaa", 100) <> "\n")
+
+    {:ok, _port1} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", first_path],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+
+    second_path =
+      Path.join(cwd, "agy-multipass-second-#{System.unique_integer([:positive])}.jsonl")
+
+    File.write!(second_path, build_result.("agy-session-review-bbbb", 200) <> "\n")
+
+    {:ok, _port2} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", second_path],
+        provider: "gemini",
+        model: "gemini-3.8-flash-low"
+      )
+
+    :ok = wait_until(fn -> length(events_for(task_id)) == 2 end)
+
+    :ok = GenServer.stop(pid, :normal)
+
+    events = events_for(task_id)
+    assert length(events) == 2
+
+    assert Enum.map(events, & &1.session_id) |> Enum.sort() == [
+             "agy-session-review-bbbb",
+             "agy-session-work-aaaa"
+           ]
+
+    assert Enum.map(events, & &1.tokens_in) |> Enum.sort() == [100, 200]
+
+    {:ok, [rollup]} = Arbiter.Usage.summarize(by: :task)
+    assert rollup.rows == 2
+    assert rollup.tokens_in == 300
+    assert rollup.tokens_out == 100
+    assert rollup.cache_read_tokens == 600
+  end
+
   # bd-28t80i AC6/AC7 regression: the `(task_id, session_id)` refresh must
   # only collapse a genuinely REPEATED session_id, never two real, distinct
   # sessions on the same task (e.g. a Claude work pass followed by a
@@ -666,6 +823,16 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
            ]
 
     assert Enum.map(events, & &1.cost_usd) |> Enum.sort() == [0.11, 0.22]
+
+    # bd-28t80i round 3, finding 4 (AC7): assert the rollup itself, not just
+    # the raw rows — a multi-pass Claude task's `Arbiter.Usage.summarize/1`
+    # (what backs `arb usage --by task`) must still report both passes summed
+    # under one task, unaffected by the agy-only refresh-in-place gate.
+    {:ok, [rollup]} = Arbiter.Usage.summarize(by: :task)
+    assert rollup.rows == 2
+    assert rollup.tokens_in == 200
+    assert rollup.tokens_out == 100
+    assert_in_delta rollup.total_cost_usd, 0.33, 0.0001
   end
 
   # P9 (bd-al9qqe, docs/provider-account-design.md §8): every code path that
