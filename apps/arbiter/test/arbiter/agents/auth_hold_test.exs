@@ -243,6 +243,30 @@ defmodule Arbiter.Agents.AuthHoldTest do
       refute CredentialWatchdog.expired?(Claude, watchdog)
     end
 
+    # bd-3kg53c round 2 finding 2: `mark_recovered/3`'s default source
+    # (`:worker_report`) does not recover a `:usage_poll`-raised mark
+    # (`recovers?(:usage_poll, :worker_report)` is false by design — an
+    # unrelated CLI probe passing says nothing about the usage poll's own
+    # cached credential). Before this fix, `AuthHold.reset/2` went through
+    # `mark_recovered/3`, so `arb breaker reset --auth-hold <provider>`
+    # silently no-opped on a usage-poll-only mark. An explicit operator reset
+    # must be an unconditional override, not another recovery signal.
+    test "an operator reset clears a CredentialWatchdog mark raised by :usage_poll" do
+      {hold, watchdog} = start_pair()
+
+      # :usage_poll never closes the dispatch gate on its own (bd-6jjgk0
+      # finding 1), so `expired?/2` stays false — `escalated?/2` is the
+      # source-agnostic check for "is there still an outstanding mark".
+      :ok = CredentialWatchdog.mark_expired(Claude, auth_reason(), watchdog, :usage_poll)
+      sync(watchdog)
+      assert CredentialWatchdog.escalated?(Claude, watchdog)
+
+      assert {:ok, [Claude]} = AuthHold.reset(Claude, hold)
+      sync(watchdog)
+
+      refute CredentialWatchdog.escalated?(Claude, watchdog)
+    end
+
     test "reset(:all) clears every open hold" do
       {hold, watchdog} = start_pair(threshold: 1)
 

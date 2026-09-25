@@ -150,28 +150,31 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       refute escalation.body =~ "2 consecutive 401s"
     end
 
-    test "escalates to the coordinator across all active workspaces" do
+    # bd-3kg53c round 2 finding 1: one expiry event must raise exactly one
+    # escalation, not one per workspace. The pre-fix `escalate_all/4` fanned
+    # out to every workspace returned by `Ash.read!(Workspace)`, so a single
+    # genuinely expired credential in a 3-workspace install sent 3 identical
+    # "credentials expired" escalations — the per-(workspace, adapter, source)
+    # dedupe in `CoordinatorNotifier` can't collapse those, since each row has
+    # a different `workspace_id`. Credentials are host-wide, so this now
+    # targets exactly one (the oldest, by uuid_v7 id) workspace.
+    test "raises exactly one escalation across multiple active workspaces" do
       {:ok, ws1} = Ash.create(Workspace, %{name: "cw-ws1", prefix: "cw1"})
       {:ok, ws2} = Ash.create(Workspace, %{name: "cw-ws2", prefix: "cw2"})
+      {:ok, ws3} = Ash.create(Workspace, %{name: "cw-ws3", prefix: "cw3"})
       pid = start_watchdog()
 
       :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
-      Process.sleep(100)
+      :sys.get_state(pid)
 
-      esc1 =
-        Message.inbox("admiral", workspace_id: ws1.id)
-        |> Enum.find(&(&1.kind == :escalation))
+      escalations =
+        [ws1, ws2, ws3]
+        |> Enum.flat_map(&Message.inbox("admiral", workspace_id: &1.id))
+        |> Enum.filter(&(&1.kind == :escalation and &1.subject =~ "credentials expired"))
 
-      esc2 =
-        Message.inbox("admiral", workspace_id: ws2.id)
-        |> Enum.find(&(&1.kind == :escalation))
-
-      assert esc1, "expected escalation in ws1 inbox"
-      assert esc2, "expected escalation in ws2 inbox"
-
-      assert esc1.subject =~ "credentials expired"
-      assert esc1.body =~ "Proactive credential probe"
-      assert esc1.body =~ "Re-authenticate"
+      assert [escalation] = escalations
+      assert escalation.body =~ "Proactive credential probe"
+      assert escalation.body =~ "Re-authenticate"
     end
   end
 

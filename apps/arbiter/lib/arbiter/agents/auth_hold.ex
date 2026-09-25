@@ -310,8 +310,11 @@ defmodule Arbiter.Agents.AuthHold do
     # always-available operator lever for a stuck expiry (see
     # `Arbiter.Worker.Dispatch.known_expired_stop_reason/1`), so it must clear
     # the watchdog mark unconditionally rather than only when this hold
-    # happened to be the thing that raised it.
-    watchdog_expired? = CredentialWatchdog.expired?(adapter, state.credential_watchdog)
+    # happened to be the thing that raised it. `escalated?/2`, not
+    # `expired?/2`, since a `:usage_poll`-raised mark never closes the
+    # dispatch gate on its own (bd-6jjgk0 finding 1) and would otherwise be
+    # invisible here, reporting `cleared: []` even though it was cleared.
+    watchdog_expired? = CredentialWatchdog.escalated?(adapter, state.credential_watchdog)
     clear_watchdog(state, adapter)
     cleared = if hold_open? or watchdog_expired?, do: [adapter], else: []
 
@@ -400,8 +403,12 @@ defmodule Arbiter.Agents.AuthHold do
     }
   end
 
+  # bd-3kg53c round 2: an operator reset is a deliberate override, not a
+  # recovery signal — it must clear a `:usage_poll`-only mark too, which
+  # `mark_recovered/3`'s source-matching (`recovers?/2`) would otherwise
+  # silently refuse to touch.
   defp clear_watchdog(state, adapter),
-    do: CredentialWatchdog.mark_recovered(adapter, state.credential_watchdog)
+    do: CredentialWatchdog.clear(adapter, state.credential_watchdog)
 
   defp entry(state, adapter), do: Map.get(state.adapters, adapter, empty_entry())
 
