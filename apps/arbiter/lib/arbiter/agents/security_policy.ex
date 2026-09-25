@@ -26,7 +26,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
           mode: :auto | :strict | :bypass,
           allow: [String.t()],          # operator-added allow rules (adapter-interpreted)
           deny:  [String.t()],          # operator-added deny rules (adapter-interpreted)
-          safe_defaults: [atom()]       # baseline destructive-op categories (non-empty by default)
+          safe_defaults: [atom()],      # resolved: safe_default_categories() -- safe_defaults_exclude
+          safe_defaults_exclude: [atom()] # categories explicitly dropped by name
         },
         sandbox: %{
           enabled: boolean(),
@@ -86,12 +87,33 @@ defmodule Arbiter.Agents.SecurityPolicy do
       `interactive_session_base/0` leaves it out, since an operator or
       coordinator session commenting on an issue is ordinary work.
 
-  Replaceable as a whole (set `safe_defaults: []` to opt a domain out — not
-  recommended), but defaults non-empty. They are enforced in **every** mode
-  including `:bypass`: `Arbiter.Agents.Claude.Security` expands them into the
-  deny document, and `--settings` carries that document even when
-  `--dangerously-skip-permissions` is passed. What `:bypass` skips is the
-  interactive classifier, not the deny list.
+  Enforced in **every** mode including `:bypass`: `Arbiter.Agents.Claude.Security`
+  expands them into the deny document, and `--settings` carries that document
+  even when `--dangerously-skip-permissions` is passed. What `:bypass` skips is
+  the interactive classifier, not the deny list.
+
+  ### `permissions.safe_defaults_exclude` (bd-4420va)
+
+  The **only** supported way to drop a category from `safe_default_categories/0`
+  by name. Each layer's exclude list **unions** onto the previous (like
+  `allow`/`deny`) — once a layer excludes a category it stays excluded unless
+  a later config edit removes it from the exclude list. The resolved
+  `permissions.safe_defaults` is always `safe_default_categories() --
+  safe_defaults_exclude`.
+
+  The legacy `permissions.safe_defaults` config key (a literal, replacing
+  list) is still read without error, but is **inert**: it no longer narrows
+  the resolved set. It used to — a workspace that pinned a subset (say, the 4
+  categories that existed before v0.1.78 added 4 more) silently never
+  resolved a category added after it pinned, with nothing surfacing the gap
+  (vstim missed `:no_public_upload`, `:no_pr_create`, `:no_async_wait` and
+  `:no_gh_publish` this way). No manual migration is required: an old pinned
+  `safe_defaults` list keeps parsing, it just no longer excludes anything —
+  every current default category applies unless separately named in
+  `safe_defaults_exclude`. `arb server doctor` / `arb prime` name any category
+  a workspace's resolved policy excludes (`SecurityPolicy.summary/1`'s
+  `"safe_defaults_exclude"` key), so an exclusion is always visible rather
+  than silent.
 
   ### `sandbox`
 
@@ -127,13 +149,15 @@ defmodule Arbiter.Agents.SecurityPolicy do
        sets it — the common case — resolves exactly as before.
     5. an explicit per-dispatch / per-task `override` map.
 
-  For `permissions.allow` / `permissions.deny` each layer **unions** onto the
-  previous (a domain adds to the baseline rather than dropping it) — so a
-  repo override *adds* allow/deny rules on top of the workspace posture. `mode`,
-  `safe_defaults`, and every `sandbox` field are **replaced** by the highest
-  layer that sets them. Unknown / malformed values are ignored (the codebase
-  reads JSON config leniently), so a typo degrades to the safer inherited
-  value rather than raising.
+  For `permissions.allow` / `permissions.deny` / `permissions.safe_defaults_exclude`
+  each layer **unions** onto the previous (a domain adds to the baseline
+  rather than dropping it) — so a repo override *adds* allow/deny rules, or
+  further exclusions, on top of the workspace posture. `mode` and every
+  `sandbox` field are **replaced** by the highest layer that sets them. The
+  legacy `permissions.safe_defaults` key is inert (see above) — it is parsed
+  but never changes the resolved set. Unknown / malformed values are ignored
+  (the codebase reads JSON config leniently), so a typo degrades to the safer
+  inherited value rather than raising.
   """
 
   alias Arbiter.Tasks.RepoConfig
@@ -149,7 +173,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
             mode: mode(),
             allow: [String.t()],
             deny: [String.t()],
-            safe_defaults: [atom()]
+            safe_defaults: [atom()],
+            safe_defaults_exclude: [atom()]
           },
           sandbox: %{
             enabled: boolean(),
@@ -242,7 +267,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         mode: :bypass,
         allow: [],
         deny: [],
-        safe_defaults: @safe_default_categories
+        safe_defaults: @safe_default_categories,
+        safe_defaults_exclude: []
       },
       sandbox: %{
         enabled: true,
@@ -303,13 +329,15 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @spec interactive_session_base() :: t()
   def interactive_session_base do
     base = base()
+    excluded = [:no_async_wait, :no_gh_publish]
 
     %{
       base
       | permissions: %{
           base.permissions
           | mode: :auto,
-            safe_defaults: @safe_default_categories -- [:no_async_wait, :no_gh_publish],
+            safe_defaults: @safe_default_categories -- excluded,
+            safe_defaults_exclude: excluded,
             deny: base.permissions.deny ++ ["Bash(arb mcp token mint:*)"]
         }
     }
@@ -447,11 +475,14 @@ defmodule Arbiter.Agents.SecurityPolicy do
   end
 
   defp merge_permissions(base, raw) do
+    exclude = union(base.safe_defaults_exclude, parse_category_list(get(raw, :safe_defaults_exclude)))
+
     %{
       mode: parse_mode(get(raw, :mode), base.mode),
       allow: union(base.allow, list_of_strings(get(raw, :allow))),
       deny: union(base.deny, list_of_strings(get(raw, :deny))),
-      safe_defaults: parse_safe_defaults(get(raw, :safe_defaults), base.safe_defaults)
+      safe_defaults: @safe_default_categories -- exclude,
+      safe_defaults_exclude: exclude
     }
   end
 
@@ -476,6 +507,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
       "allow" => p.permissions.allow,
       "deny" => p.permissions.deny,
       "safe_defaults" => Enum.map(p.permissions.safe_defaults, &Atom.to_string/1),
+      "safe_defaults_exclude" => Enum.map(p.permissions.safe_defaults_exclude, &Atom.to_string/1),
       "sandbox" => %{
         "enabled" => p.sandbox.enabled,
         "filesystem" => Atom.to_string(p.sandbox.filesystem),
@@ -545,19 +577,18 @@ defmodule Arbiter.Agents.SecurityPolicy do
   defp parse_bool("false", _fallback), do: false
   defp parse_bool(_other, fallback), do: fallback
 
-  # safe_defaults, if present at a layer, *replaces* (so a domain can opt out
-  # by setting `[]`). An absent key inherits. Unknown category names are
-  # dropped, not raised.
-  defp parse_safe_defaults(nil, fallback), do: fallback
-
-  defp parse_safe_defaults(list, _fallback) when is_list(list) do
+  # `safe_defaults_exclude` entries: unknown category names are dropped, not
+  # raised — same leniency as everywhere else in this parser. An absent /
+  # malformed value contributes nothing (the caller unions onto the inherited
+  # exclude set, so this is a no-op layer, not a reset).
+  defp parse_category_list(list) when is_list(list) do
     list
     |> Enum.map(&to_atom/1)
     |> Enum.filter(&(&1 in @safe_default_categories))
     |> Enum.uniq()
   end
 
-  defp parse_safe_defaults(_other, fallback), do: fallback
+  defp parse_category_list(_other), do: []
 
   defp to_atom(v) when is_atom(v), do: v
 

@@ -147,7 +147,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 8
+    assert length(checks) == 9
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -710,6 +710,60 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       assert out =~ "[ ok ] safe to restart"
       assert out =~ "could not determine"
+    end
+  end
+
+  # bd-4420va: a pinned `safe_defaults` list used to silently resolve fewer
+  # categories than the workspace default the moment a new one shipped
+  # (vstim missed :no_public_upload after v0.1.78 added it). The legacy key
+  # is now inert, so this only fires on an explicit `safe_defaults_exclude` —
+  # but that should be visible in `arb doctor`, not just discoverable live.
+  describe "workspace safe-default categories check" do
+    test "green when no workspace excludes a current default category" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] workspace safe-default categories"
+    end
+
+    test "names the workspace and the missing categories when one excludes a default" do
+      workspaces_with_gap = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => ["no_destructive_fs", "no_force_push"],
+              "safe_defaults_exclude" => ["no_public_upload"],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true}
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspaces_with_gap, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      # Non-fatal: named, but does not block readiness or fail the exit code.
+      assert exit_code == 0
+      assert out =~ "[fail] workspace safe-default categories"
+      assert out =~ "default: no_public_upload"
     end
   end
 end

@@ -34,7 +34,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_versions(),
       check_migrations(),
       check_bind_address(),
-      check_restart_safety()
+      check_restart_safety(),
+      check_security_defaults()
     ]
   end
 
@@ -429,6 +430,70 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       fatal: true,
       blocks_readiness: false
     }
+  end
+
+  # bd-4420va: a workspace that pinned `agent.security.permissions.safe_defaults`
+  # before a new default category shipped (vstim pinning the 4 categories that
+  # existed pre-v0.1.78) used to silently resolve fewer categories than a
+  # workspace that never pinned, with nothing surfacing the gap. The legacy
+  # `safe_defaults` key is now inert (see `Arbiter.Agents.SecurityPolicy`), so
+  # this only ever fires when a workspace explicitly names a category in
+  # `safe_defaults_exclude` — but that exclusion should still be visible here
+  # rather than only discoverable in a live worker's `--settings`.
+  defp check_security_defaults do
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} when is_list(list) ->
+        offenders =
+          list
+          |> Enum.map(fn ws -> {workspace_label(ws), missing_safe_defaults(ws)} end)
+          |> Enum.filter(fn {_name, missing} -> missing != [] end)
+
+        security_defaults_result(offenders)
+
+      _ ->
+        %Result{
+          name: "workspace safe-default categories",
+          status: :ok,
+          detail: "server unreachable — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  defp security_defaults_result([]) do
+    %Result{
+      name: "workspace safe-default categories",
+      status: :ok,
+      detail: "every workspace resolves every current default category",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp security_defaults_result(offenders) do
+    detail =
+      Enum.map_join(offenders, "; ", fn {name, missing} -> "#{name}: #{Enum.join(missing, ", ")}" end)
+
+    %Result{
+      name: "workspace safe-default categories",
+      status: :fail,
+      detail: "missing default categories — #{detail}",
+      hint:
+        "Add `agent.security.permissions.safe_defaults_exclude` explicitly if that's " <>
+          "intentional, or remove it to pick the category back up.",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp workspace_label(ws), do: Map.get(ws, "name") || Map.get(ws, "id") || "(unnamed)"
+
+  defp missing_safe_defaults(ws) do
+    case Map.get(ws, "security_posture") do
+      %{"safe_defaults_exclude" => excl} when is_list(excl) -> excl
+      _ -> []
+    end
   end
 
   # `%{name: , config: }` per workspace — the name so a failure can point at

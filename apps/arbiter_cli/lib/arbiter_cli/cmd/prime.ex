@@ -405,6 +405,7 @@ defmodule ArbiterCli.Cmd.Prime do
     deny = List.wrap(posture["deny"])
     safe = List.wrap(posture["safe_defaults"])
     allow = List.wrap(posture["allow"])
+    missing = List.wrap(posture["safe_defaults_exclude"])
 
     net = if Map.get(sandbox, "network", true), do: "on", else: "tools-off"
 
@@ -420,6 +421,13 @@ defmodule ArbiterCli.Cmd.Prime do
       "    deny:    #{length(safe)} safe-default + #{length(deny)} custom" <>
         ", allow: #{length(allow)}"
     )
+
+    # bd-4420va: name every current default category this workspace's
+    # resolved policy excludes, so an operator sees it here rather than
+    # discovering it live in a worker's --settings.
+    if missing != [] do
+      IO.puts("    WARNING: missing safe-default categories: #{Enum.join(missing, ", ")}")
+    end
   end
 
   defp emit_security_posture(_), do: :ok

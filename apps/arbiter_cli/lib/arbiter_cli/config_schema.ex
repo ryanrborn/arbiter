@@ -101,9 +101,19 @@ defmodule ArbiterCli.ConfigSchema do
         strict  — only explicitly allowed tools run; unlisted tools are denied.
       permissions.allow         list of operator-added allow rules (adapter-interpreted)
       permissions.deny          list of operator-added deny rules (adapter-interpreted)
-      permissions.safe_defaults list of baseline destructive-op categories, each
-                                one of: #{Enum.join(@safe_default_categories, ", ")}
-                                (default: all five; set [] to opt a domain out)
+      permissions.safe_defaults DEPRECATED / INERT — no longer narrows the
+                                resolved set (bd-4420va: a pinned list used to
+                                replace the baseline, so a workspace that
+                                pinned it silently never got a category added
+                                later). Still parsed without error for
+                                backward compat, but has no effect. Use
+                                permissions.safe_defaults_exclude instead.
+      permissions.safe_defaults_exclude
+                                list of baseline destructive-op categories to
+                                turn OFF by name — the only supported way to
+                                drop one, each one of:
+                                #{Enum.join(@safe_default_categories, ", ")}
+                                (default: []; every current category applies)
       sandbox.enabled           bool                                     (default: true)
       sandbox.filesystem        one of: #{Enum.join(@sandbox_filesystems, ", ")}       (default: worktree)
       sandbox.network           bool — false cuts network-egress tools   (default: true)
