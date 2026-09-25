@@ -1926,8 +1926,9 @@ defmodule Arbiter.Worker do
 
   defp existing_session_event(%{session_id: session_id}) when session_id in [nil, ""], do: nil
 
-  defp existing_session_event(%{provider: provider}) when provider not in @running_total_providers,
-    do: nil
+  defp existing_session_event(%{provider: provider})
+       when provider not in @running_total_providers,
+       do: nil
 
   defp existing_session_event(%{session_id: session_id, task_id: task_id}) do
     Arbiter.Usage.Event
