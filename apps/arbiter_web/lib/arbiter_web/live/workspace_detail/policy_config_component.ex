@@ -1,8 +1,7 @@
 defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   @moduledoc """
-  The workspace's dispatch policy: which agent types run (and in what
-  precedence order), which tracker/merger back the workspace, and the
-  `merge.*` / `review*` / `routing.*` / `quota.*` / `conductor.*` /
+  The workspace's dispatch policy: which tracker/merger back the workspace,
+  and the `merge.*` / `review*` / `routing.*` / `quota.*` / `conductor.*` /
   `pr_patrol.*` knobs that shape every dispatch.
 
   One form, one submit: these fields are read together at dispatch time, so
@@ -15,9 +14,8 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   the same config subtrees and survive the deep merge untouched, which is
   why they live in their own sibling components.
 
-  The agent-type precedence editors write immediately (each click is its own
-  `patch_config`) rather than participating in the submit, matching the
-  add/remove-row behavior of the other list editors on this page.
+  Which providers each role runs on (`agent.type` / `review_agent.type`) is
+  `ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent`'s, not this form's.
   """
   use ArbiterWeb, :live_component
 
@@ -50,10 +48,8 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   # own write as well as on a parent update: the `{:workspace_updated, _}` a
   # write sends up is a second round trip, and until it lands the operator
   # would be looking at the previous tracker type's fields.
-  defp load_derived(%{assigns: %{workspace: ws, agent_types: agent_types}} = socket) do
-    socket
-    |> assign(:tracker_type_preview, cfg(ws, ["tracker", "type"], "none"))
-    |> assign(:account_labels, account_labels(ws, agent_types))
+  defp load_derived(%{assigns: %{workspace: ws}} = socket) do
+    assign(socket, :tracker_type_preview, cfg(ws, ["tracker", "type"], "none"))
   end
 
   @impl true
@@ -111,64 +107,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   # doesn't require a round trip to see the right adapter fields appear.
   def handle_event("preview_tracker_type", %{"config" => params}, socket) do
     {:noreply, assign(socket, :tracker_type_preview, params["tracker_type"] || "none")}
-  end
-
-  # ---- agent-type precedence list (agent.type / review_agent.type) ----
-
-  def handle_event("add_agent_type", %{"role" => role, "type" => type}, socket) do
-    update_agent_types(socket, role, fn list ->
-      if type in list, do: list, else: list ++ [type]
-    end)
-  end
-
-  def handle_event("remove_agent_type", %{"role" => role, "type" => type}, socket) do
-    update_agent_types(socket, role, &List.delete(&1, type))
-  end
-
-  def handle_event("move_agent_type", %{"role" => role, "type" => type, "dir" => dir}, socket) do
-    update_agent_types(socket, role, &move_type(&1, type, dir))
-  end
-
-  defp update_agent_types(socket, role, fun) do
-    ws = socket.assigns.workspace
-    new_list = ws |> agent_type_list(role) |> fun.() |> Enum.uniq()
-    default = if role == "agent", do: "claude", else: nil
-
-    {patch, unset_paths} =
-      case type_value(new_list, default) do
-        nil -> {%{}, ["#{role}.type"]}
-        value -> {%{role => %{"type" => value}}, []}
-      end
-
-    case patch_config(ws, patch, unset_paths) do
-      {:ok, updated} ->
-        {:noreply, socket |> apply_workspace(updated) |> assign(:config_error, nil)}
-
-      {:error, msg} ->
-        {:noreply, assign(socket, :config_error, msg)}
-    end
-  end
-
-  defp move_type(list, type, "up") do
-    case Enum.find_index(list, &(&1 == type)) do
-      nil -> list
-      0 -> list
-      idx -> swap(list, idx, idx - 1)
-    end
-  end
-
-  defp move_type(list, type, "down") do
-    case Enum.find_index(list, &(&1 == type)) do
-      nil -> list
-      idx when idx == length(list) - 1 -> list
-      idx -> swap(list, idx, idx + 1)
-    end
-  end
-
-  defp swap(list, i, j) do
-    a = Enum.at(list, i)
-    b = Enum.at(list, j)
-    list |> List.replace_at(i, b) |> List.replace_at(j, a)
   end
 
   # ---- config patch builders ----
@@ -325,38 +263,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
 
   # ---- form prefill ----
 
-  defp agent_type_list(ws, role) do
-    case cfg(ws, [role, "type"]) do
-      t when is_binary(t) -> [t]
-      types when is_list(types) -> types
-      _ -> []
-    end
-  end
-
-  # P10 (`docs/provider-account-design.md` §8, bd-icwk2k): "which account is
-  # this workspace's Claude on?" has nowhere to answer that question until
-  # now — `%{"claude" => "personal-max", ...}`, one entry per provider this
-  # workspace is actually linked to. A read-only lookup off the
-  # `workspace_provider_accounts` join, so — like `Usage`/`Quota`'s own
-  # account reads — it needs no `Accounts.enabled?/0` gate: that flag guards
-  # the *credential* read path, not whether a link can be shown.
-  defp account_labels(%Workspace{id: ws_id}, agent_types) do
-    for provider <- agent_types,
-        account = Arbiter.Accounts.Resolver.account(ws_id, provider),
-        not is_nil(account),
-        into: %{} do
-      {provider, account.slug}
-    end
-  end
-
-  # Collapse a checkbox selection back to the config shape: a single
-  # provider saves as a scalar string (matching existing single-provider
-  # workspaces), multiple providers save as a pool list. An empty selection
-  # falls back to `default` (nil signals "unset this key").
-  defp type_value([], default), do: default
-  defp type_value([single], _default), do: single
-  defp type_value(many, _default) when is_list(many), do: many
-
   defp review_required?(ws), do: cfg(ws, ["review", "required"]) in [true, "true"]
 
   defp pr_patrol_author_logins_text(ws) do
@@ -375,98 +281,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
 
   # ---- render ----
 
-  attr :role, :string, required: true
-  attr :label, :string, required: true
-  attr :consequence, :string, required: true
-  attr :selected, :list, required: true
-  attr :available, :list, required: true
-  attr :target, :any, required: true
-  attr :account_labels, :map, default: %{}
-
-  defp agent_type_editor(assigns) do
-    ~H"""
-    <.setting_row name={@label} consequence={@consequence}>
-      <:below>
-        <ol class="m-0 flex flex-col gap-1 p-0">
-          <li
-            :for={{type, idx} <- Enum.with_index(@selected)}
-            class="flex items-center gap-2 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-card)] px-2 py-1 font-[family-name:var(--font-mono)] text-[11.5px]"
-          >
-            <span class="w-4 text-[var(--text-label)]">{idx + 1}</span>
-            <span class="flex-1 text-[var(--arb-text-body)]">{type}</span>
-            <span
-              :if={Map.get(@account_labels, type)}
-              class="text-[9.5px] text-[var(--text-label)]"
-              title={"Provider account this workspace's #{type} is metered under"}
-            >
-              account: {Map.get(@account_labels, type)}
-            </span>
-            <button
-              type="button"
-              phx-target={@target}
-              phx-click="move_agent_type"
-              phx-value-role={@role}
-              phx-value-type={type}
-              phx-value-dir="up"
-              disabled={idx == 0}
-              class={icon_button()}
-              aria-label={"Move #{type} up"}
-            >
-              <Core.icon name="hero-chevron-up" size={12} />
-            </button>
-            <button
-              type="button"
-              phx-target={@target}
-              phx-click="move_agent_type"
-              phx-value-role={@role}
-              phx-value-type={type}
-              phx-value-dir="down"
-              disabled={idx == length(@selected) - 1}
-              class={icon_button()}
-              aria-label={"Move #{type} down"}
-            >
-              <Core.icon name="hero-chevron-down" size={12} />
-            </button>
-            <button
-              type="button"
-              phx-target={@target}
-              phx-click="remove_agent_type"
-              phx-value-role={@role}
-              phx-value-type={type}
-              class={icon_button(:danger)}
-              aria-label={"Remove #{type}"}
-            >
-              <Core.icon name="hero-x-mark" size={12} />
-            </button>
-          </li>
-          <li
-            :if={@selected == []}
-            class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
-          >
-            None selected.
-          </li>
-        </ol>
-        <div :if={@available != []} class="mt-1 flex flex-wrap gap-1">
-          <button
-            :for={type <- @available}
-            type="button"
-            phx-target={@target}
-            phx-click="add_agent_type"
-            phx-value-role={@role}
-            phx-value-type={type}
-            class={[
-              value_chip(),
-              "cursor-pointer gap-1 hover:border-[var(--accent-primary)] hover:text-[var(--text-body)]"
-            ]}
-          >
-            <Core.icon name="hero-plus" size={11} /> {type}
-          </button>
-        </div>
-      </:below>
-    </.setting_row>
-    """
-  end
-
   @impl true
   def render(assigns) do
     ~H"""
@@ -483,24 +297,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
           phx-target={@myself}
         >
           <.rows>
-            <.agent_type_editor
-              role="agent"
-              target={@myself}
-              label="Worker agent pool"
-              consequence="agent.type — dispatch takes the first type in this list that is installed and under quota"
-              selected={agent_type_list(@workspace, "agent")}
-              available={@agent_types -- agent_type_list(@workspace, "agent")}
-              account_labels={@account_labels}
-            />
-            <.agent_type_editor
-              role="review_agent"
-              target={@myself}
-              label="Review agent pool"
-              consequence="review_agent.type — leave empty and reviews run on the worker agent's type"
-              selected={agent_type_list(@workspace, "review_agent")}
-              available={@agent_types -- agent_type_list(@workspace, "review_agent")}
-            />
-
             <.setting_row
               name="Tracker type"
               consequence="which tracker issues sync to; none keeps them local to Arbiter"

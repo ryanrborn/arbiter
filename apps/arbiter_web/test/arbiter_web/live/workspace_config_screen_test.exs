@@ -5,7 +5,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   `ArbiterWeb.WorkspaceLiveTest` pins the *behaviour* (every form, every
   validation) and `ArbiterWeb.WorkspaceDetailComponentsTest` pins *who owns
   which event*. What neither can see is the shape the operator actually reads:
-  the eight-item section rail, and the rule that no setting is ever shown
+  the nine-item section rail, and the rule that no setting is ever shown
   without a one-line statement of what changing it does. Those are pinned here
   so a future restyle cannot quietly drop them.
   """
@@ -19,6 +19,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   @sections [
     {"repos", "Repos"},
     {"policy", "Policy"},
+    {"providers", "Providers"},
     {"agent_models", "Agent models"},
     {"routing", "Routing"},
     {"standing_orders", "Standing orders"},
@@ -34,7 +35,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   end
 
   describe "the section rail" do
-    test "offers all eight sections, in the handoff order", %{conn: conn} do
+    test "offers all nine sections, in the handoff order", %{conn: conn} do
       ws = new_workspace()
       {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
 
