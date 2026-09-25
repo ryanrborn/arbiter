@@ -259,6 +259,17 @@ A join row, `workspace_provider_accounts`:
 
 Unique on `(workspace_id, provider)`.
 
+> **As shipped (bd-64apru).** The row also carries `implementer_position` and
+> `reviewer_position`: the account's place in that role's preference order on
+> this workspace, `nil` = not allowed for the role. They are the per-role
+> candidate set provider routing selects from (bd-40pzpj), read through
+> `Arbiter.Accounts.ProviderSettings.effective/2`, which falls back to
+> `agent.type` / `review_agent.type` while a role has nothing attached. Writes
+> project the attached list back onto those keys so today's dispatch path runs
+> on it. The workspace page's **Providers** section is the editor. §3.4's
+> cardinality is unchanged: two roles cannot sit on two different accounts of
+> one provider.
+
 Why a join table and not three nullable FK columns on `workspaces`: the provider
 set grows (Antigravity is recent), a column per provider does not scale, and the
 join row is the natural home for `share`. It is also the same `(workspace_id,

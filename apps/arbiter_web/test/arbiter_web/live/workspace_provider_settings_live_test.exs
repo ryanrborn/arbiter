@@ -35,7 +35,9 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
 
   defp click(view, event, role, account) do
     view
-    |> element(~s(button[phx-click=#{event}][phx-value-role=#{role}][phx-value-account="#{account.id}"]))
+    |> element(
+      ~s(button[phx-click=#{event}][phx-value-role=#{role}][phx-value-account="#{account.id}"])
+    )
     |> render_click()
   end
 
@@ -57,7 +59,11 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
   test "the rail has a Providers section", %{conn: conn} do
     view = open(conn, workspace!())
 
-    assert has_element?(view, ~s(#ws-rail button[phx-value-section=providers][aria-selected=true]))
+    assert has_element?(
+             view,
+             ~s(#ws-rail button[phx-value-section=providers][aria-selected=true])
+           )
+
     assert has_element?(view, "#provider-settings")
   end
 

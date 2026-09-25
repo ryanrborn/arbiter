@@ -148,13 +148,19 @@ defmodule Arbiter.Accounts.ProviderSettings do
   @doc "Swap `account_id` with its neighbour in `role`'s order (`:up` = preferred)."
   @spec move(Workspace.t(), role(), String.t(), :up | :down) ::
           {:ok, Workspace.t()} | {:error, term()}
-  def move(%Workspace{} = ws, role, account_id, dir) when role in @roles and dir in [:up, :down] do
+  def move(%Workspace{} = ws, role, account_id, dir)
+      when role in @roles and dir in [:up, :down] do
     transact(ws, role, fn links ->
       rows = allowed(links, role)
 
       case Enum.find_index(rows, &(&1.provider_account_id == account_id)) do
-        nil -> {:ok, :unchanged}
-        idx -> rows |> swap(idx, if(dir == :up, do: idx - 1, else: idx + 1)) |> write_order(role, links)
+        nil ->
+          {:ok, :unchanged}
+
+        idx ->
+          rows
+          |> swap(idx, if(dir == :up, do: idx - 1, else: idx + 1))
+          |> write_order(role, links)
       end
     end)
   end
@@ -179,7 +185,9 @@ defmodule Arbiter.Accounts.ProviderSettings do
       {:error, :nothing_to_adopt}
     else
       transact(ws, role, fn links ->
-        ordered = Enum.map(accounts, fn a -> Enum.find(links, &(&1.provider_account_id == a.id)) end)
+        ordered =
+          Enum.map(accounts, fn a -> Enum.find(links, &(&1.provider_account_id == a.id)) end)
+
         write_order(ordered, role, links)
       end)
     end
@@ -222,8 +230,18 @@ defmodule Arbiter.Accounts.ProviderSettings do
         provider = Resolver.provider_atom(type)
 
         case Enum.find(links, &(&1.provider == provider)) do
-          nil -> %{agent_type: type, provider: provider, account: nil, share: nil, ceiling: nil, cap: nil}
-          link -> %{candidate(link) | agent_type: type}
+          nil ->
+            %{
+              agent_type: type,
+              provider: provider,
+              account: nil,
+              share: nil,
+              ceiling: nil,
+              cap: nil
+            }
+
+          link ->
+            %{candidate(link) | agent_type: type}
         end
       end)
 

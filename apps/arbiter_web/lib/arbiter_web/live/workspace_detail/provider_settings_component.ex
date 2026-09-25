@@ -571,7 +571,9 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
                   class="w-[52px] text-right text-[10.5px] text-[var(--text-secondary)]"
                   title="effective cap = min(account ceiling, share)"
                 >
-                  cap {cap_text(ProviderSettings.cap(link.provider_account.max_concurrent, link.share))}
+                  cap {cap_text(
+                    ProviderSettings.cap(link.provider_account.max_concurrent, link.share)
+                  )}
                 </span>
               </.list_row>
             </ul>

@@ -263,7 +263,10 @@ defmodule Arbiter.Accounts.ProviderSettingsTest do
       {:ok, ws} = ProviderSettings.add(ws, :implementer, acct.id)
 
       assert {:ok, _} = ProviderSettings.set_share(ws, acct.id, 2)
-      assert [%{share: 2, cap: 2, ceiling: 4}] = ProviderSettings.effective(ws, :implementer).candidates
+
+      assert [%{share: 2, cap: 2, ceiling: 4}] =
+               ProviderSettings.effective(ws, :implementer).candidates
+
       assert Arbiter.Accounts.Resolver.share(ws.id, :claude) == 2
 
       assert {:ok, _} = ProviderSettings.set_share(ws, acct.id, nil)
