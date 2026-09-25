@@ -1764,6 +1764,48 @@ defmodule Arbiter.Worker do
   # implementer (meta.role == :implementer) a `:impl` row; everything else
   # writes `:work`. Missing fields are fine — we record what we have rather
   # than dropping the row.
+  # Mirrors `Arbiter.Usage.Event`'s `:refresh_snapshot` accept list — the
+  # identity fields (`task_id`, `session_id`, `step`, `base_task_id`, `role`,
+  # `source`) never change on a refresh, only the measured/known fields do.
+  @refresh_snapshot_fields [
+    :workspace_id,
+    :repo,
+    :model,
+    :provider,
+    :provider_account_id,
+    :provider_credential_id,
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note,
+    :duration_ms,
+    :exit_status,
+    :worker_run_id,
+    :occurred_at,
+    :raw
+  ]
+
+  # bd-28t80i round 2, finding 2: the fields that actually carry "the
+  # session's numbers" as opposed to bookkeeping metadata. A relaunch that
+  # dies before its `result` event (or the terminate backstop) reaches
+  # `record_usage_event/3` with a token-less `usage` map — see
+  # `flush_unterminated_sessions/1` and the `:cryhwk` backstop below. Blindly
+  # copying that onto an existing refreshed row would replace a complete
+  # snapshot with nils. These fields are only carried onto the refresh when
+  # the new snapshot actually has tokens.
+  @refresh_snapshot_usage_fields [
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note
+  ]
+
   # Pre-existing complexity 10 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -1832,16 +1874,34 @@ defmodule Arbiter.Worker do
       role: role_to_usage_step(role)
     }
 
-    case Ash.create(Arbiter.Usage.Event, attrs) do
-      {:ok, _row} ->
-        :ok
+    case existing_session_event(attrs) do
+      nil ->
+        case Ash.create(Arbiter.Usage.Event, attrs) do
+          {:ok, _row} ->
+            :ok
 
-      {:error, reason} ->
-        Logger.warning(
-          "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
-        )
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
 
-        :error
+            :error
+        end
+
+      existing ->
+        refresh_attrs = refresh_snapshot_attrs(attrs, existing)
+
+        case Ash.update(existing, refresh_attrs, action: :refresh_snapshot) do
+          {:ok, _row} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 refresh swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
+
+            :error
+        end
     end
   rescue
     e ->
@@ -1850,6 +1910,87 @@ defmodule Arbiter.Worker do
       )
 
       :error
+  end
+
+  # bd-28t80i round 3, finding 1: gate positively on the provider *shown* to
+  # re-report a running total (agy/gemini — see the bd-gjw1ze payloads quoted
+  # in the PR), not negatively on "not claude". Codex's own relaunches
+  # (`codex exec resume <thread_id>`) reuse the same `session_id` but each
+  # launch's `turn.completed` usage covers only that launch
+  # (`agents/codex/stream.ex:134-137`), so Codex must keep inserting a new
+  # row per launch exactly like Claude — refreshing in place would drop or
+  # clobber real per-launch tokens instead of accumulating them. Only widen
+  # this allowlist for a provider once its stream has been shown, from a real
+  # run, to report cumulative-since-start totals the way agy/gemini does.
+  @running_total_providers ["gemini"]
+
+  defp existing_session_event(%{session_id: session_id}) when session_id in [nil, ""], do: nil
+
+  defp existing_session_event(%{provider: provider})
+       when provider not in @running_total_providers,
+       do: nil
+
+  defp existing_session_event(%{session_id: session_id, task_id: task_id}) do
+    Arbiter.Usage.Event
+    |> Ash.Query.filter(session_id == ^session_id and task_id == ^task_id)
+    |> Ash.Query.sort(inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  end
+
+  # bd-28t80i round 2, finding 2: only carry the usage fields onto a refresh
+  # when the new snapshot actually reports tokens, and only when it is at
+  # least as large as what is already stored (agy's counters are monotonic
+  # running totals, so a smaller number means this `result` is stale/partial,
+  # not a real new total). Otherwise keep the existing row's numbers exactly
+  # as they were and only refresh bookkeeping fields (exit_status,
+  # occurred_at, worker_run_id, model/provider/account identity) — this
+  # still lets a killed-before-`result` relaunch update "when this session
+  # was last touched" without erasing a real snapshot.
+  #
+  # `duration_ms` and `raw` are carved out of that bookkeeping set (round 2
+  # finding 2): a relaunch killed before its `result` event reports its OWN
+  # short wall-clock `duration_ms` (see `wall_clock_duration_ms/2` above) and
+  # a `raw` with no tokens in it. Blindly overwriting the stored row with
+  # those would shrink a real 421s cumulative duration down to a few seconds
+  # and desync `raw` from the tokens that were kept. `duration_ms` always
+  # keeps the larger of the two so it only ever grows; `raw` only moves when
+  # the usage snapshot itself does, so it always describes the tokens on the
+  # row.
+  defp refresh_snapshot_attrs(attrs, existing) do
+    non_usage_fields = @refresh_snapshot_fields -- @refresh_snapshot_usage_fields
+    bookkeeping_fields = non_usage_fields -- [:duration_ms, :raw]
+
+    bookkeeping =
+      attrs
+      |> Map.take(bookkeeping_fields)
+      |> Map.put(
+        :duration_ms,
+        max_duration_ms(Map.get(attrs, :duration_ms), existing.duration_ms)
+      )
+
+    if usage_snapshot_supersedes?(attrs, existing) do
+      bookkeeping
+      |> Map.put(:raw, Map.get(attrs, :raw))
+      |> Map.merge(Map.take(attrs, @refresh_snapshot_usage_fields))
+    else
+      bookkeeping
+    end
+  end
+
+  defp max_duration_ms(nil, existing_duration_ms), do: existing_duration_ms
+  defp max_duration_ms(new_duration_ms, nil), do: new_duration_ms
+
+  defp max_duration_ms(new_duration_ms, existing_duration_ms),
+    do: max(new_duration_ms, existing_duration_ms)
+
+  defp usage_snapshot_supersedes?(%{tokens_in: nil}, _existing), do: false
+
+  defp usage_snapshot_supersedes?(%{tokens_in: _new_tokens_in}, %{tokens_in: nil}), do: true
+
+  defp usage_snapshot_supersedes?(%{tokens_in: new_tokens_in}, %{tokens_in: existing_tokens_in}) do
+    new_tokens_in >= existing_tokens_in
   end
 
   # bd-cryhwk: terminate-time backstop for `record_usage_event/3`. Every
