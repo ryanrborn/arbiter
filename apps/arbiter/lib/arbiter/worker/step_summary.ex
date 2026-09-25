@@ -26,6 +26,8 @@ defmodule Arbiter.Worker.StepSummary do
   summary is part of how much you should trust it.
   """
 
+  require Logger
+
   @input_summary_max 200
   @output_summary_max 2000
 
@@ -56,6 +58,33 @@ defmodule Arbiter.Worker.StepSummary do
     |> redact(redact_values)
     |> truncate(@output_summary_max)
   end
+
+  # bd-9isnkx: a third-party agent CLI's tool-step output shape is not a
+  # contract — agy sends a plain string for a normal `run_command`, but on
+  # exit, if it fails to cancel an orphaned background task, it emits
+  # `%{"message" => "cannot kill task ..."}` instead. A missing clause here
+  # used to raise `FunctionClauseError` from inside `on_port_data/4`,
+  # mid-stream, killing the worker GenServer and losing an in-flight review
+  # round with it. Any other shape (list, number, atom, unrecognised map)
+  # degrades the same way rather than crashing the run. The `Logger.warning`
+  # is what makes a new shape discoverable instead of silently swallowed —
+  # grep worker logs for this message to find shapes worth a proper clause.
+  def output_summary(term, redact_values) do
+    Logger.warning(
+      "Arbiter.Worker.StepSummary.output_summary/2: unrecognized step output shape, " <>
+        "degrading instead of crashing: #{inspect(term, limit: 20)}"
+    )
+
+    term
+    |> stringify_unrecognized_output()
+    |> redact(redact_values)
+    |> truncate(@output_summary_max)
+  end
+
+  defp stringify_unrecognized_output(%{"message" => message}) when is_binary(message),
+    do: message
+
+  defp stringify_unrecognized_output(term), do: inspect(term, limit: 50)
 
   @doc """
   sha256 (hex) of the redacted, JSON-encoded tool input — a cheap "same call

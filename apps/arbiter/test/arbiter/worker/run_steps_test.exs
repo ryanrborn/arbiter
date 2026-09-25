@@ -7,6 +7,8 @@ defmodule Arbiter.Worker.RunStepsTest do
   # test can run its own isolated (async) sandbox connection.
   use Arbiter.DataCase, async: true
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Workers.RunStep
   require Ash.Query
@@ -341,5 +343,36 @@ defmodule Arbiter.Worker.RunStepsTest do
     refute step.input_summary =~ secret
     refute step.output_summary =~ secret
     assert step.output_summary =~ "[REDACTED]"
+  end
+
+  # bd-9isnkx: on exit, agy tries to cancel an orphaned background task and,
+  # on failure, reports the DONE step's `tool_info.output` as an object
+  # (`%{"message" => "cannot kill task ..."}`) instead of the string every
+  # other tool step's output has been. `StepSummary.output_summary/2` had no
+  # clause for a map, so this raised `FunctionClauseError` mid-stream and
+  # took the whole worker GenServer down with it — losing an in-flight
+  # review round. This is the exact fixture shape captured off the real
+  # crash (bd-2exkl0's reviewer round).
+  test "an agy DONE tool step whose output is a `cannot kill task` object writes a row instead of crashing (bd-9isnkx)" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+    run_id = Ash.UUID.generate()
+
+    kill_failure = %{
+      "message" =>
+        "cannot kill task \"d36d3e03-6627-4b7a-892e-0e8d80f5f65c/task-46\": task not found"
+    }
+
+    session = new_session(task_id, run_id: run_id, provider: "gemini")
+
+    log =
+      capture_log(fn ->
+        _session = feed(session, [agy_tool_done_event(2, output: kill_failure)])
+      end)
+
+    assert log =~ "output_summary"
+
+    assert [step] = steps_for(task_id)
+    assert step.is_error == false
+    assert step.output_summary =~ "cannot kill task"
   end
 end
