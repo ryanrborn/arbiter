@@ -221,6 +221,28 @@ defmodule Arbiter.Agents.AuthHoldTest do
       assert :counted = AuthHold.record_death(Claude, auth_reason(), hold)
     end
 
+    # bd-3kg53c: a periodic-probe-sourced expiry (or, in production, any expiry
+    # `credential_watchdog_adapters: []` leaves with no automatic re-probe) can
+    # mark `CredentialWatchdog` without ever opening *this* hold — no worker
+    # died on auth, so `entry.open?` is false. Before this fix, `reset/2` only
+    # cleared the watchdog when its own hold had been open, so an operator
+    # reaching for the one documented lever (`arb breaker reset --auth-hold`)
+    # got a silent no-op and the adapter stayed refused until a restart.
+    test "an operator reset clears a CredentialWatchdog mark even when this hold was never open" do
+      {hold, watchdog} = start_pair()
+
+      refute AuthHold.open?(Claude, hold)
+
+      :ok = CredentialWatchdog.mark_expired(Claude, auth_reason(), watchdog, :periodic_probe)
+      sync(watchdog)
+      assert CredentialWatchdog.expired?(Claude, watchdog)
+
+      assert {:ok, [Claude]} = AuthHold.reset(Claude, hold)
+      sync(watchdog)
+
+      refute CredentialWatchdog.expired?(Claude, watchdog)
+    end
+
     test "reset(:all) clears every open hold" do
       {hold, watchdog} = start_pair(threshold: 1)
 

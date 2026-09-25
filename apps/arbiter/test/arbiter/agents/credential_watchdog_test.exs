@@ -576,6 +576,62 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
     end
   end
 
+  # ---- operator inspection (bd-3kg53c) -------------------------------------
+  #
+  # `expired?/2` answers "is dispatch refused for this one adapter", but an
+  # operator staring at a refusal needs "what does the Watchdog know, across
+  # every adapter" without guessing which one to ask about first — the whole
+  # point of a lever that beats "restart the server".
+
+  describe "list/2" do
+    test "empty when nothing is expired" do
+      pid = start_watchdog()
+      assert CredentialWatchdog.list(pid) == []
+    end
+
+    test "reports a gate-closing (dispatch-refusing) expiry" do
+      pid = start_watchdog()
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Gemini, auth_expired_reason(), pid)
+      assert_eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Gemini, pid) end)
+
+      assert [entry] = CredentialWatchdog.list(pid)
+      assert entry.adapter == Arbiter.Agents.Gemini
+      assert entry.provider == "gemini"
+      assert entry.gated? == true
+      assert [%{source: :worker_report, summary: summary}] = entry.sources
+      assert summary =~ "auth"
+    end
+
+    test "reports a usage-poll-only expiry as escalated but not gate-closing" do
+      pid = start_watchdog()
+
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          auth_expired_reason(),
+          pid,
+          :usage_poll
+        )
+
+      assert_eventually(fn -> CredentialWatchdog.escalated?(Arbiter.Agents.Claude, pid) end)
+
+      assert [entry] = CredentialWatchdog.list(pid)
+      assert entry.gated? == false
+      assert [%{source: :usage_poll}] = entry.sources
+    end
+
+    test "drops an adapter once every one of its sources recovers" do
+      pid = start_watchdog()
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Codex, auth_expired_reason(), pid)
+      assert_eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Codex, pid) end)
+
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Codex, pid)
+      assert_eventually(fn -> not CredentialWatchdog.expired?(Arbiter.Agents.Codex, pid) end)
+
+      assert CredentialWatchdog.list(pid) == []
+    end
+  end
+
   # ---- runtime configuration (bd-ajgve2) -----------------------------------
 
   describe "probe_adapters/1" do

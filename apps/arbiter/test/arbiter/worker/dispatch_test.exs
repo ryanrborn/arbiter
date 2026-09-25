@@ -373,6 +373,47 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.whereis(task.id) == nil
     end
 
+    # bd-3kg53c: this reason fires when CredentialWatchdog knows an adapter is
+    # expired but this hasn't reached the AuthHold-open branch above (e.g. a
+    # `:periodic_probe` mark with no worker having died yet). Its remediation
+    # used to tell every provider to "refresh GEMINI_API_KEY", which is wrong
+    # for agy — it authenticates via its own keyring/ADC chain, never that env
+    # var (bd-svczq4).
+    test "a known-expired Gemini adapter names agy's real credential, not GEMINI_API_KEY",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "gemini auth gate", workspace_id: ws.id})
+
+      :ok =
+        CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Gemini,
+          %Arbiter.Worker.StopReason{
+            category: :auth_expired,
+            summary: "agy exited non-zero",
+            remediation: nil,
+            exit_status: 1,
+            signal: nil
+          },
+          Arbiter.Agents.CredentialWatchdog,
+          :periodic_probe
+        )
+
+      eventually(fn -> CredentialWatchdog.expired?(Arbiter.Agents.Gemini) end)
+      refute Arbiter.Agents.AuthHold.open?(Arbiter.Agents.Gemini)
+
+      assert {:error, {:auth_check_failed, reason}} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 agent_type: :gemini
+               )
+
+      assert reason.category == :auth_expired
+      refute reason.remediation =~ "refresh GEMINI_API_KEY"
+      assert reason.remediation =~ "agy"
+      assert reason.remediation =~ "arb breaker reset --auth-hold gemini"
+    end
+
     # bd-21bmdh changed the bound from "the first death" to "N consecutive
     # deaths" (`Arbiter.Agents.AuthHold`, default N=2): one auth death is now a
     # retry, the Nth refuses. The wave is still bounded — at N, not 1.

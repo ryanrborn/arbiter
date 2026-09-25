@@ -15,9 +15,19 @@ defmodule Arbiter.MCP.Tools.Breaker do
   Both also carry the auth-shaped dispatch hold (`Arbiter.Agents.AuthHold`,
   bd-21bmdh): `breaker_list` reports every open hold and live streak under
   `auth_holds`, and `breaker_reset` with `provider` clears one.
+
+  `breaker_list` also reports `credential_watchdog` (bd-3kg53c) — every
+  adapter `Arbiter.Agents.CredentialWatchdog` still has an outstanding expiry
+  for, even one an `AuthHold` reset already covers implicitly (it clears the
+  watchdog mark too, whether or not the hold itself was open — see
+  `AuthHold.reset/2`). This is what makes a `:periodic_probe`-only expiry (no
+  worker ever died, so it never shows under `auth_holds`) visible at all: the
+  answer to "is this adapter actually stuck" should never require a restart
+  to find out.
   """
 
   alias Arbiter.Agents.AuthHold
+  alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.CircuitBreaker
   alias Arbiter.MCP.Scope
 
@@ -44,7 +54,8 @@ defmodule Arbiter.MCP.Tools.Breaker do
          call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1),
          # bd-21bmdh: host-wide (credentials are per provider, not per
          # workspace), so unfiltered by `workspace` / `kind`.
-         auth_holds: Enum.map(AuthHold.list(), &AuthHold.serialize/1)
+         auth_holds: Enum.map(AuthHold.list(), &AuthHold.serialize/1),
+         credential_watchdog: CredentialWatchdog.list()
        }}
     end
   end

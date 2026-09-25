@@ -233,6 +233,28 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @doc """
+  Every adapter with an outstanding expiry, as a display map — the operator
+  inspection surface bd-3kg53c adds so "what does the Watchdog know" has an
+  answer that doesn't require guessing which adapter to ask `expired?/2`
+  about. `[]` when nothing is expired anywhere, or if the Watchdog cannot be
+  reached (fails open, like `AuthHold.list/1`; a display read).
+
+  Each entry: `%{adapter:, provider:, gated?:, sources: [%{source:, summary:}]}`.
+  `gated?` mirrors `expired?/1` for this adapter (only `:periodic_probe` /
+  `:worker_report` close the dispatch gate — see the moduledoc's `gate_source?/1`
+  discussion); a `:usage_poll`-only entry is an outstanding mailbox episode
+  that is not currently blocking dispatch.
+  """
+  @spec list(GenServer.server()) :: [map()]
+  def list(server \\ __MODULE__) do
+    GenServer.call(server, :list_expired, 1_000)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
   The adapter modules that the next poll cycle will probe, resolved live
   (opts › `Arbiter.Settings` › app env › all of `Arbiter.Agents.adapters/0`).
 
@@ -301,6 +323,16 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   def handle_call(:reset, _from, state) do
     cleared_gate = Map.new(state.gate, fn {k, _} -> {k, :ok} end)
     {:reply, :ok, %{state | adapters: %{}, gate: cleared_gate}}
+  end
+
+  @impl true
+  def handle_call(:list_expired, _from, state) do
+    entries =
+      state.adapters
+      |> Enum.map(fn {adapter, per_source} -> list_entry(state, adapter, per_source) end)
+      |> Enum.reject(&(&1.sources == []))
+
+    {:reply, entries, state}
   end
 
   @impl true
@@ -612,6 +644,33 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   defp adapter_name(adapter) when is_atom(adapter) do
     adapter |> Module.split() |> List.last()
+  end
+
+  defp list_entry(state, adapter, per_source) do
+    sources =
+      per_source
+      |> Enum.filter(fn {_source, status} -> match?({:expired, _}, status) end)
+      |> Enum.map(fn {source, {:expired, reason_map}} ->
+        %{source: source, summary: Map.get(reason_map, :summary)}
+      end)
+
+    %{
+      adapter: adapter,
+      provider: provider_key(adapter),
+      gated?: Map.get(state.gate, adapter, :ok) != :ok,
+      sources: sources
+    }
+  end
+
+  # The agent-type key ("claude", "codex", "gemini") an operator types —
+  # mirrors `Arbiter.Agents.AuthHold.provider_key/1` so the two operator
+  # surfaces (`arb breaker list`'s `auth_holds` and this `credential_watchdog`
+  # inspection) name providers the same way.
+  defp provider_key(adapter) do
+    case Enum.find(Arbiter.Agents.adapters(), fn {_type, mod} -> mod == adapter end) do
+      {type, _} -> Atom.to_string(type)
+      nil -> adapter_name(adapter) |> String.downcase()
+    end
   end
 
   # opts › Arbiter.Settings › app env › hardcoded default. `nil` at any layer

@@ -1993,9 +1993,12 @@ defmodule Arbiter.MCP.Catalog do
         "List shared circuit-breaker state: which auto-filing / auto-escalating / " <>
           "auto-redispatching signatures have tripped, their trigger counts, bounds and " <>
           "windows — plus the static registry of every gated call site, which is present " <>
-          "even on a freshly-restarted server, and `auth_holds`: each provider whose " <>
-          "dispatch is held after consecutive auth-failed workers. Optional `workspace`, " <>
-          "`kind`, `open_only`. " <>
+          "even on a freshly-restarted server, `auth_holds`: each provider whose " <>
+          "dispatch is held after consecutive auth-failed workers, and " <>
+          "`credential_watchdog`: every adapter CredentialWatchdog still marks expired " <>
+          "(including one with no open auth hold at all, e.g. a periodic-probe expiry) " <>
+          "— `gated?` says whether it's actually blocking dispatch right now. Optional " <>
+          "`workspace`, `kind`, `open_only`. " <>
           "Coordinator only.",
       input_schema: %{
         "type" => "object",
@@ -2021,10 +2024,12 @@ defmodule Arbiter.MCP.Catalog do
         "Close a tripped circuit breaker so the suppressed action can run again. Pass " <>
           "`signature` (from `breaker_list` or the trip escalation) for one breaker, or " <>
           "`all: true` with an optional `workspace` / `kind` scope. Pass `provider` " <>
-          "(`claude` / `codex` / `gemini`) instead to clear that provider's auth hold — " <>
-          "the dispatch hold N consecutive auth-failed workers open. Fix the underlying " <>
-          "condition first: resetting a breaker whose cause is still live just restarts " <>
-          "the flood. Coordinator only.",
+          "(`claude` / `codex` / `gemini`) instead to clear that provider's auth hold " <>
+          "AND any CredentialWatchdog expiry mark for it, whether or not the hold " <>
+          "itself was open — the one lever for a stuck `credential_watchdog` entry " <>
+          "in `breaker_list` that never had a worker die on it (e.g. a periodic-probe " <>
+          "expiry). Fix the underlying condition first: resetting a breaker whose cause " <>
+          "is still live just restarts the flood. Coordinator only.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

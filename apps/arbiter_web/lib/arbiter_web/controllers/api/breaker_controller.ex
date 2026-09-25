@@ -19,6 +19,7 @@ defmodule ArbiterWeb.Api.BreakerController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Agents.AuthHold
+  alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.CircuitBreaker
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -38,7 +39,8 @@ defmodule ArbiterWeb.Api.BreakerController do
         breakers: Enum.map(breakers, &serialize/1),
         open_count: Enum.count(breakers, & &1.open?),
         call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1),
-        auth_holds: Enum.map(AuthHold.list(), &AuthHold.serialize/1)
+        auth_holds: Enum.map(AuthHold.list(), &AuthHold.serialize/1),
+        credential_watchdog: CredentialWatchdog.list()
       })
     end
   end

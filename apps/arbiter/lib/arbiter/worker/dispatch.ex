@@ -1834,7 +1834,7 @@ defmodule Arbiter.Worker.Dispatch do
         refuse_known_expired(task, opts, auth_hold_stop_reason(adapter))
 
       Arbiter.Agents.CredentialWatchdog.expired?(adapter) ->
-        refuse_known_expired(task, opts, known_expired_stop_reason())
+        refuse_known_expired(task, opts, known_expired_stop_reason(adapter))
 
       true ->
         :ok
@@ -1861,16 +1861,42 @@ defmodule Arbiter.Worker.Dispatch do
     }
   end
 
-  defp known_expired_stop_reason do
+  defp known_expired_stop_reason(adapter) do
     %StopReason{
       category: :auth_expired,
       summary: "credentials known-expired (CredentialWatchdog flagged expiry)",
       remediation:
-        "Re-authenticate the agent CLI (Claude: `claude` login; Gemini: refresh GEMINI_API_KEY), " <>
-          "then re-dispatch. Check `arb inbox` for the original expiry escalation.",
+        "#{reauth_hint(adapter)} If this is a false positive, `arb breaker reset --auth-hold " <>
+          "#{provider_key(adapter)}` clears the mark without a restart. Check `arb inbox` for " <>
+          "the original expiry escalation.",
       exit_status: nil,
       signal: nil
     }
+  end
+
+  # bd-3kg53c: this used to say "Gemini: refresh GEMINI_API_KEY" for every
+  # provider, which is wrong for agy — it has no such env var. agy resolves
+  # its credential from the keyring/ADC/WIF chain (bd-svczq4), via
+  # `Arbiter.Agents.Gemini.Config.resolve_api_key/0`'s workspace credentials
+  # ref, not an environment variable an operator could "refresh".
+  defp reauth_hint(Arbiter.Agents.Claude), do: "Re-authenticate the Claude CLI (`claude` login)."
+
+  defp reauth_hint(Arbiter.Agents.Codex), do: "Re-authenticate the Codex CLI (`codex login`)."
+
+  defp reauth_hint(Arbiter.Agents.Gemini),
+    do:
+      "Re-authenticate Gemini/Antigravity — run `agy` once on this host to sign in " <>
+        "(agy's own keyring/ADC/WIF chain), or check the workspace's Gemini credentials " <>
+        "ref (`Arbiter.Agents.Gemini.Config.resolve_api_key/0`). This is not always a " <>
+        "`GEMINI_API_KEY` env var to refresh."
+
+  defp reauth_hint(adapter), do: "Re-authenticate the #{provider_key(adapter)} CLI."
+
+  defp provider_key(adapter) do
+    case Enum.find(Arbiter.Agents.adapters(), fn {_type, mod} -> mod == adapter end) do
+      {type, _} -> Atom.to_string(type)
+      nil -> adapter |> Module.split() |> List.last() |> String.downcase()
+    end
   end
 
   # Resolve the workspace's worker adapter so we probe the CLI that will

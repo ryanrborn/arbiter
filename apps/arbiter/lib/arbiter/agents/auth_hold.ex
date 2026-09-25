@@ -59,8 +59,15 @@ defmodule Arbiter.Agents.AuthHold do
     2. **An operator.** `breaker_reset` with `provider` (MCP),
        `POST /api/breakers/reset` with `provider`, or
        `arb breaker reset --auth-hold <provider>` → `reset/2`. Clears the
-       streak and the watchdog mark the hold set. `breaker_list` /
-       `arb breaker list` show every hold and live streak.
+       streak and, unconditionally (bd-3kg53c), any `CredentialWatchdog` mark
+       for the adapter — even one this hold never opened, e.g. a
+       `:periodic_probe` expiry with no worker having died on it. Without
+       that, an operator reaching for the one documented lever for a stuck
+       `CredentialWatchdog` entry got a silent no-op whenever this hold
+       happened not to be the thing that raised it. `breaker_list` /
+       `arb breaker list` show every hold and live streak under `auth_holds`,
+       and every outstanding watchdog mark (open hold or not) under
+       `credential_watchdog`.
 
   An automatic recovery leaves the provider on **probation**: the next auth
   death re-opens the hold at once instead of after another N. The free checks
@@ -295,14 +302,26 @@ defmodule Arbiter.Agents.AuthHold do
   end
 
   def handle_call({:reset, adapter}, _from, state) do
-    was_open = if entry(state, adapter).open?, do: [adapter], else: []
-    Enum.each(was_open, &clear_watchdog(state, &1))
+    hold_open? = entry(state, adapter).open?
+    # bd-3kg53c: an expiry can reach `CredentialWatchdog` without ever opening
+    # *this* hold — a `:periodic_probe` mark, or any mark left over from a
+    # `credential_watchdog_adapters: []` posture with no automatic re-probe.
+    # `arb breaker reset --auth-hold <provider>` is the one documented,
+    # always-available operator lever for a stuck expiry (see
+    # `Arbiter.Worker.Dispatch.known_expired_stop_reason/1`), so it must clear
+    # the watchdog mark unconditionally rather than only when this hold
+    # happened to be the thing that raised it.
+    watchdog_expired? = CredentialWatchdog.expired?(adapter, state.credential_watchdog)
+    clear_watchdog(state, adapter)
+    cleared = if hold_open? or watchdog_expired?, do: [adapter], else: []
 
-    if was_open != [] do
-      Logger.info("AuthHold: #{name(adapter)} dispatch hold cleared by operator reset")
+    if cleared != [] do
+      Logger.info(
+        "AuthHold: #{name(adapter)} dispatch hold/watchdog mark cleared by operator reset"
+      )
     end
 
-    {:reply, {:ok, was_open}, %{state | adapters: Map.delete(state.adapters, adapter)}}
+    {:reply, {:ok, cleared}, %{state | adapters: Map.delete(state.adapters, adapter)}}
   end
 
   @impl true
