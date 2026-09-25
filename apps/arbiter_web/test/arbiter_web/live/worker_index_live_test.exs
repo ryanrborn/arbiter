@@ -80,7 +80,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/workers")
 
-    assert html =~ ~s(aria-label="Gemini")
+    assert html =~ ~s(aria-label="Antigravity")
   end
 
   test "live: stopping a worker removes it via PubSub", %{conn: conn, ws: ws} do
