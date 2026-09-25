@@ -196,41 +196,81 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
     end
   end
 
+  # The author parks on a verdict the test hands it directly, the way the
+  # gate delivers one (`review_spawn: false` skips starting a real gate).
+  defp park_on(ws, repo, branch, verdict) do
+    task = new_task(ws)
+    :ok = seed_feature_branch(repo, branch)
+
+    {:ok, pid} =
+      Worker.start(
+        task_id: task.id,
+        repo: "trib/repo",
+        workspace_id: ws.id,
+        meta: %{
+          branch: branch,
+          repo_path: repo,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          review_spawn: false
+        }
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Worker.advance(pid, :claude)
+    send(pid, {:__claude_session_done__, "arb done"})
+    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+    :ok = Worker.review_gate_verdict(pid, verdict)
+    task
+  end
+
   describe "the author's automatic fix round" do
-    # A coordinator-dispatched review (or any gate that did not stop on it
-    # itself) hands the author the reviewer's raw text. The rule reads it
-    # there too.
-    test "is not dispatched for raw findings that flag fabricated evidence",
+    test "is not dispatched when the gate stopped on fabricated evidence",
          %{repo: repo, ws: ws} do
-      task = new_task(ws)
-      branch = "feature/evidence-raw"
-      :ok = seed_feature_branch(repo, branch)
-
-      {:ok, pid} =
-        Worker.start(
-          task_id: task.id,
-          repo: "trib/repo",
-          workspace_id: ws.id,
-          meta: %{
-            branch: branch,
-            repo_path: repo,
-            target_branch: "main",
-            merge_title: "Merge #{task.id}",
-            review_required: true,
-            review_spawn: false
-          }
-        )
-
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
-      :ok = Worker.advance(pid, :claude)
-      send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
-
-      :ok = Worker.review_gate_verdict(pid, {:request_changes, @aro53b_round2})
+      findings = EvidenceIntegrity.escalation_findings(@aro53b_round2, "FULL TRANSCRIPT")
+      task = park_on(ws, repo, "feature/evidence-marker", {:request_changes, findings})
       wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
 
       assert StubFixRoundDispatcher.dispatch_count() == 0
-      assert [{_task_id, _ws_id, 0, :fabricated_evidence}] = StubFixRoundDispatcher.escalations()
+      assert [{task_id, _ws_id, 0, :fabricated_evidence}] = StubFixRoundDispatcher.escalations()
+      assert task_id == task.id
+    end
+
+    # Round-1 review finding: at the round cap the gate reports its escalation
+    # payload — the whole thread, the implementer's replies and the full diff.
+    # A diff that touches this very prompt text, or a rebuttal quoting the
+    # accusation, must not read as a reviewer flagging fabricated evidence.
+    test "is still dispatched for a cap payload whose diff and thread quote the rule's terms",
+         %{repo: repo, ws: ws} do
+      payload = """
+      ReviewGate escalation — not converged after 2 round(s) of review
+      (cap 2). The implementer and reviewer did not reach agreement.
+
+      ## Full implementer↔reviewer transcript
+
+      ### Round 1 — Reviewer → Implementer: REQUEST_CHANGES
+      - [high] a.ex:1 nil guard missing
+
+      ### Round 1 — Implementer → Reviewer: REBUTTED
+      I disagree the icon source is fabricated; the nil guard is fixed.
+
+      ## Current diff (feature/evidence-cap since main)
+
+      ```
+      +    honest "not met" is always acceptable. A mockup passed off as a screenshot is not.
+      +  # A test helper that fabricates a source map for the icon fixture
+      ```
+      """
+
+      # The text rule alone would flag it; only the marker decides here.
+      assert EvidenceIntegrity.flagged?(payload)
+
+      _task = park_on(ws, repo, "feature/evidence-cap", {:request_changes, payload})
+      wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
+
+      assert StubFixRoundDispatcher.escalations() == []
     end
   end
 

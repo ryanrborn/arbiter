@@ -329,11 +329,13 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert SecurityPolicy.interactive_session().permissions.mode == :auto
     end
 
-    test "drops only :no_async_wait from the baseline categories" do
+    # bd-80talz: :no_gh_publish is worker-only too. An operator or coordinator
+    # session commenting on an issue is ordinary work.
+    test "drops only :no_async_wait and :no_gh_publish from the baseline categories" do
       worker = SecurityPolicy.base().permissions.safe_defaults
       session = SecurityPolicy.interactive_session().permissions.safe_defaults
 
-      assert worker -- session == [:no_async_wait]
+      assert worker -- session == [:no_async_wait, :no_gh_publish]
       assert session -- worker == []
     end
 
@@ -391,6 +393,22 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert :no_public_upload in SecurityPolicy.base().permissions.safe_defaults
       assert :no_public_upload in SecurityPolicy.resolve(nil).permissions.safe_defaults
       assert :no_public_upload in SecurityPolicy.interactive_session().permissions.safe_defaults
+    end
+
+    test "the gist/issue-comment denies bind workers, not interactive sessions" do
+      assert :no_gh_publish in SecurityPolicy.resolve(nil).permissions.safe_defaults
+      refute :no_gh_publish in SecurityPolicy.interactive_session().permissions.safe_defaults
+
+      worker = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.resolve(nil))
+      session = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.interactive_session())
+
+      assert "Bash(gh issue comment:*)" in worker
+      assert "Bash(gh gist create:*)" in worker
+      refute Enum.any?(session, &(&1 =~ "gh issue comment" or &1 =~ "gh gist"))
+
+      # The host denies still bind the session.
+      assert "Bash(curl *catbox.moe*)" in session
+      assert "WebFetch(domain:*.catbox.moe)" in session
     end
 
     test "documents at least the hosts the incident used or tried" do

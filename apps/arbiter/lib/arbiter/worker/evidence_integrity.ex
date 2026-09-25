@@ -96,12 +96,20 @@ defmodule Arbiter.Worker.EvidenceIntegrity do
 
   @doc """
   Whether a rejection's findings call for the coordinator rather than a fix
-  round: either the ReviewGate already stopped on it (`marker/0` leads), or the
-  text flags on its own (a coordinator-dispatched review's raw findings).
+  round: the ReviewGate stopped on a fabricated-evidence finding, so
+  `marker/0` leads them.
+
+  This deliberately does not re-run `flagged?/1`. The ReviewGate is the only
+  source of these findings and already ran the rule on the reviewer's own text
+  in every round. What it reports on other paths (the round cap, a reviewer
+  that could not start) is `escalation_payload/1`: the whole thread, the
+  implementer's replies and the full diff. Scanning that would flag an
+  implementer's rebuttal ("I disagree the icon source is fabricated") or any
+  diff that touches this rule's own prompt text.
   """
   @spec escalation?(String.t() | nil) :: boolean()
   def escalation?(findings) when is_binary(findings),
-    do: String.starts_with?(findings, @marker) or flagged?(findings)
+    do: String.starts_with?(findings, @marker)
 
   def escalation?(_), do: false
 

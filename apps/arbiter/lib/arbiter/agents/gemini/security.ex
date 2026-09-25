@@ -421,14 +421,15 @@ defmodule Arbiter.Agents.Gemini.Security do
       &["read_url(#{&1})", "execute_url(#{&1})"]
     ) ++
       [
-        "command(gh gist create)",
-        "command(gh gist edit)",
-        "command(gh issue comment)",
         "command(curl -F)",
         "command(curl --form)",
         "command(curl -T)",
         "command(curl --upload-file)"
       ]
+  end
+
+  defp expand_category(:no_gh_publish) do
+    ["command(gh gist create)", "command(gh gist edit)", "command(gh issue comment)"]
   end
 
   defp expand_category(_unknown), do: []

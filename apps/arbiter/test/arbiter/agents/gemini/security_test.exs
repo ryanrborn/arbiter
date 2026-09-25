@@ -345,7 +345,7 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       end
     end
 
-    test "denies gists, issue comments and upload-shaped curl by prefix" do
+    test "denies gists and issue comments (no_gh_publish) and upload-shaped curl by prefix" do
       deny = Security.deny_rules(policy())
 
       assert "command(gh gist create)" in deny

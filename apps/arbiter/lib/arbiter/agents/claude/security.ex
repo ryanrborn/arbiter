@@ -221,8 +221,11 @@ defmodule Arbiter.Agents.Claude.Security do
     hosts = SecurityPolicy.public_upload_hosts()
 
     Enum.flat_map(hosts, &["WebFetch(domain:#{&1})", "WebFetch(domain:*.#{&1})"]) ++
-      for(tool <- @upload_tools, host <- hosts, do: "Bash(#{tool} *#{host}*)") ++
-      ["Bash(gh gist create:*)", "Bash(gh gist edit:*)", "Bash(gh issue comment:*)"]
+      for(tool <- @upload_tools, host <- hosts, do: "Bash(#{tool} *#{host}*)")
+  end
+
+  defp expand_category(:no_gh_publish) do
+    ["Bash(gh gist create:*)", "Bash(gh gist edit:*)", "Bash(gh issue comment:*)"]
   end
 
   defp expand_category(_unknown), do: []

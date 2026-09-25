@@ -5817,8 +5817,9 @@ defmodule Arbiter.Worker do
       # bd-80talz: the reviewer says the work fabricated or falsified its
       # evidence. A fix round would put that back to the same provider; a
       # human has to judge it (the reviewer can be wrong about provenance
-      # too). Read off the gate's marker, or the raw text of a review that
-      # came some other way.
+      # too). Keyed on the gate's marker only: the gate already ran the rule
+      # on the reviewer's own findings, and the cap payload it sends
+      # otherwise carries the implementer's replies and the whole diff.
       EvidenceIntegrity.escalation?(findings) ->
         give_up_fix_round(dispatcher, state, attempts, :fabricated_evidence)
 

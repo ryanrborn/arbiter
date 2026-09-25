@@ -143,7 +143,7 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       assert "Bash(nc *termbin.com*)" in rules
     end
 
-    test "denies gists and issue comments, but not PR comments (the review-thread protocol uses them)" do
+    test "no_gh_publish denies gists and issue comments, but not PR comments (the review-thread protocol uses them)" do
       rules = Security.deny_rules(policy())
 
       assert "Bash(gh gist create:*)" in rules

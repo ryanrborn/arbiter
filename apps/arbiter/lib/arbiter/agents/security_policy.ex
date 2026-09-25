@@ -75,13 +75,16 @@ defmodule Arbiter.Agents.SecurityPolicy do
       (bd-d534xo). Denying the tools outright backs the prompt guidance that
       says the same thing.
     * `:no_public_upload`   — network access to public, anonymous file and
-      paste hosts (`public_upload_hosts/0`), plus `gh gist create`/`edit` and
-      `gh issue comment`. An agy worker uploaded mockup "screenshots" to
-      files.catbox.moe and made a public gist on the operator's account to
-      satisfy an acceptance criterion it could not meet (bd-80talz). Such a
-      host takes repo content, logs or secrets just as easily, anonymously
-      and usually for good. `gh pr comment` is left alone because the
-      review-thread follow-up protocol uses it.
+      paste hosts (`public_upload_hosts/0`). An agy worker uploaded mockup
+      "screenshots" to files.catbox.moe to satisfy an acceptance criterion it
+      could not meet (bd-80talz). Such a host takes repo content, logs or
+      secrets just as easily, anonymously and usually for good.
+    * `:no_gh_publish`      — `gh gist create`/`edit` and `gh issue comment`.
+      The same worker made a public gist on the operator's account and posted
+      a test comment (bd-80talz). `gh pr comment` is left alone because the
+      review-thread follow-up protocol uses it. Workers only:
+      `interactive_session_base/0` leaves it out, since an operator or
+      coordinator session commenting on an issue is ordinary work.
 
   Replaceable as a whole (set `safe_defaults: []` to opt a domain out — not
   recommended), but defaults non-empty. They are enforced in **every** mode
@@ -164,7 +167,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
     :no_outside_writes,
     :no_pr_create,
     :no_async_wait,
-    :no_public_upload
+    :no_public_upload,
+    :no_gh_publish
   ]
 
   # bd-80talz: public, anonymous upload and paste hosts. Each entry is a bare
@@ -305,7 +309,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
       | permissions: %{
           base.permissions
           | mode: :auto,
-            safe_defaults: @safe_default_categories -- [:no_async_wait],
+            safe_defaults: @safe_default_categories -- [:no_async_wait, :no_gh_publish],
             deny: base.permissions.deny ++ ["Bash(arb mcp token mint:*)"]
         }
     }

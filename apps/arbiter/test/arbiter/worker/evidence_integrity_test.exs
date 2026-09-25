@@ -86,8 +86,20 @@ defmodule Arbiter.Worker.EvidenceIntegrityTest do
       assert EvidenceIntegrity.escalation?(body)
     end
 
-    test "a raw reviewer text that flags fabrication is an escalation too" do
-      assert EvidenceIntegrity.escalation?(@aro53b_round2)
+    # The gate already ran the rule on the reviewer's findings; anything else
+    # it reports is the cap payload (thread + diff), which must not be scanned.
+    test "only the gate's marker escalates, not text that merely flags" do
+      refute EvidenceIntegrity.escalation?(@aro53b_round2)
+
+      refute EvidenceIntegrity.escalation?("""
+             ReviewGate escalation — not converged after 2 round(s) of review
+
+             ### Round 1 — Implementer → Reviewer: REBUTTED
+             I disagree the icon source is fabricated.
+
+             + # A test helper that fabricates a source map for the icon fixture
+             + mockup passed off as a screenshot is not acceptable evidence
+             """)
     end
 
     test "an ordinary rejection is not" do
