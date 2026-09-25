@@ -18,6 +18,7 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
   @fixtures Path.expand("../../fixtures", __DIR__)
   @turn_end Path.join(@fixtures, "agy_strict_denial_turn_end.jsonl")
   @explicit_deny Path.join(@fixtures, "agy_explicit_deny_continues.jsonl")
+  @resumed Path.join(@fixtures, "agy_strict_denial_resumed.jsonl")
   @conversation_id "fab40d9a-ea5a-4456-bcec-ee9bdde56f64"
 
   defp new_session(opts \\ []) do
@@ -59,6 +60,18 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
       refute ClaudeSession.denial_ended_turn?(session)
       # Still attributed, for the notes-gate failure reason.
       assert session.denied_command == "whoami"
+    end
+
+    test "resuming that conversation (--conversation) lets the model carry on past the denial" do
+      # Captured live: `agy -p "<denied; do not retry; continue>" --conversation
+      # fab40d9a…` against the same strict settings. The model ran the next,
+      # allowed command and answered — the evidence the resume mechanism
+      # relies on.
+      session = new_session() |> feed_lines(fixture_lines(@resumed))
+
+      refute ClaudeSession.denial_ended_turn?(session)
+      assert ClaudeSession.usage_summary(session)[:session_id] == @conversation_id
+      assert Enum.any?(session.output_lines, &(&1 =~ "step2-ran"))
     end
 
     test "the stderr notice alone (a build without result.denied_actions) is enough" do

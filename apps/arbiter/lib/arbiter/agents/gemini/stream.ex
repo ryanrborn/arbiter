@@ -506,7 +506,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
   @doc """
   The base command token a denied `run_command` ERROR step named — `"arb"`
   out of `"arb inbox bd-ci0y74"` — for surfacing a concrete "strict policy
-  denied required command `<x>`" failure reason
+  denied [required] command `<x>`" failure reason
   (`Arbiter.Worker.ClaudeSession.capture_steps/2`) instead of a generic
   blank-notes failure. Returns the tool name verbatim for a non-command tool;
   `nil` only when the step carried no tool name at all.
@@ -539,8 +539,29 @@ defmodule Arbiter.Agents.Gemini.Stream do
         _ -> parts
       end
 
+    # bd-7wymls: headless agy ends the turn on a permission soft-deny and
+    # reports the refused actions here — name them so the transcript shows
+    # why the session ended.
+    parts =
+      case denied_action_names(result["denied_actions"]) do
+        [] -> parts
+        names -> parts ++ ["denied: " <> Enum.join(names, ", ")]
+      end
+
     Enum.join(parts, " · ")
   end
+
+  defp denied_action_names(actions) when is_list(actions) do
+    actions
+    |> Enum.map(fn
+      %{"action" => a} when is_binary(a) -> a
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp denied_action_names(_), do: []
 
   defp error_message(%{"message" => m}) when is_binary(m), do: m
   defp error_message(_), do: nil

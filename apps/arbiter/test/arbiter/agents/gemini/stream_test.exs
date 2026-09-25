@@ -288,6 +288,23 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert res_line =~ "1234 tok"
     end
 
+    # bd-7wymls: agy reports a headless permission soft-deny that ended the
+    # turn as `result.denied_actions` (captured live, agy 1.2.11). Surface it
+    # on the session marker so the transcript says WHY the session ended.
+    test "a result carrying denied_actions names them on the session marker" do
+      result =
+        "../../../fixtures/agy_strict_denial_turn_end.jsonl"
+        |> Path.expand(__DIR__)
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> List.last()
+        |> Jason.decode!()
+
+      assert [{res_line, false}] = Stream.format_event(result)
+      assert res_line =~ "gemini session SUCCESS"
+      assert res_line =~ "denied: command"
+    end
+
     test "an unrecognized agy event surfaces a drift line instead of vanishing silently" do
       assert [{line, false}] = Stream.format_event(%{"event" => "brand_new_thing"})
       assert line =~ "unrecognized"

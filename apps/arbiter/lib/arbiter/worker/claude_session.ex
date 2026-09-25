@@ -827,9 +827,10 @@ defmodule Arbiter.Worker.ClaudeSession do
   # doesn't name, and agy reports that as this same step landing in state
   # `"ERROR"` instead of `"DONE"`. Write the row (`is_error: true`, so it's
   # queryable/visible the same way any other failed step is) AND stash the
-  # denied command's base token onto the session under `:denied_command` —
+  # denied command's base token onto the session under `:denied_command`
+  # (and the full line under `:denied_command_line`, bd-7wymls) —
   # `sync_session_meta/2` (`Arbiter.Worker`) surfaces that into `meta`, which
-  # lets a subsequent notes-gate trip report "strict policy denied required
+  # lets a subsequent notes-gate trip report "strict policy denied [required]
   # command `<x>`" as its failure reason instead of the generic
   # `:blank_notes_at_completion` (AC4). Last denial in the run wins if there
   # were several — that's the one still blocking progress when the run ended.

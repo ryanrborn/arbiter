@@ -250,6 +250,11 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     - Run every tool synchronously. `run_command` must carry
       `WaitMsBeforeAsync: 10000` — a backgrounded command outlives the turn and
       the session ends before its output arrives.
+    - Run one command per `run_command` call. Under a restricted permission
+      policy every part of a chained command (`a && b`, `a; b`, `a | b`) must
+      be allowed, and a denied command ends your turn. Do not retry a denied
+      command or work around it: carry on without it, and note what you could
+      not do in your findings.
 
     ## Arbiter MCP tools
 

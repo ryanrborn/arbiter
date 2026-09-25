@@ -126,6 +126,63 @@ defmodule Arbiter.Agents.Gemini.Security do
   baseline allow — deny is checked independently of, and takes priority
   over, what `allow` names.
 
+  `command(pwd)` is allowed alongside the baseline (bd-7wymls) but is not part
+  of it: nothing *requires* it, and `bootstrap_command?/1` does not count it.
+  It reads nothing but the cwd, and it is the command models chain first
+  (`pwd && git status`). Probed live: agy checks **each part** of a chained
+  command against the allow list, so with `command(pwd)` and `command(git
+  status)` both allowed, `pwd && git status` runs. With only `git status`
+  allowed, the whole line is soft-denied, which is what happened in run
+  fc54ef4a. `ls`/`cat` are deliberately left out because they read arbitrary
+  paths.
+
+  ## A denied command ends the headless turn (bd-7wymls)
+
+  `:strict` exists to deny commands, but headless agy does not let the model
+  *continue* after a denial of this kind. Probed live against agy 1.2.11 in a
+  throwaway `$HOME` with the `:strict` settings above (captures in
+  `test/fixtures/agy_strict_denial_*.jsonl` and
+  `agy_explicit_deny_continues.jsonl`):
+
+    * **A command no `allow` rule names is *soft-denied*, and agy ends the
+      turn.** agy would normally ask for approval, but it cannot prompt
+      headlessly. The step comes back `DONE` with no output (or `ERROR`
+      "user denied permission to run command" for a chained line). agy writes
+      `jetski: no output produced — a tool required the "command" permission
+      that headless mode cannot prompt for, so it was auto-denied…` to stderr,
+      and the `result` event carries `denied_actions: [%{"action" =>
+      "command", …}]`. The process then exits 0 before the model gets another
+      step. This is deliberate upstream behaviour. agy's changelog says:
+      "headless runs with `-p` silently skipping tool actions they were not
+      permitted to take … now end with a notice naming the refused actions
+      and report them as `denied_actions`".
+    * **An explicit `permissions.deny` hit does *not* end the turn.** It
+      comes back as an `ERROR` step ("Matches user-configured deny rule"),
+      the model reads it as a tool error, and it carries on to its next
+      step.
+    * **So there is no agy flag or setting that turns the soft-deny into a
+      tool error.** `agy --help` has none (`--sandbox` defeats the allowlist,
+      see above; `--dangerously-skip-permissions` is `:bypass`). Denying
+      everything with a catch-all `command(*)` would make every miss a hard,
+      continuable deny, but deny outranks allow, so it also blocked the
+      allowlisted `echo`. agy's rule grammar cannot express "deny whatever
+      is not allowed".
+    * **Resuming the conversation works.** `agy -p "<that was denied; don't
+      retry; continue>" --conversation <id>` on the soft-denied conversation
+      carried on: the model ran its next, allowed command and finished
+      (`agy_strict_denial_resumed.jsonl`).
+
+  Arbiter therefore relies on **resume-on-denial**. `Arbiter.Worker.ClaudeSession`
+  marks a turn ended by a soft-deny from `result.denied_actions`, or from the
+  stderr notice on a build that does not emit that field.
+  `Arbiter.Worker` classifies the clean exit as `StopReason` category
+  `:permission_denied` and resumes the same conversation (`--conversation`,
+  bounded by `:resume_cap`). The resume prompt names the denied command and
+  says not to retry it, to run one command per call, and to record findings
+  and finish. The worker `GEMINI.md` (`Arbiter.Agents.Gemini.ConfigDir`)
+  carries the same guidance, so the model tries to avoid the first denial
+  too.
+
   ## Rule grammar
 
   agy's permission rules are `command(<prefix>)`, `read_file(<glob>)`,
