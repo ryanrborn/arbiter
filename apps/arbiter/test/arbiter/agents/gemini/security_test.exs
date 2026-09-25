@@ -212,6 +212,18 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       assert "write_file(**)" in allow
     end
 
+    test "`pwd` is allowed in every mode, so `pwd && git status` is not soft-denied (bd-7wymls)" do
+      allow =
+        Security.allow_rules(
+          SecurityPolicy.merge(SecurityPolicy.base(), %{"permissions" => %{"mode" => "strict"}})
+        )
+
+      assert "command(pwd)" in allow
+      # Deliberately NOT a general read escape hatch.
+      refute "command(cat)" in allow
+      refute "command(ls)" in allow
+    end
+
     test "rules with no agy analogue are dropped rather than emitted verbatim" do
       # Monitor / ScheduleWakeup are Claude tool names; agy's rule grammar has
       # only command()/read_file()/write_file()/url().
@@ -219,6 +231,27 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
 
       refute "Monitor" in deny
       refute "ScheduleWakeup" in deny
+    end
+  end
+
+  describe "bootstrap_command?/1 — is a denied command one the worker protocol requires?" do
+    test "the worker-protocol commands are required" do
+      assert Security.bootstrap_command?("arb inbox bd-3a5qr2")
+      assert Security.bootstrap_command?("arb")
+      assert Security.bootstrap_command?("git status")
+      assert Security.bootstrap_command?("git diff --stat main..HEAD")
+      assert Security.bootstrap_command?("  git log --oneline -5")
+    end
+
+    test "anything else is not — including a chain that merely starts with an allowed command" do
+      refute Security.bootstrap_command?("pwd && git status")
+      refute Security.bootstrap_command?("echo probe > /tmp/x")
+      refute Security.bootstrap_command?("git push origin main")
+      refute Security.bootstrap_command?("arbiter-thing")
+      refute Security.bootstrap_command?("git statusx")
+      refute Security.bootstrap_command?("arb inbox && rm -rf .")
+      refute Security.bootstrap_command?(nil)
+      refute Security.bootstrap_command?("")
     end
   end
 

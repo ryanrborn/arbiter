@@ -218,18 +218,42 @@ defmodule Arbiter.Agents.Gemini.Security do
   # The Arbiter worker protocol's own required commands — see the moduledoc
   # section "Worker-protocol bootstrap allowlist". Always present regardless
   # of domain (worker vs. review-agent) or mode.
-  @worker_bootstrap_allow [
-    "command(arb)",
-    "command(git status)",
-    "command(git diff)",
-    "command(git log)"
-  ]
+  @worker_bootstrap_commands ["arb", "git status", "git diff", "git log"]
+  @worker_bootstrap_allow Enum.map(@worker_bootstrap_commands, &"command(#{&1})")
+
+  # bd-7wymls: allowed alongside the bootstrap set but NOT "required" by the
+  # protocol. `pwd` is the orientation command models reach for first
+  # (`pwd && git status` was the second denial in run fc54ef4a) and reads
+  # nothing but the cwd. Deliberately not `ls`/`cat`: those read arbitrary
+  # paths, which `:strict`'s allowlist exists to gate.
+  @harmless_allow ["command(pwd)"]
+
+  @doc """
+  Whether `command_line` is one of the worker-protocol bootstrap commands
+  (`arb`, `git status`, `git diff`, `git log`) — i.e. a command the protocol
+  *requires*, so a `:strict` denial of it is a policy misconfiguration rather
+  than the policy doing its job. Matched the way agy matches a
+  `command(<prefix>)` rule: whole leading words. A chained line (`&&`, `;`,
+  `|`) is never bootstrap, even if its first part is (bd-7wymls: `pwd && git
+  status` must not be reported as a "required" command).
+  """
+  @spec bootstrap_command?(String.t() | nil) :: boolean()
+  def bootstrap_command?(command_line) when is_binary(command_line) do
+    line = String.trim(command_line)
+
+    not String.contains?(line, ["&&", ";", "|", "\n"]) and
+      Enum.any?(@worker_bootstrap_commands, fn prefix ->
+        line == prefix or String.starts_with?(line, prefix <> " ")
+      end)
+  end
+
+  def bootstrap_command?(_), do: false
 
   @doc """
   The full agy `allow` list for a policy: the worker-protocol bootstrap
   baseline (`arb`, plus the read-only git the worker/review prompts require)
-  unioned with the operator's own `allow` rules translated into agy's
-  grammar.
+  and `pwd` (bd-7wymls), unioned with the operator's own `allow` rules
+  translated into agy's grammar.
 
   Load-bearing under `:strict`, where headless agy auto-denies everything
   these rules do not name — without the baseline a `:strict` agy worker
@@ -237,7 +261,7 @@ defmodule Arbiter.Agents.Gemini.Security do
   """
   @spec allow_rules(SecurityPolicy.t()) :: [String.t()]
   def allow_rules(%SecurityPolicy{permissions: perms}),
-    do: (@worker_bootstrap_allow ++ translate_all(perms.allow)) |> Enum.uniq()
+    do: (@worker_bootstrap_allow ++ @harmless_allow ++ translate_all(perms.allow)) |> Enum.uniq()
 
   # ---- internals ---------------------------------------------------------
 

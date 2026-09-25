@@ -100,7 +100,7 @@ defmodule Arbiter.Worker.NotesGateTest do
   # string, which is why the original fix passed this exact test yet still
   # failed to attribute a real denial (`permission_denial?/1` only matches
   # `is_binary`, so an unwrapped map object always fell through to `false`).
-  defp exit_agy_denied_without_done(pid, tag) do
+  defp exit_agy_denied_without_done(pid, tag, command \\ "arb inbox bd-ci0y74") do
     cwd = tmp_dir!(tag)
 
     error_event =
@@ -113,10 +113,10 @@ defmodule Arbiter.Worker.NotesGateTest do
           "tool_name" => "run_command",
           "tool_info" => %{
             "name" => "run_command",
-            "parameters" => %{"CommandLine" => "arb inbox bd-ci0y74"},
+            "parameters" => %{"CommandLine" => command},
             "error" => %{
               "type" => "TOOL_ERROR",
-              "message" => "permission check failed for unsandboxed \"arb inbox bd-ci0y74\""
+              "message" => "permission check failed for unsandboxed \"#{command}\""
             }
           }
         }
@@ -298,6 +298,29 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       assert escalation
       assert escalation.body =~ "strict-policy bootstrap failure"
+    end
+
+    # bd-7wymls: run fc54ef4a reported "strict policy denied required command
+    # `pwd`" — but `pwd` is not part of the worker protocol. Only a
+    # bootstrap command is "required"; anything else is just "denied".
+    test "a strict-denied NON-bootstrap command is not called \"required\"", %{ws: ws} do
+      task = new_task(ws)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      :ok = exit_agy_denied_without_done(pid, "ng-strict-denied-nonboot", "pwd && git status")
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.failure_reason == "strict policy denied command `pwd`"
+
+      escalation =
+        Message.inbox("admiral", workspace_id: ws.id)
+        |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+
+      assert escalation
+      refute escalation.body =~ "bootstrap failure"
+      assert escalation.body =~ "`pwd && git status`"
     end
   end
 end

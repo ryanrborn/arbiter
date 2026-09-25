@@ -409,6 +409,7 @@ defmodule Arbiter.Worker.ClaudeSession do
           |> absorb_usage(event)
           |> capture_steps(event)
           |> track_async_tasks(event)
+          |> track_agy_denials(event)
           |> scan_split_done(event)
           |> buffer_gemini_display(event)
 
@@ -419,7 +420,9 @@ defmodule Arbiter.Worker.ClaudeSession do
         end)
 
       :error ->
-        emit_line(session, line, true)
+        session
+        |> note_agy_denial_notice(line)
+        |> emit_line(line, true)
     end
   end
 
@@ -852,11 +855,12 @@ defmodule Arbiter.Worker.ClaudeSession do
     })
 
     if permission_denial?(error) do
-      Map.put(
-        session,
+      session
+      |> Map.put(
         :denied_command,
         Arbiter.Agents.Gemini.Stream.agy_denied_command_token(step["tool_name"], params)
       )
+      |> Map.put(:denied_command_line, Map.get(input, "command"))
     else
       session
     end
@@ -875,6 +879,94 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   defp capture_steps(session, _event), do: session
+
+  # bd-7wymls: a `:strict` agy run whose command no `permissions.allow` rule
+  # names is *soft-denied* by headless agy — and agy then ENDS the turn: the
+  # process exits 0 without the model ever seeing the denial as a tool result
+  # it could work around (captured live against agy 1.2.11:
+  # test/fixtures/agy_strict_denial_turn_end.jsonl). The denied step itself is
+  # not a reliable signal (a DONE step with no output in that capture, an
+  # ERROR "user denied permission" step in run fc54ef4a's second session), so
+  # the turn-end is detected from agy's two run-level reports instead:
+  #
+  #   * `result.denied_actions` — structured, on the stream-json `result`
+  #     event (agy's changelog: headless runs "now end with a notice naming
+  #     the refused actions and report them as `denied_actions`");
+  #   * the stderr notice `jetski: no output produced — a tool required the
+  #     "command" permission that headless mode cannot prompt for, so it was
+  #     auto-denied. …` — see `note_agy_denial_notice/2`.
+  #
+  # Either one stamps `:denial_ended_turn`, which `Arbiter.Worker` reads on
+  # the port exit to resume the SAME conversation with a corrective prompt
+  # instead of treating it as an ordinary clean exit. The denied command is
+  # attributed from the last `run_command` agy started, since the soft-deny
+  # is what ended the turn. An explicit `permissions.deny` hit is different:
+  # agy hands that back to the model as a tool error and the turn goes on
+  # (agy_explicit_deny_continues.jsonl), so it never reaches here.
+  defp track_agy_denials(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "tool", "state" => "ACTIVE"} = step
+       }) do
+    params = get_in(step, ["tool_info", "parameters"])
+
+    command_line =
+      case Arbiter.Agents.Gemini.Stream.agy_tool_params(step["tool_name"], params) do
+        %{"command" => cmd} when is_binary(cmd) -> cmd
+        _ -> nil
+      end
+
+    Map.put(session, :last_agy_tool, {step["tool_name"], command_line})
+  end
+
+  defp track_agy_denials(%{provider: "gemini"} = session, %{
+         "event" => "result",
+         "result" => %{"denied_actions" => [_ | _] = actions}
+       }) do
+    kinds = Enum.map(actions, &(is_map(&1) && &1["action"]))
+    mark_denial_ended(session, "command" in kinds)
+  end
+
+  defp track_agy_denials(session, _event), do: session
+
+  # The stderr half of the detection above. Only a raw, non-JSON line can
+  # reach this — a tool's output always arrives inside a JSON `step_update`
+  # event — so a worker that merely greps for this text (as a worker on this
+  # very repo might) cannot trip it; the line has to come from agy itself.
+  @agy_denial_notice ~r/\Ajetski: .*headless mode cannot prompt for.*auto-denied/u
+  @agy_notice_action ~r/required the "([a-z_]+)" permission/
+
+  defp note_agy_denial_notice(%{provider: "gemini"} = session, line) when is_binary(line) do
+    if Regex.match?(@agy_denial_notice, line) do
+      command? =
+        case Regex.run(@agy_notice_action, line) do
+          [_, action] -> action == "command"
+          _ -> true
+        end
+
+      mark_denial_ended(session, command?)
+    else
+      session
+    end
+  end
+
+  defp note_agy_denial_notice(session, _line), do: session
+
+  defp mark_denial_ended(session, command_denied?) do
+    session = Map.put(session, :denial_ended_turn, true)
+
+    case Map.get(session, :last_agy_tool) do
+      {"run_command" = name, cmd} when command_denied? and is_binary(cmd) ->
+        session
+        |> Map.put(
+          :denied_command,
+          Arbiter.Agents.Gemini.Stream.agy_denied_command_token(name, %{"CommandLine" => cmd})
+        )
+        |> Map.put(:denied_command_line, cmd)
+
+      _ ->
+        session
+    end
+  end
 
   # bd-1eb6fc: agy's `manage_task status` result is freeform text ("Status:
   # RUNNING" / "Status: SUCCEEDED" / …), not a structured field — the only way
@@ -1083,6 +1175,14 @@ defmodule Arbiter.Worker.ClaudeSession do
   def async_tasks_running(%{} = session) do
     session |> Map.get(:async_tasks_running, %{}) |> Map.keys()
   end
+
+  @doc """
+  Whether this agy session's turn was ended by a headless permission
+  soft-deny (bd-7wymls) — see `track_agy_denials/2`. Always `false` for a
+  non-agy provider.
+  """
+  @spec denial_ended_turn?(map()) :: boolean()
+  def denial_ended_turn?(%{} = session), do: Map.get(session, :denial_ended_turn) == true
 
   # Refresh the session's activity from a decoded event, stamping :activity_at.
   # Events that carry no salient activity (tool *results*, partial deltas,
