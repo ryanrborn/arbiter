@@ -168,6 +168,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
@@ -1580,8 +1581,37 @@ defmodule Arbiter.Worker.ReviewGate do
   # them on the same branch. The caller owns the `record_round` write so each
   # entry point can log its own honest verdict — a `:request_changes` reject vs.
   # an `:approve` that admits an unmet criterion.
+  #
+  # bd-80talz: a reviewer that says the work fabricated or falsified evidence
+  # ends the loop here, whatever the round budget. Another revise round hands
+  # the question back to the same provider: on bd-aro53b the fix round swapped
+  # a true citation for an unverified one and uploaded mockup "screenshots" to
+  # catbox.moe to satisfy the reviewer.
   defp route_after_reject(state, findings) do
-    state |> accumulate_open_findings(findings) |> do_route_after_reject(findings)
+    state = accumulate_open_findings(state, findings)
+
+    if EvidenceIntegrity.flagged?(findings) do
+      escalate_fabricated_evidence(state, findings)
+    else
+      do_route_after_reject(state, findings)
+    end
+  end
+
+  # Reported as a plain `:request_changes` (the reviewer really rejected the
+  # work, so this is a failed run, not a class-C park) with
+  # `EvidenceIntegrity.marker/0` leading the findings. That marker is what makes
+  # `Arbiter.Worker` escalate to the coordinator instead of dispatching its own
+  # automatic fix round.
+  defp escalate_fabricated_evidence(state, findings) do
+    state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+
+    Logger.warning(
+      "ReviewGate: task=#{state.task_id} round #{state.round} reviewer flagged fabricated " <>
+        "evidence; escalating to the coordinator instead of a revise round"
+    )
+
+    payload = EvidenceIntegrity.escalation_findings(findings, escalation_payload(state))
+    {:done, finish(state, {:request_changes, payload})}
   end
 
   # bd-6r8caj: roll the open-finding set forward across the round boundary. The
@@ -4512,6 +4542,7 @@ defmodule Arbiter.Worker.ReviewGate do
     your VERDICT based on the diff alone and note that live test verification
     was unavailable — do not wait indefinitely for output that will not arrive.
 
+    #{EvidenceIntegrity.reviewer_block()}
     #{ReviewVerification.anti_stale_reflag_block()}
     When you have decided, print your verdict on its own line, EXACTLY one of:
 
@@ -4780,6 +4811,7 @@ defmodule Arbiter.Worker.ReviewGate do
     without a file change, and why — your reply here is forwarded back to the
     reviewer as your side of the record.
 
+    #{EvidenceIntegrity.worker_block()}
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`:
 
         git diff #{state.target_branch}...HEAD

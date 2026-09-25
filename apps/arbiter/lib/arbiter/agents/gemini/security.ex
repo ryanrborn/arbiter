@@ -186,14 +186,33 @@ defmodule Arbiter.Agents.Gemini.Security do
   ## Rule grammar
 
   agy's permission rules are `command(<prefix>)`, `read_file(<glob>)`,
-  `write_file(<glob>)`, `url(<glob>)` and `execute_url(<glob>)` — not Claude's
-  `Bash(...)`/`Read(...)`/`Write(...)`. `SecurityPolicy`'s `safe_defaults`
+  `write_file(<glob>)`, `read_url(<domain>)` and `execute_url(<domain>)` — not
+  Claude's `Bash(...)`/`Read(...)`/`Write(...)`.
+
+  Probed on agy 1.2.11 (bd-80talz), with a throwaway `$HOME`:
+
+    * agy rewrites `settings.json` on load and **silently drops** a rule kind
+      it does not know. `url(*)`, which this module emitted for a network-off
+      policy and a bare `WebFetch` until then, was one of them, so neither
+      deny ever reached the tool. `read_url(*)`, `execute_url(*)` and
+      `execute_url(<domain>)` survive the rewrite, and `read_url(*)` blocks
+      `read_url_content`.
+    * A bare domain covers its subdomains: `read_url(catbox.moe)` blocked
+      `https://files.catbox.moe/`, and `read_url(example.com)` blocked
+      `https://example.com/` while `https://www.iana.org/` still loaded.
+    * `command(...)` is a **literal prefix**. A glob inside it matches nothing:
+      `command(echo *catbox.moe*)` and `command(printf *)` both let their
+      commands run while `command(echo plain-ok)` blocked. So agy cannot deny
+      a shell command by the host it names. `:no_public_upload` denies the
+      upload-shaped `curl` prefixes (`curl -F`, `curl -T`, …) instead, which
+      catches the incident's `curl -F … https://catbox.moe/…` but not a
+      reordered command line. `SecurityPolicy`'s `safe_defaults`
   categories are expanded natively into that grammar, and the operator's own
   `allow`/`deny` strings are translated (a rule already written in agy's
   grammar passes through untouched). A *bare* Claude tool name (no `(...)`) is
   mapped onto the equivalent whole-path rule where agy has one — `Write` /
   `Edit` / `MultiEdit` / `NotebookEdit` → `write_file(**)`, `Read` →
-  `read_file(**)`, `WebFetch` / `WebSearch` → `url(*)` — which is what keeps
+  `read_file(**)`, `WebFetch` / `WebSearch` → `read_url(*)` — which is what keeps
   `Arbiter.Worker.Dispatch.review_security_policy/2`'s reviewer read-only
   posture working for agy. A rule with no agy analogue at all — `Monitor`,
   `ScheduleWakeup` — is **dropped** rather than emitted verbatim, since agy has
@@ -393,6 +412,26 @@ defmodule Arbiter.Agents.Gemini.Security do
   # `Arbiter.Agents.Gemini.async_tool_instruction/0`.
   defp expand_category(:no_async_wait), do: []
 
+  # bd-80talz: agy's URL tools by domain (subdomains included, see the
+  # moduledoc), and the shell's upload paths by literal prefix: `command(...)`
+  # cannot match a host in the middle of a command line.
+  defp expand_category(:no_public_upload) do
+    Enum.flat_map(
+      SecurityPolicy.public_upload_hosts(),
+      &["read_url(#{&1})", "execute_url(#{&1})"]
+    ) ++
+      [
+        "command(curl -F)",
+        "command(curl --form)",
+        "command(curl -T)",
+        "command(curl --upload-file)"
+      ]
+  end
+
+  defp expand_category(:no_gh_publish) do
+    ["command(gh gist create)", "command(gh gist edit)", "command(gh issue comment)"]
+  end
+
   defp expand_category(_unknown), do: []
 
   # When the policy cuts network, deny agy's URL tools and the obvious shell
@@ -400,7 +439,7 @@ defmodule Arbiter.Agents.Gemini.Security do
   # blocked here — that needs an OS sandbox; see moduledoc.)
   defp sandbox_deny(%{network: false}) do
     [
-      "url(*)",
+      "read_url(*)",
       "execute_url(*)",
       "command(curl)",
       "command(wget)",
@@ -417,7 +456,7 @@ defmodule Arbiter.Agents.Gemini.Security do
 
   defp translate_all(_), do: []
 
-  @agy_kinds ~w(command read_file write_file url execute_url)
+  @agy_kinds ~w(command read_file write_file read_url execute_url)
 
   # Claude grammar in, agy grammar out. A rule already written agy-style passes
   # through; anything we cannot express is dropped (see moduledoc).
@@ -425,6 +464,10 @@ defmodule Arbiter.Agents.Gemini.Security do
     case Regex.run(~r/\A([A-Za-z_]+)\((.*)\)\z/s, String.trim(rule)) do
       [_, kind, _inner] when kind in @agy_kinds ->
         String.trim(rule)
+
+      # `url(...)` is not an agy kind; agy drops it on load (bd-80talz).
+      [_, "url", inner] ->
+        "read_url(" <> inner <> ")"
 
       [_, "Bash", inner] ->
         "command(" <> strip_trailing_glob(inner) <> ")"
@@ -435,8 +478,8 @@ defmodule Arbiter.Agents.Gemini.Security do
       [_, kind, inner] when kind in ["Write", "Edit", "MultiEdit"] ->
         "write_file(" <> inner <> ")"
 
-      [_, "WebFetch", _inner] ->
-        "url(*)"
+      [_, "WebFetch", inner] ->
+        web_fetch_rule(inner)
 
       _ ->
         bare_tool_rule(String.trim(rule))
@@ -459,13 +502,23 @@ defmodule Arbiter.Agents.Gemini.Security do
   # baseline above): a bare tool name in Claude's grammar means "this tool, for
   # any argument", so the whole-path glob is the faithful translation in both
   # directions (deny ⇒ never, allow ⇒ unrestricted).
-  defp bare_tool_rule(rule) when rule in ["WebFetch", "WebSearch"], do: "url(*)"
+  defp bare_tool_rule(rule) when rule in ["WebFetch", "WebSearch"], do: "read_url(*)"
 
   defp bare_tool_rule(rule) when rule in ["Write", "Edit", "MultiEdit", "NotebookEdit"],
     do: "write_file(**)"
 
   defp bare_tool_rule("Read"), do: "read_file(**)"
   defp bare_tool_rule(_), do: nil
+
+  # `WebFetch(domain:example.com)` names one domain, and agy's `read_url` takes
+  # the same bare domain. Anything else Claude accepts there has no agy
+  # analogue narrower than every URL.
+  defp web_fetch_rule(inner) do
+    case Regex.run(~r/\Adomain:([A-Za-z0-9.-]+)\z/, String.trim(inner)) do
+      [_, domain] -> "read_url(" <> domain <> ")"
+      _ -> "read_url(*)"
+    end
+  end
 
   # `rm -rf:*` (Claude's "command prefix up to `:`, then a glob") → `rm -rf`.
   defp strip_trailing_glob(inner) do

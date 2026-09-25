@@ -329,11 +329,13 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert SecurityPolicy.interactive_session().permissions.mode == :auto
     end
 
-    test "drops only :no_async_wait from the baseline categories" do
+    # bd-80talz: :no_gh_publish is worker-only too. An operator or coordinator
+    # session commenting on an issue is ordinary work.
+    test "drops only :no_async_wait and :no_gh_publish from the baseline categories" do
       worker = SecurityPolicy.base().permissions.safe_defaults
       session = SecurityPolicy.interactive_session().permissions.safe_defaults
 
-      assert worker -- session == [:no_async_wait]
+      assert worker -- session == [:no_async_wait, :no_gh_publish]
       assert session -- worker == []
     end
 
@@ -379,6 +381,52 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
       assert SecurityPolicy.default().permissions.mode == :strict
       assert SecurityPolicy.interactive_session().permissions.mode == :auto
+    end
+  end
+
+  # bd-80talz: an agy worker uploaded mockup "screenshots" to files.catbox.moe
+  # and a public gist on the operator's account, and tried 0x0.st, transfer.sh
+  # and envs.sh. Nothing in the default posture stopped it.
+  describe "the public upload/paste host baseline (bd-80talz)" do
+    test "is a default safe-default category for workers and sessions alike" do
+      assert :no_public_upload in SecurityPolicy.safe_default_categories()
+      assert :no_public_upload in SecurityPolicy.base().permissions.safe_defaults
+      assert :no_public_upload in SecurityPolicy.resolve(nil).permissions.safe_defaults
+      assert :no_public_upload in SecurityPolicy.interactive_session().permissions.safe_defaults
+    end
+
+    test "the gist/issue-comment denies bind workers, not interactive sessions" do
+      assert :no_gh_publish in SecurityPolicy.resolve(nil).permissions.safe_defaults
+      refute :no_gh_publish in SecurityPolicy.interactive_session().permissions.safe_defaults
+
+      worker = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.resolve(nil))
+      session = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.interactive_session())
+
+      assert "Bash(gh issue comment:*)" in worker
+      assert "Bash(gh gist create:*)" in worker
+      refute Enum.any?(session, &(&1 =~ "gh issue comment" or &1 =~ "gh gist"))
+
+      # The host denies still bind the session.
+      assert "Bash(curl *catbox.moe*)" in session
+      assert "WebFetch(domain:*.catbox.moe)" in session
+    end
+
+    test "documents at least the hosts the incident used or tried" do
+      hosts = SecurityPolicy.public_upload_hosts()
+
+      for host <- ~w(catbox.moe 0x0.st transfer.sh file.io envs.sh pastebin.com) do
+        assert host in hosts, "#{host} missing from public_upload_hosts/0"
+      end
+    end
+
+    test "lists bare registrable domains, so a subdomain rule can be derived from each" do
+      for host <- SecurityPolicy.public_upload_hosts() do
+        refute String.contains?(host, ["/", "*", " ", ":"]), "#{inspect(host)} is not a bare host"
+      end
+
+      # litterbox is catbox's temporary host, litter.catbox.moe — covered by
+      # catbox.moe's subdomain rule rather than listed on its own.
+      refute "litter.catbox.moe" in SecurityPolicy.public_upload_hosts()
     end
   end
 end

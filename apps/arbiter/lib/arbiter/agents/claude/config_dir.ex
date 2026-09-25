@@ -460,6 +460,10 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
       fix. A change-request verdict that names no findings is invalid.
     - Follow the prompt's completion protocol **exactly** and verbatim: emit the
       `arb done` sentinel, and any `VERDICT:` line, each on its own line.
+    - Never fabricate evidence, citations, screenshots or artifacts. If an
+      acceptance criterion cannot be met, report it as unmet and say why. Never
+      upload anything to a public or anonymous file or paste host, and never
+      create a gist.
 
     ## Arbiter MCP tools
 

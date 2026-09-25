@@ -74,6 +74,17 @@ defmodule Arbiter.Agents.SecurityPolicy do
       "waiting" and is never woken — the notification has nowhere to arrive
       (bd-d534xo). Denying the tools outright backs the prompt guidance that
       says the same thing.
+    * `:no_public_upload`   — network access to public, anonymous file and
+      paste hosts (`public_upload_hosts/0`). An agy worker uploaded mockup
+      "screenshots" to files.catbox.moe to satisfy an acceptance criterion it
+      could not meet (bd-80talz). Such a host takes repo content, logs or
+      secrets just as easily, anonymously and usually for good.
+    * `:no_gh_publish`      — `gh gist create`/`edit` and `gh issue comment`.
+      The same worker made a public gist on the operator's account and posted
+      a test comment (bd-80talz). `gh pr comment` is left alone because the
+      review-thread follow-up protocol uses it. Workers only:
+      `interactive_session_base/0` leaves it out, since an operator or
+      coordinator session commenting on an issue is ordinary work.
 
   Replaceable as a whole (set `safe_defaults: []` to opt a domain out — not
   recommended), but defaults non-empty. They are enforced in **every** mode
@@ -155,8 +166,49 @@ defmodule Arbiter.Agents.SecurityPolicy do
     :no_secret_reads,
     :no_outside_writes,
     :no_pr_create,
-    :no_async_wait
+    :no_async_wait,
+    :no_public_upload,
+    :no_gh_publish
   ]
+
+  # bd-80talz: public, anonymous upload and paste hosts. Each entry is a bare
+  # registrable domain; every adapter derives its subdomain coverage from it
+  # (Claude `WebFetch(domain:*.<host>)`, agy `read_url(<host>)`, which agy
+  # 1.2.11 matched against files.catbox.moe). That is why litterbox
+  # (litter.catbox.moe) is covered by `catbox.moe` and not listed apart.
+  @public_upload_hosts ~w(
+    catbox.moe
+    0x0.st
+    transfer.sh
+    file.io
+    envs.sh
+    x0.at
+    temp.sh
+    tmpfiles.org
+    uguu.se
+    bashupload.com
+    oshi.at
+    keep.sh
+    filebin.net
+    pixeldrain.com
+    gofile.io
+    pastebin.com
+    paste.ee
+    paste.rs
+    dpaste.com
+    dpaste.org
+    hastebin.com
+    termbin.com
+    ix.io
+    sprunge.us
+    rentry.co
+    controlc.com
+    justpaste.it
+    privatebin.net
+    imgur.com
+    imgbb.com
+    postimages.org
+  )
 
   @doc "Valid `permissions.mode` atoms."
   @spec valid_modes() :: [mode()]
@@ -169,6 +221,13 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @doc "The baseline destructive-op categories an adapter must deny by default."
   @spec safe_default_categories() :: [atom()]
   def safe_default_categories, do: @safe_default_categories
+
+  @doc """
+  The public upload/paste hosts the `:no_public_upload` category denies, as
+  bare domains. Each adapter covers subdomains too (see the moduledoc).
+  """
+  @spec public_upload_hosts() :: [String.t()]
+  def public_upload_hosts, do: @public_upload_hosts
 
   @doc """
   The hardcoded safe baseline: `bypass` mode (headless-safe — no interactive
@@ -250,7 +309,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
       | permissions: %{
           base.permissions
           | mode: :auto,
-            safe_defaults: @safe_default_categories -- [:no_async_wait],
+            safe_defaults: @safe_default_categories -- [:no_async_wait, :no_gh_publish],
             deny: base.permissions.deny ++ ["Bash(arb mcp token mint:*)"]
         }
     }

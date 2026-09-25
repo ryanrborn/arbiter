@@ -15,6 +15,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
+  alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.ReviewVerification
 
   @doc false
@@ -263,7 +264,8 @@ defmodule Arbiter.Worker.PromptBuilder do
     Your current directory is a fresh git worktree on a per-task branch.
     #{isolation_section}
     #{process_kill_discipline_section()}
-    #{read_discipline_section()}#{skills_section(opts)}
+    #{read_discipline_section()}
+    #{EvidenceIntegrity.worker_block()}#{skills_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch, and push it.
 
@@ -341,6 +343,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{pr_follow_up_note(task)}#{isolation_section(Keyword.get(opts, :worktree_path))}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
+    #{EvidenceIntegrity.worker_block()}
     Your job:
       1. Do the investigation / ops work the directive describes.
       2. Write your findings to the directive's `notes` field by calling the
@@ -705,6 +708,7 @@ defmodule Arbiter.Worker.PromptBuilder do
       * Do NOT merge or close the PR/MR.
       * Do NOT modify any branch, including the PR's head.
 
+    #{EvidenceIntegrity.reviewer_block()}
     #{async_tools_section(adapter, "`arb done`", nil, commit_first: false)}
 
     #{ReviewVerification.anti_stale_reflag_block()}

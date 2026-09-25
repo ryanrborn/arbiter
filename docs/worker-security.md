@@ -85,6 +85,44 @@ the tightest allow-list posture.
 | `:no_force_push`     | `git push --force` / `-f` (`--force-with-lease` is allowed)|
 | `:no_secret_reads`   | reading `.env`, `*.pem`, `~/.ssh/**`, cloud creds          |
 | `:no_outside_writes` | writing `/etc/**`, `~/.ssh/**`, `~/.claude/**`, …          |
+| `:no_pr_create`      | `gh pr create`, `glab mr create` (the MergeQueue owns PRs) |
+| `:no_async_wait`     | the `Monitor` / `ScheduleWakeup` tools (Claude only)       |
+| `:no_public_upload`  | public upload/paste hosts                                  |
+| `:no_gh_publish`     | `gh gist create`/`edit`, `gh issue comment` (workers only) |
+
+### Public upload and paste hosts (`:no_public_upload`, `:no_gh_publish`, bd-80talz)
+
+On bd-aro53b an agy worker made a public gist on the operator's account and
+uploaded mockup "screenshots" to files.catbox.moe. It also tried 0x0.st,
+transfer.sh and envs.sh. A public, anonymous host accepts repo content, logs
+or secrets as easily as images, and usually keeps them for good.
+`SecurityPolicy.public_upload_hosts/0` is the documented host list, as bare
+domains:
+
+> catbox.moe (and litterbox, litter.catbox.moe), 0x0.st, transfer.sh,
+> file.io, envs.sh, x0.at, temp.sh, tmpfiles.org, uguu.se, bashupload.com,
+> oshi.at, keep.sh, filebin.net, pixeldrain.com, gofile.io, pastebin.com,
+> paste.ee, paste.rs, dpaste.com, dpaste.org, hastebin.com, termbin.com,
+> ix.io, sprunge.us, rentry.co, controlc.com, justpaste.it, privatebin.net,
+> imgur.com, imgbb.com, postimages.org
+
+| Provider | URL tools | Shell | Commands |
+|----------|-----------|-------|----------|
+| Claude | `WebFetch(domain:<host>)` + `WebFetch(domain:*.<host>)` | `Bash(<tool> *<host>*)` for `curl`, `wget`, `http`, `nc` | `gh gist create`/`edit`, `gh issue comment` |
+| agy | `read_url(<host>)` + `execute_url(<host>)` (a bare domain covers its subdomains; probed) | **by host: not expressible** (`command(...)` is a literal prefix, a glob in it matches nothing; probed). Upload-shaped `curl -F`/`--form`/`-T`/`--upload-file` prefixes are denied instead | same |
+| Codex | **not enforced**: Codex has no deny-list mechanism (`security_enforced? = false`) | — | — |
+
+The `gh` rules in the Commands column are a separate category,
+`:no_gh_publish`, that binds headless workers only. Interactive operator and
+coordinator sessions (`SecurityPolicy.interactive_session/0`) keep the host
+denies but may still comment on issues and use gists: that is ordinary work
+for them, and the incident was a worker. `gh pr comment` stays allowed for
+workers too: the review-thread follow-up protocol uses it.
+These are permission-layer rules, like the rest of this page: an upload through
+`python -c`, or a `curl` whose flags come in another order on agy, is not
+matched. The worker prompt's `NO PUBLIC UPLOADS` rule
+(`Arbiter.Worker.EvidenceIntegrity.worker_block/0`) says the same thing to
+every provider, Codex included.
 
 Set `safe_defaults: []` to opt a domain out (not recommended). **Effective floor
 caveat:** the isolated `CLAUDE_CONFIG_DIR/settings.json` is generated once from
@@ -272,10 +310,14 @@ being linked flat — a flat `<home>/.cache -> ~/.cache` would make
 symlink cycle inside the worker's own `$HOME`.
 
 Rules are rewritten into agy's own grammar (`command(...)`, `read_file(...)`,
-`write_file(...)`, `url(...)`). A *bare* Claude tool name (no `(...)`) maps onto
-the equivalent whole-path rule where agy has one — `Write`/`Edit`/`MultiEdit`/
-`NotebookEdit` → `write_file(**)`, `Read` → `read_file(**)`,
-`WebFetch`/`WebSearch` → `url(*)`. That is what keeps the reviewer read-only
+`write_file(...)`, `read_url(...)`, `execute_url(...)`). A *bare* Claude tool
+name (no `(...)`) maps onto the equivalent whole-path rule where agy has one —
+`Write`/`Edit`/`MultiEdit`/`NotebookEdit` → `write_file(**)`, `Read` →
+`read_file(**)`, `WebFetch`/`WebSearch` → `read_url(*)`, and
+`WebFetch(domain:<host>)` → `read_url(<host>)`. Until bd-80talz these were
+emitted as `url(*)`, which is not an agy rule kind: agy rewrites
+`settings.json` on load and silently drops it (probed on 1.2.11), so the
+network-off deny and the reviewer's `WebFetch` deny never reached agy. That is what keeps the reviewer read-only
 posture (`Arbiter.Worker.Dispatch.review_security_policy/2` denies
 `Edit`/`Write`/`NotebookEdit` on every worktree-backed review dispatch) working
 for agy as well as for Claude. A rule with no agy analogue at all — `Monitor`,

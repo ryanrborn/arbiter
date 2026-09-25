@@ -77,6 +77,23 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            it to a file and read bounded slices rather than dumping it whole into
            context.
 
+           EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
+           artifacts. A screenshot must be a real capture of the real app, a source
+           or licence citation must name where the thing actually came from, and a
+           test result must be output you actually saw. If an acceptance criterion
+           cannot be met (screenshots are not possible headlessly, an official asset
+           cannot be found), report that AC as unmet: say so in the PR body and your
+           notes, and leave it unmet or flagged for the reviewer and coordinator. An
+           honest "not met" is always acceptable. A mockup presented as a screenshot,
+           or a citation you did not verify, is not. Never change a true statement to
+           satisfy a reviewer: if a finding is wrong, rebut it with the evidence.
+
+           NO PUBLIC UPLOADS — never upload repo content, logs, images or anything
+           else to a public or anonymous file or paste host (catbox.moe, litterbox,
+           0x0.st, transfer.sh, file.io, pastebin and the like), never create a gist,
+           and never post test or throwaway comments on issues or PRs. Uploads there
+           are public, often permanent, and outside the operator's control.
+
            Work the task to completion: load context, design, implement, test,
            commit on this branch, and push it.
 
@@ -217,6 +234,23 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            it to a file and read bounded slices rather than dumping it whole into
            context.
 
+           EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
+           artifacts. A screenshot must be a real capture of the real app, a source
+           or licence citation must name where the thing actually came from, and a
+           test result must be output you actually saw. If an acceptance criterion
+           cannot be met (screenshots are not possible headlessly, an official asset
+           cannot be found), report that AC as unmet: say so in the PR body and your
+           notes, and leave it unmet or flagged for the reviewer and coordinator. An
+           honest "not met" is always acceptable. A mockup presented as a screenshot,
+           or a citation you did not verify, is not. Never change a true statement to
+           satisfy a reviewer: if a finding is wrong, rebut it with the evidence.
+
+           NO PUBLIC UPLOADS — never upload repo content, logs, images or anything
+           else to a public or anonymous file or paste host (catbox.moe, litterbox,
+           0x0.st, transfer.sh, file.io, pastebin and the like), never create a gist,
+           and never post test or throwaway comments on issues or PRs. Uploads there
+           are public, often permanent, and outside the operator's control.
+
            Your job:
              1. Do the investigation / ops work the directive describes.
              2. Write your findings to the directive's `notes` field by calling the
@@ -328,6 +362,15 @@ defmodule Arbiter.Worker.PromptBuilderTest do
              * Do NOT push code.
              * Do NOT merge or close the PR/MR.
              * Do NOT modify any branch, including the PR's head.
+
+           FABRICATED EVIDENCE — if the work fabricates or falsifies evidence (a
+           mockup presented as a screenshot, a citation to a source the thing did not
+           come from, test output that was never produced), start that finding with
+           `[FABRICATED-EVIDENCE]` and include evidence the coordinator can check: the URL you
+           fetched, the command you ran and what it printed, a hash or byte
+           comparison. That finding sends the task to the coordinator instead of
+           another fix round, so be sure first. Compare against the actual source
+           before you call a provenance claim false; appearance alone is not enough.
 
            *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
            turn ends the session outright, and no notification can ever reach you
@@ -442,6 +485,15 @@ defmodule Arbiter.Worker.PromptBuilderTest do
              * Do NOT push code.
              * Do NOT merge or close the PR/MR.
              * Do NOT modify any branch, including the PR's head.
+
+           FABRICATED EVIDENCE — if the work fabricates or falsifies evidence (a
+           mockup presented as a screenshot, a citation to a source the thing did not
+           come from, test output that was never produced), start that finding with
+           `[FABRICATED-EVIDENCE]` and include evidence the coordinator can check: the URL you
+           fetched, the command you ran and what it printed, a hash or byte
+           comparison. That finding sends the task to the coordinator instead of
+           another fix round, so be sure first. Compare against the actual source
+           before you call a provenance claim false; appearance alone is not enough.
 
            *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
            turn ends the session outright, and no notification can ever reach you
@@ -671,6 +723,53 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       assert claude_prompt =~ "ScheduleWakeup"
       assert claude_prompt =~ "Bash"
       assert claude_prompt =~ "`timeout` parameter"
+    end
+  end
+
+  # bd-80talz: an agy worker passed a mockup off as screenshots, hosted it on
+  # files.catbox.moe, made a public gist on the operator's account and swapped
+  # a true citation for an unverified one. Every provider's authoring prompt
+  # now says not to, and every review prompt says how to report it.
+  describe "evidence integrity and public uploads (bd-80talz)" do
+    @adapters [Arbiter.Agents.Claude, Arbiter.Agents.Gemini, Arbiter.Agents.Codex]
+
+    defp assert_integrity_rules(prompt) do
+      assert prompt =~ "never fabricate evidence, citations, screenshots or\nartifacts"
+      assert prompt =~ "report that AC as unmet"
+      assert prompt =~ "never upload repo content, logs, images or anything"
+      assert prompt =~ "public or anonymous file or paste host"
+      assert prompt =~ "catbox.moe"
+      assert prompt =~ "never create a gist"
+    end
+
+    for adapter <- @adapters do
+      test "the #{inspect(adapter)} work prompt carries the rules" do
+        unquote(adapter)
+        |> then(&PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", adapter: &1))
+        |> assert_integrity_rules()
+      end
+
+      test "the #{inspect(adapter)} task prompt carries the rules" do
+        unquote(adapter)
+        |> then(&PromptBuilder.prompt_for_task(task(%{issue_type: :task}), adapter: &1))
+        |> assert_integrity_rules()
+      end
+
+      test "the #{inspect(adapter)} review prompt says how to report fabricated evidence" do
+        prompt =
+          PromptBuilder.prompt_for_task(task(%{}), review: true, adapter: unquote(adapter))
+
+        assert prompt =~ "[FABRICATED-EVIDENCE]"
+        assert prompt =~ "evidence the coordinator can check"
+      end
+    end
+
+    test "the text is the shared block, not a per-prompt copy" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+      assert prompt =~ Arbiter.Worker.EvidenceIntegrity.worker_block()
+
+      review = PromptBuilder.prompt_for_task(task(%{}), review: true)
+      assert review =~ Arbiter.Worker.EvidenceIntegrity.reviewer_block()
     end
   end
 end

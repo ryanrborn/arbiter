@@ -112,6 +112,16 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       refute memory =~ "Always roleplay"
     end
 
+    # bd-80talz: the standing memory repeats the prompt's two hard rules, so
+    # they hold even in a turn that has drifted far from the prompt.
+    test "CLAUDE.md forbids fabricated evidence and public uploads" do
+      memory = ConfigDir.worker_memory()
+
+      assert memory =~ "Never fabricate evidence"
+      assert memory =~ "report it as unmet"
+      assert memory =~ "public or anonymous file or paste host"
+    end
+
     test "copies auth from the source, but never CLAUDE.md or settings.json", %{
       source: source,
       target: target
