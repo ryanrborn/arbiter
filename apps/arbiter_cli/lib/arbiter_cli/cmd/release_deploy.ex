@@ -417,6 +417,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     do_rollback(ctx, pre_deploy_fails)
   end
 
+  @spec do_rollback(map(), [String.t()]) :: no_return()
   defp do_rollback(ctx, pre_deploy_fails) do
     %{current_link: current_link, rollback_plan: rollback_plan, timeout_ms: timeout_ms} = ctx
     outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
