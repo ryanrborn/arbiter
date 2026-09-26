@@ -275,6 +275,43 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "WARNING: missing safe-default categories: no_public_upload, no_gh_publish"
     end
 
+    test "warns when a workspace config still carries the inert legacy safe_defaults key" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "vstim",
+            "prefix" => "vs",
+            "config" => %{
+              "agent" => %{
+                "security" => %{
+                  "permissions" => %{
+                    "safe_defaults" => ["no_destructive_fs", "no_force_push"]
+                  }
+                }
+              }
+            },
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true}
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~
+               "WARNING: legacy safe_defaults key present in config — it is ignored, use safe_defaults_exclude"
+    end
+
     test "empty workers and ready tasks render '(none)'" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],

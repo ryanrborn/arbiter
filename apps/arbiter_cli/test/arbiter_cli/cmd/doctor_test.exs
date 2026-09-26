@@ -147,7 +147,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 9
+    assert length(checks) == 10
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -764,6 +764,67 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert exit_code == 0
       assert out =~ "[fail] workspace safe-default categories"
       assert out =~ "default: no_public_upload"
+    end
+  end
+
+  # bd-4420va: `permissions.safe_defaults` no longer has any effect once
+  # `safe_defaults_exclude` exists, so a workspace that opted a category out
+  # with the old key (e.g. `safe_defaults: []`) now silently resolves every
+  # category again. Flag any workspace whose config still carries the key.
+  describe "legacy safe_defaults key check" do
+    test "green when no workspace config carries the legacy key" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] legacy safe_defaults key"
+    end
+
+    test "names a workspace whose config still sets the inert legacy key" do
+      workspaces_with_legacy_key = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{
+              "agent" => %{
+                "security" => %{
+                  "permissions" => %{
+                    "safe_defaults" => ["no_destructive_fs", "no_force_push"]
+                  }
+                }
+              }
+            },
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true}
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspaces_with_legacy_key, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] legacy safe_defaults key"
+      assert out =~ "default"
+      assert out =~ "safe_defaults_exclude"
     end
   end
 end

@@ -35,7 +35,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_migrations(),
       check_bind_address(),
       check_restart_safety(),
-      check_security_defaults()
+      check_security_defaults(),
+      check_legacy_safe_defaults_key()
     ]
   end
 
@@ -482,8 +483,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       status: :fail,
       detail: "missing default categories — #{detail}",
       hint:
-        "Add `agent.security.permissions.safe_defaults_exclude` explicitly if that's " <>
-          "intentional, or remove it to pick the category back up.",
+        "These exclusions are named in `agent.security.permissions.safe_defaults_exclude`. " <>
+          "Remove a category from that list to re-enable it, or leave it if intentional.",
       fatal: false,
       blocks_readiness: false
     }
@@ -496,6 +497,54 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       %{"safe_defaults_exclude" => excl} when is_list(excl) -> excl
       _ -> []
     end
+  end
+
+  # bd-4420va: the legacy `permissions.safe_defaults` config key is inert
+  # (see `Arbiter.Agents.SecurityPolicy`) — a workspace that once opted out
+  # with `safe_defaults: []` now silently resolves every default category
+  # again. Flag any workspace whose raw config still carries the key so an
+  # operator relying on the old opt-out notices before it matters.
+  defp check_legacy_safe_defaults_key do
+    offenders =
+      workspace_entries()
+      |> Enum.filter(fn %{config: config} -> has_legacy_safe_defaults_key?(config) end)
+      |> Enum.map(& &1.name)
+
+    legacy_safe_defaults_result(offenders)
+  end
+
+  defp has_legacy_safe_defaults_key?(config) do
+    config
+    |> get_in(["agent", "security", "permissions"])
+    |> case do
+      %{} = permissions -> Map.has_key?(permissions, "safe_defaults")
+      _ -> false
+    end
+  end
+
+  defp legacy_safe_defaults_result([]) do
+    %Result{
+      name: "legacy safe_defaults key",
+      status: :ok,
+      detail: "no workspace config carries the inert legacy key",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp legacy_safe_defaults_result(offenders) do
+    %Result{
+      name: "legacy safe_defaults key",
+      status: :fail,
+      detail: "legacy key ignored — use safe_defaults_exclude: #{Enum.join(offenders, ", ")}",
+      hint:
+        "`agent.security.permissions.safe_defaults` no longer has any effect (it is always " <>
+          "the current default set minus safe_defaults_exclude). Remove the key, and if it " <>
+          "was used to opt a category out, move that category into " <>
+          "`agent.security.permissions.safe_defaults_exclude` instead.",
+      fatal: false,
+      blocks_readiness: false
+    }
   end
 
   # `%{name: , config: }` per workspace — the name so a failure can point at

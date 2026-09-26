@@ -81,7 +81,7 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       refute "WebFetch" in rules
     end
 
-    test "opting out via safe_defaults_exclude empties the baseline" do
+    test "excluding no_destructive_fs drops the rm -rf deny" do
       rules =
         Security.deny_rules(
           policy(%{"permissions" => %{"safe_defaults_exclude" => ["no_destructive_fs"]}})
