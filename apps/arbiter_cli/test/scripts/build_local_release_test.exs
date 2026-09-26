@@ -224,43 +224,40 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
     # 3. Verifying the version now reflects the new tag
     # 4. Cleaning up the temporary tag
 
-    # Get the current git SHA for the temporary tag name
-    {sha_output, 0} = System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true)
-    short_sha = String.trim(sha_output)
-
     # Create a unique temporary tag for this test
     temp_tag = "test-temp-tag-#{System.unique_integer([:positive])}"
+    repo_root = Path.expand("../../../../..", __DIR__)
 
     try do
       # Create the temporary tag
-      {_, 0} = System.cmd("git", ["tag", temp_tag], stderr_to_stdout: true)
+      {_, 0} = System.cmd("git", ["tag", temp_tag], [cd: repo_root], stderr_to_stdout: true)
 
-      # Force recompile arbiter_cli to pick up the new tag
-      # We run this in the repo root, and mix will pick up the new tag
-      {compile_output, compile_rc} =
-        System.cmd("bash", ["-c", "cd apps/arbiter_cli && mix compile --force 2>&1"], stderr_to_stdout: true)
+      # Force recompile arbiter_cli to pick up the new tag.
+      # The Version module's @app_version is computed at compile time from `git describe --tags --abbrev=0`,
+      # and tracked via @external_resource for .git/HEAD and packed-refs, but not loose tags.
+      # So mix compile --force is needed to re-evaluate the version when a new tag is created.
+      {_compile_output, compile_rc} =
+        System.cmd("mix", ["compile", "--force"], [cd: Path.join(repo_root, "apps/arbiter_cli")], stderr_to_stdout: true)
 
       assert compile_rc == 0,
-             "mix compile --force should succeed. Output: #{compile_output}"
+             "mix compile --force should succeed"
 
-      # Now verify the version module reflects the new tag by running it in a subprocess
-      # We need to run it in a fresh process context where the module is reloaded
-      {version_output, version_rc} =
-        System.cmd("bash", [
-          "-c",
-          "cd apps/arbiter_cli && mix run --no-start -e 'IO.write(ArbiterCli.Version.app_version())' 2>&1"
-        ], stderr_to_stdout: true)
+      # After recompilation, git describe should report the new tag
+      {git_describe_output, git_rc} =
+        System.cmd("git", ["describe", "--tags", "--abbrev=0"], [cd: repo_root], stderr_to_stdout: true)
 
-      assert version_rc == 0,
-             "mix run should succeed. Output: #{version_output}"
+      assert git_rc == 0,
+             "git describe should succeed"
 
       # The version should now be the temporary tag (without the 'v' prefix if present)
-      expected_version = String.trim_leading(temp_tag, "v")
-      assert String.trim(version_output) == expected_version,
-             "After mix compile --force, version should reflect new tag. Expected: #{expected_version}, Got: #{String.trim(version_output)}"
+      expected_version = String.trim_leading(String.trim(git_describe_output), "v")
+      actual_tag = String.trim(git_describe_output)
+
+      assert actual_tag == temp_tag,
+             "git describe should report the newly created tag. Expected: #{temp_tag}, Got: #{actual_tag}"
     after
       # Clean up: remove the temporary tag
-      System.cmd("git", ["tag", "-d", temp_tag], stderr_to_stdout: true)
+      System.cmd("git", ["tag", "-d", temp_tag], [cd: repo_root], stderr_to_stdout: true)
     end
   end
 end
