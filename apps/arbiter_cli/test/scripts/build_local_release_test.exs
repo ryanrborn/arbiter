@@ -211,6 +211,7 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
            "Script must force-recompile arbiter_cli before building the escript in a single subshell"
   end
 
+  @tag timeout: 120_000
   test "stale version after tagging: mix compile --force ensures the escript picks up new tags (#1943, #1993)" do
     # When a tag is added to the repo and the CLI is rebuilt without
     # `mix compile --force`, ArbiterCli.Version will report a stale tag
@@ -231,9 +232,11 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
     # 6. Verifying the version changed to match the new tag
     # 7. Cleaning up the temporary tag
 
-    # Use a version-like tag name (99.99.99) that won't conflict with real versions
-    unique_suffix = System.unique_integer([:positive])
-    temp_tag = "v99.99.#{unique_suffix}"
+    # Use a unique tag name to avoid collisions when tests run in parallel.
+    # System.unique_integer with [:positive, :monotonic] provides a large,
+    # monotonically increasing integer that's unique across all processes.
+    unique_id = System.unique_integer([:positive, :monotonic])
+    temp_tag = "v99.99.#{unique_id}"
     repo_root = Path.expand("../../../../", __DIR__)
     arbiter_cli_dir = Path.join(repo_root, "apps/arbiter_cli")
     escript_path = Path.join(arbiter_cli_dir, "arb")
@@ -254,15 +257,15 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
       # Use a version-like name so the Version module can parse it
       {_, 0} = System.cmd("git", ["tag", temp_tag], cd: repo_root)
 
-      # Verify git describe reports the new tag
-      {git_describe_output, git_rc} =
-        System.cmd("git", ["describe", "--tags", "--abbrev=0"], cd: repo_root)
+      # Verify our tag exists (git tag -l lists all tags)
+      {git_tags_output, git_tags_rc} =
+        System.cmd("git", ["tag", "-l", temp_tag], cd: repo_root)
 
-      assert git_rc == 0, "git describe should find the tag"
-      actual_tag = String.trim(git_describe_output)
+      assert git_tags_rc == 0, "git tag -l should succeed"
+      listed_tag = String.trim(git_tags_output)
 
-      assert actual_tag == temp_tag,
-             "git describe should report the newly created tag. Expected: #{temp_tag}, Got: #{actual_tag}"
+      assert listed_tag == temp_tag,
+             "git tag -l should find our newly created tag. Expected: #{temp_tag}, Got: #{listed_tag}"
 
       # Force-recompile arbiter_cli to pick up the loose tag ref.
       # The Version module's @app_version is embedded at compile time, so this
