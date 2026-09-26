@@ -338,7 +338,9 @@ defmodule Arbiter.Accounts.Census do
     {accounts, [],
      [
        "No operator credential was offered. Pass " <>
-         "`--operator-credential #{@default_operator_credential_path}` to add that token as a " <>
+         "`--operator-credential #{@default_operator_credential_path}` (or " <>
+         "`operator_credential: \"#{@default_operator_credential_path}\"` to " <>
+         "`Arbiter.Release.accounts_census/1`) to add that token as a " <>
          "second credential on the same Claude account (§7.2) — only its fingerprint is ever read."
      ]}
   end

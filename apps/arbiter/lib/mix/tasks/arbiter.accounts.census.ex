@@ -40,30 +40,36 @@ defmodule Mix.Tasks.Arbiter.Accounts.Census do
   already present on this host — so read the census, merge the candidates you
   know to be one account, rename the slugs, and only then hand the file to the
   future `mix arbiter.accounts.migrate --plan accounts.json`.
+
+  ## Release installs
+
+  A thin wrapper over `Arbiter.Release.accounts_census/1`, which a release
+  install (no Mix toolchain) runs directly:
+
+      bin/arbiter eval 'Arbiter.Release.accounts_census(plan: "/home/me/.arbiter/accounts.json")'
+
+  See `docs/provider-accounts-release-runbook.md` for the full procedure.
   """
 
   use Mix.Task
-
-  require Logger
-
-  alias Arbiter.Accounts.Census
-
-  @default_plan "accounts.json"
 
   @switches [plan: :string, force: :boolean, operator_credential: :string]
 
   @impl Mix.Task
   def run(argv) do
-    Mix.Task.run("app.start")
+    # Config only: `Arbiter.Release.accounts_census/1` starts Ash, the Repo and
+    # the Vault itself, never the full application next to a live server.
+    Mix.Task.run("app.config")
     execute(argv)
   end
 
   @doc """
-  Everything `run/1` does after the application has booted.
+  Everything `run/1` does after config is loaded: parse `argv` and hand off to
+  `Arbiter.Release.accounts_census/1`, which holds the logic so a release
+  install can run the same census through `bin/arbiter eval`.
 
   Split out so the census can be exercised against a real, seeded, sandboxed
-  database in tests — `Mix.Task.run("app.start")` cannot run under the Ecto
-  sandbox.
+  database in tests.
   """
   @spec execute([String.t()]) :: :ok
   def execute(argv) do
@@ -73,53 +79,17 @@ defmodule Mix.Tasks.Arbiter.Accounts.Census do
       Mix.raise("unrecognised option(s): #{Enum.map_join(invalid, ", ", &elem(&1, 0))}")
     end
 
-    plan_path = Keyword.get(opts, :plan, @default_plan)
-    force? = Keyword.get(opts, :force, false)
+    release_opts =
+      [cli: :mix, force?: Keyword.get(opts, :force, false)]
+      |> put_opt(:plan, opts[:plan])
+      |> put_opt(:operator_credential, opts[:operator_credential])
 
-    if File.exists?(plan_path) and not force? do
-      Mix.raise("#{plan_path} already exists; re-run with --force to overwrite it")
-    end
-
-    census = Census.run(operator_credential_opts(opts))
-
-    Mix.shell().info(Census.report(census))
-
-    Census.write_plan!(census, plan_path, true)
-
-    Mix.shell().info("""
-
-    Candidate plan written to #{plan_path} (mode 0600). It is a proposal:
-    rename the slugs, merge any candidates you know to be one account, then run
-    the migrate step against it. Nothing was written to the database.\
-    """)
-
-    # Fingerprints and counts only — see §7.4's "Logs" row.
-    Logger.info(
-      "Arbiter.Accounts.Census: scanned #{census.totals.workspaces} workspace(s), " <>
-        "#{census.totals.credential_keys} provider-credential key(s), " <>
-        "#{census.totals.accounts} candidate account(s); plan written to #{plan_path}"
-    )
-
+    _census = Arbiter.Release.accounts_census(release_opts)
     :ok
+  rescue
+    e in Arbiter.Release.Refused -> Mix.raise(e.message)
   end
 
-  # Resolves `--operator-credential` into the fingerprint-only shape `build/2`
-  # takes. A read failure is a note on the census, not an abort: the rest of the
-  # inventory is still worth having.
-  defp operator_credential_opts(opts) do
-    case Keyword.fetch(opts, :operator_credential) do
-      :error ->
-        []
-
-      {:ok, path} ->
-        case Census.operator_credential(path) do
-          {:ok, credential} ->
-            [operator_credential: credential]
-
-          {:error, reason} ->
-            Mix.shell().info("\nOperator credential: could not read #{path} (#{reason}).")
-            [operator_credential_error: reason]
-        end
-    end
-  end
+  defp put_opt(opts, _key, nil), do: opts
+  defp put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 end
