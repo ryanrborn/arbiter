@@ -44,7 +44,7 @@ defmodule Arbiter.Loop do
 
   use Ash.Domain
 
-  alias Arbiter.Loop.{Apply, Notify, PendingWrite}
+  alias Arbiter.Loop.{Apply, FlakeEvent, Notify, PendingWrite}
   alias Arbiter.Messages.Message
   alias Arbiter.Quota
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -56,6 +56,7 @@ defmodule Arbiter.Loop do
     resource PendingWrite
     # AshPaperTrail version rows for PendingWrite.
     resource PendingWrite.Version
+    resource FlakeEvent
   end
 
   # The documented fleet-wide evidence bar (docs/loop-review.md): ≥ 3 incidents
@@ -149,7 +150,8 @@ defmodule Arbiter.Loop do
   @spec ci_config(Workspace.t() | String.t() | nil) :: %{
           lint_share_threshold: float(),
           min_fix_passes: pos_integer(),
-          check_commands: %{optional(String.t()) => String.t()}
+          check_commands: %{optional(String.t()) => String.t()},
+          flake_recurrence_threshold: pos_integer()
         }
   def ci_config(%Workspace{config: config}) do
     block =
@@ -178,7 +180,12 @@ defmodule Arbiter.Loop do
 
           _ ->
             %{}
-        end
+        end,
+      flake_recurrence_threshold:
+        positive_int(
+          Map.get(block, "flake_recurrence_threshold"),
+          Arbiter.Loop.CiSection.default_flake_recurrence_threshold()
+        )
     }
   end
 

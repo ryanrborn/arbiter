@@ -87,6 +87,22 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcherTest do
       assert prompt =~ "ci_mark_external"
       assert prompt =~ "evidence"
     end
+
+    test "tells the worker to record a flake conclusion with flake_record (bd-6vullc)" do
+      context = %{
+        task: %Issue{id: "bd-fix4"},
+        branch: "feature/bd-fix4",
+        target_branch: "main",
+        checks: []
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      assert prompt =~ "flake_record"
+      assert prompt =~ "signature"
+      assert prompt =~ "test_file"
+      assert prompt =~ ~r/no\s+code change/i
+    end
   end
 
   describe "registry_suffix/0" do

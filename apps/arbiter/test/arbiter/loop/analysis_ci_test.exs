@@ -56,6 +56,26 @@ defmodule Arbiter.Loop.AnalysisCiTest do
             summary: "Done."
           }
         }
+      ],
+      flake_events: [
+        %{
+          task_id: "t1",
+          run_id: "r2",
+          repo: "arbiter",
+          ci_job: "mix test",
+          test_file: "test/coverage_test.exs",
+          test_line: 150,
+          signature: "DataCase teardown timeout"
+        },
+        %{
+          task_id: "t2",
+          run_id: nil,
+          repo: "arbiter",
+          ci_job: "mix test",
+          test_file: "test/coverage_test.exs",
+          test_line: 150,
+          signature: "DataCase teardown timeout"
+        }
       ]
     }
   end
@@ -66,6 +86,21 @@ defmodule Arbiter.Loop.AnalysisCiTest do
     assert report.ci.red_rate == %{tasks: 2, red: 1, rate: 0.5}
     assert report.ci.outcomes.counts.lint == 1
     assert report.ci.outcomes.counts.unknown == 1
+  end
+
+  test "build_report/2 surfaces recurring flakes from meta.ci (bd-6vullc)" do
+    report =
+      Analysis.build_report([],
+        meta: %{ci: ci_meta()},
+        ci_config: %{flake_recurrence_threshold: 2}
+      )
+
+    assert [flake] = report.ci.recurring_flakes
+    assert flake.repo == "arbiter"
+    assert flake.test_file == "test/coverage_test.exs"
+    assert flake.test_line == 150
+    assert flake.count == 2
+    assert Enum.sort(flake.task_ids) == ["t1", "t2"]
   end
 
   test "build_report/2 threads the :ci_config thresholds through" do
@@ -109,6 +144,22 @@ defmodule Arbiter.Loop.AnalysisCiTest do
     test "states the approved-PR-only undercount", %{md: md} do
       assert md =~ CiSection.undercount()
     end
+
+    test "renders recurring flakes with counts and task ids (bd-6vullc)" do
+      md =
+        []
+        |> Analysis.build_report(
+          meta: %{ci: ci_meta()},
+          ci_config: %{flake_recurrence_threshold: 2}
+        )
+        |> Report.to_markdown()
+
+      assert md =~ "### Recurring flakes"
+      assert md =~ "test/coverage_test.exs:150"
+      assert md =~ "recurred **2** time(s)"
+      assert md =~ "t1"
+      assert md =~ "t2"
+    end
   end
 
   describe "Loop.ci_config/1" do
@@ -116,7 +167,8 @@ defmodule Arbiter.Loop.AnalysisCiTest do
       assert Loop.ci_config(nil) == %{
                lint_share_threshold: CiSection.default_lint_share_threshold(),
                min_fix_passes: CiSection.default_min_fix_passes(),
-               check_commands: %{}
+               check_commands: %{},
+               flake_recurrence_threshold: CiSection.default_flake_recurrence_threshold()
              }
     end
 
@@ -127,7 +179,8 @@ defmodule Arbiter.Loop.AnalysisCiTest do
             "ci" => %{
               "lint_share_threshold" => 0.5,
               "min_fix_passes" => "4",
-              "check_commands" => %{"arbiter" => "mix precommit && mix audit"}
+              "check_commands" => %{"arbiter" => "mix precommit && mix audit"},
+              "flake_recurrence_threshold" => "3"
             }
           }
         }
@@ -136,7 +189,8 @@ defmodule Arbiter.Loop.AnalysisCiTest do
       assert Loop.ci_config(ws) == %{
                lint_share_threshold: 0.5,
                min_fix_passes: 4,
-               check_commands: %{"arbiter" => "mix precommit && mix audit"}
+               check_commands: %{"arbiter" => "mix precommit && mix audit"},
+               flake_recurrence_threshold: 3
              }
     end
 

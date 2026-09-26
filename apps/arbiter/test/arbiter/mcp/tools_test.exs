@@ -1,6 +1,7 @@
 defmodule Arbiter.MCP.ToolsTest do
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Loop.FlakeEvent
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -5571,6 +5572,74 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:error, {:unauthorized, _}} =
                Tools.ci_mark_external(ctx.worker, %{"task_id" => other.id, "note" => "infra"})
+    end
+  end
+
+  describe "flake_record/2 (bd-6vullc)" do
+    test "records a flake event for the calling worker's own task", ctx do
+      assert {:ok, data} =
+               Tools.flake_record(ctx.worker, %{
+                 "ci_job" => "mix test",
+                 "signature" => "DataCase teardown timeout",
+                 "test_file" => "test/coverage_test.exs",
+                 "test_line" => 150
+               })
+
+      assert data.task_id == ctx.task.id
+      assert data.repo == "shipyard"
+      assert data.ci_job == "mix test"
+      assert data.test_file == "test/coverage_test.exs"
+      assert data.test_line == 150
+      assert data.signature == "DataCase teardown timeout"
+
+      assert [event] = Ash.read!(FlakeEvent)
+      assert event.task_id == ctx.task.id
+    end
+
+    test "ci_job is required", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.flake_record(ctx.worker, %{"signature" => "timeout"})
+
+      assert msg =~ "ci_job"
+    end
+
+    test "signature is required", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.flake_record(ctx.worker, %{"ci_job" => "mix test"})
+
+      assert msg =~ "signature"
+    end
+
+    test "a worker may not record a flake for another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.flake_record(ctx.worker, %{
+                 "task_id" => other.id,
+                 "ci_job" => "mix test",
+                 "signature" => "timeout"
+               })
+    end
+
+    test "test_file/test_line and note are optional", ctx do
+      assert {:ok, data} =
+               Tools.flake_record(ctx.worker, %{
+                 "ci_job" => "deploy",
+                 "signature" => "runner OOM",
+                 "note" => "same OOM on two unrelated branches today"
+               })
+
+      assert data.test_file == nil
+      assert data.test_line == nil
+    end
+
+    test "is visible to a worker, not just the coordinator" do
+      names =
+        %Scope{tier: :worker, workspace_id: "ws", task_id: "t"}
+        |> Catalog.visible()
+        |> Enum.map(& &1.name)
+
+      assert "flake_record" in names
     end
   end
 

@@ -105,6 +105,11 @@ defmodule Arbiter.Loop.Corpus do
       summary — the CLI's own `result_message` when captured, else the prose in
       the last 60 lines of its transcript. Each read is bounded per run, like
       the failed-run tail above.
+    * `flake_events` — every `Arbiter.Loop.FlakeEvent` row recorded in the
+      window (bd-6vullc): a fix_pass's own structured conclusion that a CI
+      failure was a flake or infra issue, with repo, CI job, test file:line
+      when identified, a short failure signature, and task/run ids.
+      `Arbiter.Loop.CiSection` groups these to surface recurring flakes.
 
   ## The one write
 
@@ -162,7 +167,7 @@ defmodule Arbiter.Loop.Corpus do
           ci: ci()
         }
 
-  @type ci :: %{tasks: [map()], fix_passes: [map()]}
+  @type ci :: %{tasks: [map()], fix_passes: [map()], flake_events: [map()]}
 
   @type scarcity :: %{
           unit: :window_share_5h | :cost_usd,
@@ -577,7 +582,34 @@ defmodule Arbiter.Loop.Corpus do
       |> Enum.uniq()
       |> issues_by_id()
 
-    %{tasks: ci_tasks(mains, issues), fix_passes: ci_fix_passes(fix_passes, issues)}
+    %{
+      tasks: ci_tasks(mains, issues),
+      fix_passes: ci_fix_passes(fix_passes, issues),
+      flake_events: flake_events(since, until)
+    }
+  end
+
+  defp flake_events(since, until) do
+    query(
+      """
+      SELECT task_id, run_id, repo, ci_job, test_file, test_line, signature, recorded_at
+      FROM flake_events
+      WHERE recorded_at >= ?1 AND recorded_at < ?2
+      ORDER BY recorded_at DESC
+      """,
+      [iso(since), iso(until)]
+    )
+    |> Enum.map(fn r ->
+      %{
+        task_id: base_task_id(r["task_id"]) || r["task_id"],
+        run_id: r["run_id"],
+        repo: r["repo"],
+        ci_job: r["ci_job"],
+        test_file: r["test_file"],
+        test_line: r["test_line"] && int(r["test_line"]),
+        signature: r["signature"]
+      }
+    end)
   end
 
   # One entry per task, attributed to its latest main run in the window

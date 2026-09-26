@@ -371,10 +371,37 @@ defmodule Arbiter.Loop.Report do
     |---|---|---|---|---|---|---|---|
     #{by_repo_outcomes}
     #{lint_flags(ci)}
+    #{recurring_flakes(ci)}
     """
   end
 
   defp ci(_), do: ""
+
+  defp recurring_flakes(%{recurring_flakes: [_ | _] = flakes} = ci) do
+    body =
+      Enum.map_join(flakes, "\n", fn f ->
+        where = if f.test_file, do: "`#{f.test_file}:#{f.test_line}`", else: "`#{f.signature}`"
+
+        "- **#{f.repo}** — #{where} (#{f.signature}) recurred **#{f.count}** time(s) " <>
+          "across task(s) #{Enum.join(f.task_ids, ", ")}."
+      end)
+
+    """
+
+    ### Recurring flakes
+
+    The same test file:line or failure signature recorded by `flake_record` at
+    least #{Map.get(ci, :flake_recurrence_threshold)} time(s) this window:
+
+    #{body}
+    """
+  end
+
+  defp recurring_flakes(ci) do
+    "\n### Recurring flakes\n\nNo flake recurred at least " <>
+      "#{Map.get(ci, :flake_recurrence_threshold, Arbiter.Loop.CiSection.default_flake_recurrence_threshold())} " <>
+      "time(s) this window.\n"
+  end
 
   defp rate_table(label, rows, fmt_key) do
     body =
