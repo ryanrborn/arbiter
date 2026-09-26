@@ -343,12 +343,16 @@ name (no `(...)`) maps onto the equivalent whole-path rule where agy has one —
 `WebFetch(domain:<host>)` → `read_url(<host>)`. Until bd-80talz these were
 emitted as `url(*)`, which is not an agy rule kind: agy rewrites
 `settings.json` on load and silently drops it (probed on 1.2.11), so the
-network-off deny and the reviewer's `WebFetch` deny never reached agy. That is what keeps the reviewer read-only
-posture (`Arbiter.Worker.Dispatch.review_security_policy/2` denies
-`Edit`/`Write`/`NotebookEdit` on every worktree-backed review dispatch) working
-for agy as well as for Claude. A rule with no agy analogue at all — `Monitor`,
-`ScheduleWakeup`, for which agy has no tool-name rule kind — is dropped rather
-than emitted uninterpretably.
+network-off deny and the reviewer's `WebFetch` deny never reached agy. The
+`write_file(**)` side of the `Edit`/`Write`/`NotebookEdit` mapping is still
+emitted, but does **not** gate agy's native `write_to_file` tool (see the
+"`write_file(...)` deny rules do not gate" bullet below) — so the reviewer
+read-only posture from `Arbiter.Worker.Dispatch.review_security_policy/2`
+(which denies `Edit`/`Write`/`NotebookEdit` on every worktree-backed review
+dispatch) is only actually enforced for agy's `run_command` and `read_file`,
+not for native writes. A rule with no agy analogue at all — `Monitor`,
+`ScheduleWakeup`, for which agy has no tool-name rule kind — is dropped
+rather than emitted uninterpretably.
 
 ### What was verified live, and what agy does *not* enforce
 

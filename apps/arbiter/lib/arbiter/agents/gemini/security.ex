@@ -232,9 +232,12 @@ defmodule Arbiter.Agents.Gemini.Security do
   grammar passes through untouched). A *bare* Claude tool name (no `(...)`) is
   mapped onto the equivalent whole-path rule where agy has one — `Write` /
   `Edit` / `MultiEdit` / `NotebookEdit` → `write_file(**)`, `Read` →
-  `read_file(**)`, `WebFetch` / `WebSearch` → `read_url(*)` — which is what keeps
-  `Arbiter.Worker.Dispatch.review_security_policy/2`'s reviewer read-only
-  posture working for agy. A rule with no agy analogue at all — `Monitor`,
+  `read_file(**)`, `WebFetch` / `WebSearch` → `read_url(*)`. The `write_file`
+  side of that mapping is still emitted, but as of agy 1.2.11 it does **not**
+  gate agy's native `write_to_file` tool (see "Honesty about enforcement
+  level" above, bd-25ivqe AC6) — so a `Arbiter.Worker.Dispatch.review_security_policy/2`
+  reviewer's read-only posture is only actually enforced for agy's
+  `run_command` and `read_file`, not for native writes. A rule with no agy analogue at all — `Monitor`,
   `ScheduleWakeup` — is **dropped** rather than emitted verbatim, since agy has
   no tool-name rule kind and an uninterpretable rule in the file is worse than
   an absent one.

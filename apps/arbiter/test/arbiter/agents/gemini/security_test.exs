@@ -356,9 +356,15 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       # the live root cause behind bd-7h2cuk's finding (arb/notes worked, but
       # a stray file was created outside any worktree with no denial) — there
       # is currently no `settings.json` rule that confines `write_to_file` to
-      # the worktree. If this ever starts failing, agy has started honoring
-      # `write_file` denies and the moduledoc's honesty section (and AC6's
-      # "not a merge gate" reasoning) should be revisited.
+      # the worktree.
+      #
+      # This test only pins the captured fixture's shape (a static JSON file
+      # checked into the repo) — it does not run agy or any translation code,
+      # so it cannot fail or catch a regression if a future agy release
+      # starts honoring `write_file` denies, or if the moduledoc/doc prose is
+      # edited back to the disproven "write_file is enforced" claim. Re-probe
+      # live (bd-80talz-style) to confirm this is still true before trusting
+      # it.
       step = fixture("agy_write_to_file_deny_not_enforced.json")["step_update"]
 
       assert step["tool_name"] == "write_to_file"
