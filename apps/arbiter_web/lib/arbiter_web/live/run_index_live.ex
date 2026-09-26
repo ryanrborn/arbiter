@@ -61,6 +61,7 @@ defmodule ArbiterWeb.RunIndexLive do
       Run
       |> filter_by_status(socket.assigns.status)
       |> Ash.Query.sort(started_at: :desc)
+      |> exclude_output_lines()
 
     result = Paging.paginate(query, socket.assigns.page)
 
@@ -73,6 +74,33 @@ defmodule ArbiterWeb.RunIndexLive do
 
   defp filter_by_status(query, :all), do: Ash.Query.new(query)
   defp filter_by_status(query, status), do: Ash.Query.filter(query, status == ^status)
+
+  defp exclude_output_lines(query) do
+    Ash.Query.select(query, [
+      :id,
+      :task_id,
+      :task_title,
+      :repo,
+      :workspace_id,
+      :worker_type,
+      :status,
+      :model,
+      :started_at,
+      :completed_at,
+      :exit_code,
+      :failure_reason,
+      :failure_summary,
+      :resolved_skills,
+      :standing_orders_digest,
+      :routing_policy,
+      :model_tier,
+      :thinking,
+      :difficulty_at_dispatch,
+      :provider,
+      :session_id,
+      :resumed_from_run_id
+    ])
+  end
 
   defp parse_status(%{"status" => s})
        when s in ~w(running completed failed review_not_started review_parked interrupted),
