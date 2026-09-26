@@ -400,10 +400,24 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # the new release stays current, already started, and whatever doctor says
   # about it now is reported as-is.
   defp handle_restart_timeout(ctx, actions, false, pre_deploy_fails) do
-    Formatter.emit_cold_deploy(ctx.mode, ctx.tag, actions, ctx.timeout_ms, pre_deploy_fails)
+    if "phoenix reachable" in pre_deploy_fails do
+      Formatter.emit_cold_deploy(ctx.mode, ctx.tag, actions, ctx.timeout_ms, pre_deploy_fails)
+    else
+      # `was_running` came back false, but the pre-flight snapshot (taken
+      # moments earlier, before anything was touched) still saw Phoenix
+      # reachable. That disagreement means the single `Restart.perform/2`
+      # sample — one GET with no retry — landed on a transient blip (a GC
+      # pause, a busy DB), not a genuinely cold stack. Trusting it alone
+      # would skip auto-rollback on what AC2 requires still roll back.
+      do_rollback(ctx, pre_deploy_fails)
+    end
   end
 
   defp handle_restart_timeout(ctx, _actions, true, pre_deploy_fails) do
+    do_rollback(ctx, pre_deploy_fails)
+  end
+
+  defp do_rollback(ctx, pre_deploy_fails) do
     %{current_link: current_link, rollback_plan: rollback_plan, timeout_ms: timeout_ms} = ctx
     outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
     Formatter.emit_rollback(ctx.mode, ctx.tag, outcome, timeout_ms, pre_deploy_fails)
@@ -458,11 +472,20 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # Extracted (rather than inlined at the call site) and left public so its
   # content is directly assertable in tests — the `log/1` call it feeds is a
   # no-op whenever `:bd2_sleep` is stubbed, which every deploy test does.
+  #
+  # When "phoenix reachable" is among the pre-existing failures, the deploy
+  # ahead is a cold one (bd-5zvux5) — the server being down is the expected,
+  # planned starting point (a first bootstrap or a deliberate DB-move
+  # downtime window), not a warning sign to caveat a rollback against.
   def preflight_warning(pre_deploy_fails, tag) do
-    "warning: #{length(pre_deploy_fails)} readiness-blocking health check(s) already " <>
-      "failing before this deploy started (#{Enum.join(pre_deploy_fails, ", ")}). Run " <>
-      "`arb doctor` to investigate — if this deploy times out waiting for green, " <>
-      "that pre-existing condition, not release #{tag}, may be why."
+    if "phoenix reachable" in pre_deploy_fails do
+      "server is not running; performing a cold deploy (no auto-rollback)."
+    else
+      "warning: #{length(pre_deploy_fails)} readiness-blocking health check(s) already " <>
+        "failing before this deploy started (#{Enum.join(pre_deploy_fails, ", ")}). Run " <>
+        "`arb doctor` to investigate — if this deploy times out waiting for green, " <>
+        "that pre-existing condition, not release #{tag}, may be why."
+    end
   end
 
   # ---- rollback -----------------------------------------------------------

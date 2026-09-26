@@ -138,6 +138,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
   # -red doctor result as this deploy's fault; it reports the new release's
   # own doctor outcome as-is.
   def emit_cold_deploy(:json, tag, actions, timeout_ms, pre_deploy_fails) do
+    results = Doctor.checks()
+    ok = Doctor.green?(results)
+
     Output.emit_json(%{
       version: tag,
       deployed: true,
@@ -147,13 +150,13 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
       was_running: false,
       actions: action_payload(actions),
       base_url: Client.base_url(),
-      checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
-      ok: Doctor.green?(),
+      checks: Enum.map(results, &Map.from_struct/1),
+      ok: ok,
       timed_out_after_s: div(timeout_ms, 1000),
       pre_existing_blocking_failures: pre_deploy_fails
     })
 
-    unless Doctor.green?(), do: Output.halt(1)
+    unless ok, do: Output.halt(1)
   end
 
   def emit_cold_deploy(:text, tag, _actions, timeout_ms, pre_deploy_fails) do
@@ -176,11 +179,12 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     )
 
     IO.puts("")
-    Doctor.report()
+    results = Doctor.checks()
+    Doctor.report(results)
     IO.puts("")
     IO.puts("hint: tail #{Start.phoenix_log_path()} for startup output.")
 
-    unless Doctor.green?(), do: Output.halt(1)
+    unless Doctor.green?(results), do: Output.halt(1)
   end
 
   # ---- rollback outcome rendering (bd-bksulf) ------------------------------
