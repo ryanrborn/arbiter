@@ -41,6 +41,6 @@ defmodule Mix.Tasks.Arbiter.BackfillIssueRepos do
 
     Mix.Task.run("app.config")
 
-    Arbiter.Release.backfill(:issue_repos, apply?: opts[:apply] == true)
+    Arbiter.Release.backfill(:issue_repos, apply?: opts[:apply] == true, hint: "--apply")
   end
 end

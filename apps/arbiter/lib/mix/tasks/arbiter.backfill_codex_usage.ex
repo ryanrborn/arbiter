@@ -59,7 +59,7 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
       |> put_opt(:since, date(opts[:since], "--since"))
       |> put_opt(:until, date(opts[:until], "--until"))
 
-    Arbiter.Release.backfill(:codex_usage, backfill_opts)
+    Arbiter.Release.backfill(:codex_usage, Keyword.put(backfill_opts, :hint, "--apply"))
   end
 
   defp put_opt(opts, _key, nil), do: opts

@@ -71,7 +71,7 @@ defmodule Mix.Tasks.Arbiter.BackfillRunSteps do
       |> put_opt(:since, date(opts[:since], "--since"))
       |> put_opt(:until, date(opts[:until], "--until"))
 
-    Arbiter.Release.backfill(:run_steps, backfill_opts)
+    Arbiter.Release.backfill(:run_steps, Keyword.put(backfill_opts, :hint, "--apply"))
   end
 
   defp put_opt(opts, _key, nil), do: opts

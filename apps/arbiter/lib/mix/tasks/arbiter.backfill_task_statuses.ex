@@ -49,7 +49,7 @@ defmodule Mix.Tasks.Arbiter.BackfillTaskStatuses do
       [apply?: opts[:apply] == true]
       |> maybe_put(opts, :branch)
 
-    Arbiter.Release.backfill(:task_statuses, backfill_opts)
+    Arbiter.Release.backfill(:task_statuses, Keyword.put(backfill_opts, :hint, "--apply"))
   end
 
   defp maybe_put(acc, opts, key) do

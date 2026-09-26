@@ -120,7 +120,11 @@ defmodule Arbiter.Release do
     * `:run_steps` → `Arbiter.Workers.StepBackfill.backfill/1`
       (`:apply?`, `:repo`, `:since`, `:until`, `:limit`)
     * `:task_statuses` → `Arbiter.Tasks.StatusBackfill.proposals/1` +
-      `apply!/1` (`:apply?`, `:branch`, `:repo_path`)
+      `apply!/1` (`:apply?`, `:branch`, `:repo_path`) — `:repo_path` defaults
+      to `File.cwd!()`, which under `bin/arbiter eval` is wherever the
+      operator invoked `bin/arbiter`, not the arbiter checkout. Always pass
+      it explicitly in a release eval, e.g.
+      `bin/arbiter eval 'Arbiter.Release.backfill(:task_statuses, repo_path: "/path/to/arbiter")'`
 
   Returns the underlying module's raw result and prints a short summary to
   stdout for the `bin/arbiter eval` operator.
@@ -134,7 +138,7 @@ defmodule Arbiter.Release do
 
     result = Arbiter.Usage.CodexUsageBackfill.backfill(opts)
 
-    IO.puts(banner("codex usage", apply?))
+    IO.puts(banner("codex usage", apply?, opts[:hint]))
 
     IO.puts("""
 
@@ -155,7 +159,7 @@ defmodule Arbiter.Release do
 
     result = Arbiter.Usage.GeminiUsageNote.backfill(opts)
 
-    IO.puts(banner("gemini usage note", apply?))
+    IO.puts(banner("gemini usage note", apply?, opts[:hint]))
 
     IO.puts("""
 
@@ -175,20 +179,12 @@ defmodule Arbiter.Release do
 
     if apply? do
       reports = Arbiter.Tasks.RepoBackfill.apply!(plan)
-      IO.puts(banner("issue repos", true))
-      updated = reports |> Enum.map(& &1.updated) |> Enum.sum()
-
-      IO.puts(
-        "Backfilled #{updated} issue(s); " <>
-          "#{Arbiter.Tasks.RepoBackfill.remaining_null_count(reports)} remain null."
-      )
-
+      IO.puts(banner("issue repos", true, opts[:hint]))
+      emit_issue_repos_report(reports, :apply)
       reports
     else
-      IO.puts(banner("issue repos", false))
-      would = plan |> Enum.map(& &1.null_repo_count) |> Enum.sum()
-      left = Arbiter.Tasks.RepoBackfill.remaining_null_count(plan)
-      IO.puts("#{would - left} issue(s) would be backfilled; #{left} would remain null.")
+      IO.puts(banner("issue repos", false, opts[:hint]))
+      emit_issue_repos_report(plan, :dry_run)
       plan
     end
   end
@@ -199,7 +195,7 @@ defmodule Arbiter.Release do
 
     result = Arbiter.Workers.StepBackfill.backfill(opts)
 
-    IO.puts(banner("run steps", apply?))
+    IO.puts(banner("run steps", apply?, opts[:hint]))
 
     IO.puts("""
 
@@ -218,6 +214,7 @@ defmodule Arbiter.Release do
   def backfill(:task_statuses, opts) do
     start_release_repo!()
     apply? = Keyword.get(opts, :apply?, false)
+    hint = opts[:hint] || "apply?: true / --apply"
     proposals_opts = Keyword.take(opts, [:branch, :repo_path, :git_log_lines])
     proposals = Arbiter.Tasks.StatusBackfill.proposals(proposals_opts)
 
@@ -228,28 +225,82 @@ defmodule Arbiter.Release do
 
       apply? ->
         IO.puts("Closing #{length(proposals)} task(s):")
+        emit_task_statuses_table(proposals)
         {closed, errors} = Arbiter.Tasks.StatusBackfill.apply!(proposals)
         IO.puts("\nClosed #{length(closed)} task(s).")
 
         unless errors == [] do
-          IO.puts("Failed on #{length(errors)} task(s):")
-          for {id, reason} <- errors, do: IO.puts("  #{id}: #{inspect(reason)}")
+          IO.puts(:stderr, "Failed on #{length(errors)} task(s):")
+          for {id, reason} <- errors, do: IO.puts(:stderr, "  #{id}: #{inspect(reason)}")
         end
 
         {closed, errors}
 
       true ->
         IO.puts("Would close #{length(proposals)} task(s):")
-        for p <- proposals, do: IO.puts("  #{p.task_id}  #{String.slice(p.commit_sha, 0, 7)}")
-        IO.puts("\nDry-run only. Pass apply?: true to commit these changes.")
+        emit_task_statuses_table(proposals)
+        IO.puts("\nDry-run only. Pass #{hint} to commit these changes.")
         proposals
     end
   end
 
-  defp banner(label, true), do: "Backfilling #{label} (writing)…"
+  defp emit_task_statuses_table(proposals) do
+    width = proposals |> Enum.map(&String.length(&1.task_id)) |> Enum.max(fn -> 0 end)
 
-  defp banner(label, false),
-    do: "Backfilling #{label} — DRY RUN, no writes. Pass apply?: true to write.\n"
+    for p <- proposals do
+      padded = String.pad_trailing(p.task_id, width)
+      short_sha = String.slice(p.commit_sha, 0, 7)
+      IO.puts("  #{padded}  #{short_sha}  #{p.commit_subject}")
+    end
+  end
+
+  defp emit_issue_repos_report(reports, mode) do
+    IO.puts(issue_repos_header(mode))
+
+    for report <- reports, report.null_repo_count > 0 or report.resolved_repo != nil do
+      IO.puts("  " <> issue_repos_line(report, mode))
+
+      for {id, message} <- report.errors do
+        IO.puts(:stderr, "      #{id}: #{message}")
+      end
+    end
+
+    IO.puts("\n" <> issue_repos_totals(reports, mode))
+  end
+
+  defp issue_repos_header(:dry_run), do: "Issues with a null repo, by workspace:\n"
+  defp issue_repos_header(:apply), do: "Backfilling repo by workspace:\n"
+
+  defp issue_repos_line(%{resolved_repo: nil} = r, _mode) do
+    "#{r.workspace_name}: #{r.null_repo_count} null — LEFT NULL " <>
+      "(no single repo and no default_repo; set one and re-run)"
+  end
+
+  defp issue_repos_line(r, :dry_run),
+    do: "#{r.workspace_name}: #{r.null_repo_count} null → #{r.resolved_repo}"
+
+  defp issue_repos_line(r, :apply) do
+    "#{r.workspace_name}: set #{r.updated} to #{r.resolved_repo}" <>
+      if(r.errors == [], do: "", else: " (#{length(r.errors)} failed)")
+  end
+
+  defp issue_repos_totals(reports, :dry_run) do
+    would = reports |> Enum.map(& &1.null_repo_count) |> Enum.sum()
+    left = Arbiter.Tasks.RepoBackfill.remaining_null_count(reports)
+    "#{would - left} issue(s) would be backfilled; #{left} would remain null."
+  end
+
+  defp issue_repos_totals(reports, :apply) do
+    updated = reports |> Enum.map(& &1.updated) |> Enum.sum()
+
+    "Backfilled #{updated} issue(s); #{Arbiter.Tasks.RepoBackfill.remaining_null_count(reports)} remain null."
+  end
+
+  defp banner(label, true, _hint), do: "Backfilling #{label} (writing)…"
+
+  defp banner(label, false, hint) do
+    "Backfilling #{label} — DRY RUN, no writes. Pass #{hint || "apply?: true / --apply"} to write.\n"
+  end
 
   @doc """
   Load config and start only Ash + `Arbiter.Repo` (`pool_size: 1`), never

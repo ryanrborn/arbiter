@@ -9,11 +9,12 @@ defmodule Arbiter.ReleaseTest do
   alias Arbiter.Release
   alias Arbiter.Tasks.{Issue, Workspace}
 
-  # `mix test` boots the full `Arbiter.Application` tree regardless of what
-  # this helper does (other tests need the endpoint/registries), so there is
-  # no runtime way to observe "the app tree isn't up" from inside the suite.
-  # What's verifiable is the helper's own source: it starts Ash + the Repo
-  # and nothing that would start the endpoint, Autopilot, or patrols.
+  # `mix test` boots the full `Arbiter.Application` tree in *this* node
+  # regardless of what this helper does (other tests need the
+  # endpoint/registries), so the runtime check below spins up a separate
+  # `:peer` node to observe the helper's real behavior in isolation. This
+  # source check is a cheap first line of defense against a future edit
+  # that quietly widens what gets started.
   @release_source File.read!("lib/arbiter/release.ex")
   @start_release_repo_body Regex.run(
                              ~r/def start_release_repo! do(.*?)\n  end/s,
@@ -35,6 +36,60 @@ defmodule Arbiter.ReleaseTest do
       refute @start_release_repo_body =~ "Arbiter.Supervisor"
       refute @start_release_repo_body =~ ~r/ensure_all_started\(:arbiter\)/
       refute @start_release_repo_body =~ "app.start"
+    end
+
+    test "at runtime, in a fresh node, boots the Repo but not the endpoint, Autopilot, or :arbiter itself" do
+      unless Node.alive?() do
+        {:ok, hostname} = :inet.gethostname()
+        {:ok, _pid} = Node.start(:"release_test_primary@#{hostname}", :shortnames)
+      end
+
+      code_paths = Enum.map(:code.get_path(), &to_charlist/1)
+
+      {:ok, peer_pid, peer_node} =
+        :peer.start_link(%{
+          name: :"release_repo_peer_#{System.unique_integer([:positive])}",
+          args: [~c"-pa" | code_paths],
+          connection: :standard_io
+        })
+
+      on_exit(fn ->
+        try do
+          :peer.stop(peer_pid)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      tmp_db =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter_release_peer_#{System.unique_integer([:positive])}.sqlite3"
+        )
+
+      on_exit(fn -> File.rm(tmp_db) end)
+
+      peer_arbiter_env =
+        Application.get_all_env(:arbiter)
+        |> Keyword.update!(Arbiter.Repo, &Keyword.put(&1, :database, tmp_db))
+
+      :ok =
+        :erpc.call(peer_node, Application, :put_all_env, [
+          [
+            arbiter: peer_arbiter_env,
+            ash: Application.get_all_env(:ash),
+            ash_sqlite: Application.get_all_env(:ash_sqlite)
+          ]
+        ])
+
+      assert :ok == :erpc.call(peer_node, Arbiter.Release, :start_release_repo!, [])
+
+      assert :erpc.call(peer_node, Process, :whereis, [Arbiter.Repo]) != nil
+      assert :erpc.call(peer_node, Process, :whereis, [ArbiterWeb.Endpoint]) == nil
+      assert :erpc.call(peer_node, Process, :whereis, [Arbiter.Board.Autopilot]) == nil
+
+      started_apps = :erpc.call(peer_node, Application, :started_applications, [])
+      refute Enum.any?(started_apps, fn {app, _, _} -> app == :arbiter end)
     end
   end
 
