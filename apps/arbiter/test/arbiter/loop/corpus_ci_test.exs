@@ -174,4 +174,48 @@ defmodule Arbiter.Loop.CorpusCiTest do
 
     assert {:ok, _rows, %{ci: %{fix_passes: []}}} = Corpus.fetch(window())
   end
+
+  describe "flake_events (bd-6vullc)" do
+    test "carries a flake event recorded in the window", %{ws: ws} do
+      i = issue(ws, difficulty: 2, pr_ref: "#6")
+
+      {:ok, event} =
+        Arbiter.Loop.Flakes.record(%{
+          task_id: i.id,
+          repo: "arbiter",
+          ci_job: "mix test",
+          signature: "DataCase teardown timeout",
+          test_file: "test/coverage_test.exs",
+          test_line: 150
+        })
+
+      assert {:ok, _rows, %{ci: %{flake_events: [flake]}}} = Corpus.fetch(window())
+
+      assert flake.task_id == i.id
+      assert flake.run_id == event.run_id
+      assert flake.repo == "arbiter"
+      assert flake.ci_job == "mix test"
+      assert flake.test_file == "test/coverage_test.exs"
+      assert flake.test_line == 150
+      assert flake.signature == "DataCase teardown timeout"
+    end
+
+    test "a flake event outside the window is not carried", %{ws: ws} do
+      i = issue(ws, difficulty: 2, pr_ref: "#7")
+
+      {:ok, _event} =
+        Arbiter.Loop.Flakes.record(%{
+          task_id: i.id,
+          repo: "arbiter",
+          ci_job: "mix test",
+          signature: "old flake"
+        })
+
+      old_since = DateTime.add(DateTime.utc_now(), -365 * 24 * 3600, :second)
+      old_until = DateTime.add(DateTime.utc_now(), -364 * 24 * 3600, :second)
+
+      assert {:ok, _rows, %{ci: %{flake_events: []}}} =
+               Corpus.fetch(since: old_since, until: old_until, record_cost?: false)
+    end
+  end
 end

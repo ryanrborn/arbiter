@@ -45,6 +45,7 @@ defmodule Arbiter.Loop.CiSection do
 
   @default_lint_share_threshold 0.3
   @default_min_fix_passes 3
+  @default_flake_recurrence_threshold 2
 
   @undercount "Known undercount: a fix_pass is only dispatched for an approved PR blocked on red CI, " <>
                 "so a push that went red and was fixed before approval (during review) is not counted. " <>
@@ -71,6 +72,8 @@ defmodule Arbiter.Loop.CiSection do
           lint_flags: [map()],
           lint_share_threshold: float(),
           min_fix_passes: pos_integer(),
+          recurring_flakes: [map()],
+          flake_recurrence_threshold: pos_integer(),
           undercount: String.t()
         }
 
@@ -82,6 +85,10 @@ defmodule Arbiter.Loop.CiSection do
   @spec default_min_fix_passes() :: pos_integer()
   def default_min_fix_passes, do: @default_min_fix_passes
 
+  @doc "Default `:flake_recurrence_threshold` (overridable under `loop.ci.flake_recurrence_threshold`)."
+  @spec default_flake_recurrence_threshold() :: pos_integer()
+  def default_flake_recurrence_threshold, do: @default_flake_recurrence_threshold
+
   @doc "The approved-PR-only undercount, stated verbatim in every rendering."
   @spec undercount() :: String.t()
   def undercount, do: @undercount
@@ -91,15 +98,19 @@ defmodule Arbiter.Loop.CiSection do
   def empty, do: build(%{tasks: [], fix_passes: []})
 
   @doc """
-  Build the section from `ci` (`%{tasks: [...], fix_passes: [...]}`, see
-  `Arbiter.Loop.Corpus`). Options: `:lint_share_threshold`,
-  `:min_fix_passes`, `:check_commands` (`%{repo => command}`).
+  Build the section from `ci` (`%{tasks: [...], fix_passes: [...], flake_events:
+  [...]}`, see `Arbiter.Loop.Corpus`). Options: `:lint_share_threshold`,
+  `:min_fix_passes`, `:check_commands` (`%{repo => command}`),
+  `:flake_recurrence_threshold`.
   """
   @spec build(map(), keyword()) :: t()
   def build(ci, opts \\ []) do
     threshold = Keyword.get(opts, :lint_share_threshold) || @default_lint_share_threshold
     min_n = Keyword.get(opts, :min_fix_passes) || @default_min_fix_passes
     commands = Keyword.get(opts, :check_commands) || %{}
+
+    flake_threshold =
+      Keyword.get(opts, :flake_recurrence_threshold) || @default_flake_recurrence_threshold
 
     fix_passes = Map.get(ci, :fix_passes) || []
     runs = Enum.map(fix_passes, &classify/1)
@@ -122,6 +133,8 @@ defmodule Arbiter.Loop.CiSection do
       lint_flags: lint_flags(runs, threshold, min_n, commands),
       lint_share_threshold: threshold,
       min_fix_passes: min_n,
+      recurring_flakes: recurring_flakes(Map.get(ci, :flake_events) || [], flake_threshold),
+      flake_recurrence_threshold: flake_threshold,
       undercount: @undercount
     }
   end
@@ -236,6 +249,46 @@ defmodule Arbiter.Loop.CiSection do
       end
     end)
     |> Enum.sort_by(& &1.repo)
+  end
+
+  # ---- recurring flakes (bd-6vullc) -----------------------------------------
+
+  # Groups `flake_events` by `{repo, identity}`, where `identity` prefers the
+  # test's `file:line` — two events that both name the same test are the same
+  # recurring flake even if their worker-authored `signature` text differs —
+  # and falls back to `signature` for a flake with no identifiable test (an
+  # infra/build failure). A group below `threshold` occurrences is dropped.
+  defp recurring_flakes(events, threshold) do
+    events
+    |> Enum.group_by(&flake_identity/1)
+    |> Enum.flat_map(fn {{repo, _identity}, group} ->
+      if length(group) >= threshold do
+        sample = hd(group)
+
+        [
+          %{
+            repo: repo,
+            test_file: sample.test_file,
+            test_line: sample.test_line,
+            signature: sample.signature,
+            ci_jobs: group |> Enum.map(& &1.ci_job) |> Enum.uniq(),
+            count: length(group),
+            task_ids: group |> Enum.map(& &1.task_id) |> Enum.uniq(),
+            run_ids: group |> Enum.map(& &1.run_id) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+          }
+        ]
+      else
+        []
+      end
+    end)
+    |> Enum.sort_by(&(-&1.count))
+  end
+
+  defp flake_identity(%{repo: repo, test_file: file, test_line: line, signature: signature}) do
+    identity =
+      if is_binary(file) and is_integer(line), do: "#{file}:#{line}", else: signature
+
+    {repo, identity}
   end
 
   # The workspace the repo's runs mostly ran under — the one whose
