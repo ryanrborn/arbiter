@@ -142,6 +142,7 @@ defmodule Arbiter.Sessions.UsageIngest do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Accounts.Resolver
   alias Arbiter.Config.Paths
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Usage.Event
@@ -190,14 +191,15 @@ defmodule Arbiter.Sessions.UsageIngest do
         Enum.reject(Arbiter.Sessions.list(), &(&1.status == :ended))
       end)
 
-    files =
-      (Enum.flat_map(dirs, &session_files/1) ++ Enum.flat_map(sessions, &browser_session_files/1))
-      |> Enum.uniq()
+    files_with_ws =
+      (Enum.flat_map(dirs, &session_files_with_ws/1) ++
+         Enum.flat_map(sessions, &browser_session_files_with_ws/1))
+      |> Enum.uniq_by(&elem(&1, 0))
 
     report =
-      files
-      |> Enum.reduce(%{files: 0, rows_written: 0, errors: 0}, fn path, acc ->
-        %{rows: rows, errors: errors} = ingest_file(path)
+      files_with_ws
+      |> Enum.reduce(%{files: 0, rows_written: 0, errors: 0}, fn {path, workspace_id}, acc ->
+        %{rows: rows, errors: errors} = ingest_file(path, workspace_id)
 
         %{
           acc
@@ -212,36 +214,40 @@ defmodule Arbiter.Sessions.UsageIngest do
 
   # ---- one file ----------------------------------------------------------
 
-  defp session_files(dir) when is_binary(dir) do
+  defp session_files_with_ws(dir) when is_binary(dir) do
     dir
     |> Path.join("*.jsonl")
     |> Path.wildcard()
     |> Enum.sort()
+    |> Enum.map(&{&1, nil})
   end
 
-  defp session_files(_dir), do: []
+  defp session_files_with_ws(_dir), do: []
 
   # A browser-hosted session's transcript lives two levels deeper than a
   # coordinator dir — `<config_dir>/projects/<slug>/<sid>.jsonl` — because the
   # CLI names the middle directory after the project path, not the session.
-  defp browser_session_files(%{config_dir: config_dir})
+  defp browser_session_files_with_ws(%{config_dir: config_dir} = session)
        when is_binary(config_dir) and config_dir != "" do
+    workspace_id = Map.get(session, :workspace_id)
+
     [config_dir, "projects", "*", "*.jsonl"]
     |> Path.join()
     |> Path.wildcard()
     |> Enum.sort()
+    |> Enum.map(&{&1, workspace_id})
   end
 
-  defp browser_session_files(_session), do: []
+  defp browser_session_files_with_ws(_session), do: []
 
-  defp ingest_file(path) do
+  defp ingest_file(path, workspace_id) do
     session_id = Path.basename(path, ".jsonl")
 
     # `session_id:` is the rollover guard — see the moduledoc. No `:since`: the
     # read is deliberately cumulative and the ledger provides the watermark.
     case ClaudeSessionFile.read_totals(path, session_id: session_id) do
       {:ok, totals} ->
-        write_deltas(session_id, totals, path)
+        write_deltas(session_id, totals, path, workspace_id)
 
       {:error, reason} ->
         Logger.warning("Sessions.UsageIngest: cannot read #{path}: #{inspect(reason)}")
@@ -257,9 +263,10 @@ defmodule Arbiter.Sessions.UsageIngest do
   # One row per (session, UTC day) that gained spend since the last pass. The
   # day comes from the transcript's own timestamps, never from the clock — see
   # the moduledoc's dating section.
-  defp write_deltas(session_id, totals, path) do
+  defp write_deltas(session_id, totals, path, workspace_id) do
     billed = already_billed_by_day(session_id)
     note = ClaudeSessionFile.cost_note_for(totals)
+    ctx = %{session_id: session_id, path: path, workspace_id: workspace_id}
 
     totals
     |> day_buckets()
@@ -272,7 +279,10 @@ defmodule Arbiter.Sessions.UsageIngest do
         not new_spend?(delta) ->
           acc
 
-        match?({:ok, _}, insert_row(session_id, totals, day, bucket, delta, already, note, path)) ->
+        match?(
+          {:ok, _},
+          insert_row(ctx, totals, day, bucket, delta, already, note)
+        ) ->
           %{acc | rows: acc.rows + 1}
 
         true ->
@@ -404,7 +414,10 @@ defmodule Arbiter.Sessions.UsageIngest do
       delta.cache_read_tokens > 0 or delta.message_count > 0 or (delta.cost_usd || 0.0) > 0.0
   end
 
-  defp insert_row(session_id, totals, day, bucket, delta, billed, note, path) do
+  defp insert_row(ctx, totals, day, bucket, delta, billed, note) do
+    %{session_id: session_id, path: path, workspace_id: workspace_id} = ctx
+    account_id = resolve_account_id(workspace_id)
+
     attrs = %{
       source: :coordinator_session,
       # Not a missing value: coordinator spend belongs to no task. See
@@ -413,6 +426,9 @@ defmodule Arbiter.Sessions.UsageIngest do
       session_id: session_id,
       step: :other,
       provider: "claude",
+      workspace_id: workspace_id,
+      provider_account_id: account_id,
+      provider_credential_id: Resolver.credential_id(account_id),
       model: totals.model,
       tokens_in: delta.tokens_in,
       tokens_out: delta.tokens_out,
@@ -456,6 +472,13 @@ defmodule Arbiter.Sessions.UsageIngest do
         )
 
         {:error, reason}
+    end
+  end
+
+  defp resolve_account_id(workspace_id) do
+    case Resolver.account_id(workspace_id, "claude") do
+      id when is_binary(id) -> id
+      nil -> Resolver.account_id_for_probe("claude")
     end
   end
 
