@@ -20,9 +20,9 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
   called before `mix escript.build` in the arbiter_cli subdirectory. This is
   necessary because ArbiterCli.Version tracks `.git/HEAD` and `packed-refs` but
   not loose tag refs, so new tags are only picked up after a forced recompile.
-  The test `"stale version after tagging"` demonstrates this by creating a
-  temporary tag and verifying that `mix compile --force` causes the version to
-  be re-evaluated to the new tag.
+  The test "stale version after tagging" demonstrates this by creating a
+  temporary tag, forcing recompilation, building the escript, and verifying
+  that the escript's reported version now matches the new tag.
   """
   use ExUnit.Case, async: true
 
@@ -211,53 +211,96 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
            "Script must force-recompile arbiter_cli before building the escript in a single subshell"
   end
 
-  test "stale version after tagging: mix compile --force picks up newly created tags (#1943, #1993)" do
+  test "stale version after tagging: mix compile --force ensures the escript picks up new tags (#1943, #1993)" do
     # When a tag is added to the repo and the CLI is rebuilt without
-    # `mix compile --force`, ArbiterCli.Version will still report the old tag
-    # because the version module tracks only .git/HEAD and packed-refs, not
-    # loose tag refs. This test demonstrates that `mix compile --force` is
-    # required to pick up new tags.
+    # `mix compile --force`, ArbiterCli.Version will report a stale tag
+    # because the version module's @app_version is computed at compile time
+    # from `git describe --tags --abbrev=0`, and tracked via @external_resource
+    # only for .git/HEAD and packed-refs, not loose tag refs.
     #
-    # We test this by:
-    # 1. Creating a temporary tag
-    # 2. Running `mix compile --force` to force recompilation
-    # 3. Verifying the version now reflects the new tag
-    # 4. Cleaning up the temporary tag
+    # This test verifies that the fix (calling `mix compile --force` before
+    # `mix escript.build` in build-local-release.sh) ensures the escript
+    # captures the correct version when built right after a tag is added.
+    #
+    # We verify this by:
+    # 1. Creating a temporary tag (adding a loose ref to .git)
+    # 2. Recording the version before tagging
+    # 3. Force-recompiling arbiter_cli (rebuilding .beam with new @app_version)
+    # 4. Building the escript (which embeds the version at build time)
+    # 5. Recording the version after compilation
+    # 6. Verifying the version changed to match the new tag
+    # 7. Cleaning up the temporary tag
 
-    # Create a unique temporary tag for this test
-    temp_tag = "test-temp-tag-#{System.unique_integer([:positive])}"
-    repo_root = Path.expand("../../../../..", __DIR__)
+    # Use a version-like tag name (99.99.99) that won't conflict with real versions
+    unique_suffix = System.unique_integer([:positive])
+    temp_tag = "v99.99.#{unique_suffix}"
+    repo_root = Path.expand("../../../../", __DIR__)
+    arbiter_cli_dir = Path.join(repo_root, "apps/arbiter_cli")
+    escript_path = Path.join(arbiter_cli_dir, "arb")
 
     try do
-      # Create the temporary tag
-      {_, 0} = System.cmd("git", ["tag", temp_tag], [cd: repo_root], stderr_to_stdout: true)
+      # Get the current version before tagging
+      {version_before, version_rc_before} =
+        System.cmd(escript_path, ["version"], stderr_to_stdout: true)
 
-      # Force recompile arbiter_cli to pick up the new tag.
-      # The Version module's @app_version is computed at compile time from `git describe --tags --abbrev=0`,
-      # and tracked via @external_resource for .git/HEAD and packed-refs, but not loose tags.
-      # So mix compile --force is needed to re-evaluate the version when a new tag is created.
-      {_compile_output, compile_rc} =
-        System.cmd("mix", ["compile", "--force"], [cd: Path.join(repo_root, "apps/arbiter_cli")], stderr_to_stdout: true)
+      assert version_rc_before == 0, "arb version should succeed before tagging"
 
-      assert compile_rc == 0,
-             "mix compile --force should succeed"
+      # Extract version line from output (format: "  version:   X.Y.Z")
+      version_before_match = Regex.run(~r/version:\s+([^\s\*]+)/, version_before)
+      assert version_before_match, "Could not parse version from: #{version_before}"
+      version_before_value = Enum.at(version_before_match, 1)
 
-      # After recompilation, git describe should report the new tag
+      # Create the temporary tag (a loose ref that Version module must pick up)
+      # Use a version-like name so the Version module can parse it
+      {_, 0} = System.cmd("git", ["tag", temp_tag], cd: repo_root)
+
+      # Verify git describe reports the new tag
       {git_describe_output, git_rc} =
-        System.cmd("git", ["describe", "--tags", "--abbrev=0"], [cd: repo_root], stderr_to_stdout: true)
+        System.cmd("git", ["describe", "--tags", "--abbrev=0"], cd: repo_root)
 
-      assert git_rc == 0,
-             "git describe should succeed"
-
-      # The version should now be the temporary tag (without the 'v' prefix if present)
-      expected_version = String.trim_leading(String.trim(git_describe_output), "v")
+      assert git_rc == 0, "git describe should find the tag"
       actual_tag = String.trim(git_describe_output)
-
       assert actual_tag == temp_tag,
              "git describe should report the newly created tag. Expected: #{temp_tag}, Got: #{actual_tag}"
+
+      # Force-recompile arbiter_cli to pick up the loose tag ref.
+      # The Version module's @app_version is embedded at compile time, so this
+      # is essential for the escript to report the new tag.
+      {compile_output, compile_rc} =
+        System.cmd("mix", ["compile", "--force"], cd: arbiter_cli_dir)
+
+      assert compile_rc == 0,
+             "mix compile --force should succeed. Output: #{compile_output}"
+
+      # Build the escript. This embeds the version module's attributes.
+      {escript_output, escript_rc} =
+        System.cmd("mix", ["escript.build"], cd: arbiter_cli_dir)
+
+      assert escript_rc == 0,
+             "mix escript.build should succeed. Output: #{escript_output}"
+
+      # Get the version after recompilation and escript rebuild
+      {version_after, version_rc_after} =
+        System.cmd(escript_path, ["version"], stderr_to_stdout: true)
+
+      assert version_rc_after == 0, "arb version should succeed after tagging"
+
+      # Extract version from output and verify it changed
+      version_after_match = Regex.run(~r/version:\s+([^\s\*]+)/, version_after)
+      assert version_after_match, "Could not parse version from: #{version_after}"
+      version_after_value = Enum.at(version_after_match, 1)
+
+      # The version should have changed to match the new tag
+      assert version_after_value != version_before_value,
+             "Version should change after tagging and recompiling. Before: #{version_before_value}, After: #{version_after_value}"
+
+      # The new version should match the temporary tag (without 'v' prefix if present)
+      expected_version = String.trim_leading(String.trim(temp_tag), "v")
+      assert version_after_value == expected_version,
+             "Version after recompile should match new tag. Expected: #{expected_version}, Got: #{version_after_value}"
     after
       # Clean up: remove the temporary tag
-      System.cmd("git", ["tag", "-d", temp_tag], [cd: repo_root], stderr_to_stdout: true)
+      System.cmd("git", ["tag", "-d", temp_tag], cd: repo_root)
     end
   end
 end
