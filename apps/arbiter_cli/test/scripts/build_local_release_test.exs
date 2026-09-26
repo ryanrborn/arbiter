@@ -252,6 +252,20 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
         System.cmd("git", ["tag", "-d", tag], cd: repo_root)
       end)
 
+      # Build the escript once before capturing versions, so the test is self-contained
+      # regardless of prior build state (it's required on a clean checkout where arb doesn't exist yet).
+      {initial_build_output, initial_build_rc} =
+        System.cmd("mix", ["compile", "--force"], cd: arbiter_cli_dir)
+
+      assert initial_build_rc == 0,
+             "Initial mix compile --force should succeed. Output: #{initial_build_output}"
+
+      {initial_escript_output, initial_escript_rc} =
+        System.cmd("mix", ["escript.build"], cd: arbiter_cli_dir)
+
+      assert initial_escript_rc == 0,
+             "Initial mix escript.build should succeed. Output: #{initial_escript_output}"
+
       # Get the current version before tagging
       {version_before, version_rc_before} =
         System.cmd(escript_path, ["version"], stderr_to_stdout: true)
@@ -261,7 +275,7 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
       # Extract version line from output (format: "  version:   X.Y.Z")
       version_before_match = Regex.run(~r/version:\s+([^\s\*]+)/, version_before)
       assert version_before_match, "Could not parse version from: #{version_before}"
-      version_before_value = Enum.at(version_before_match, 1)
+      _version_before_value = Enum.at(version_before_match, 1)
 
       # Create the temporary tag (a loose ref that Version module must pick up)
       # Use a version-like name so the Version module can parse it
