@@ -260,6 +260,7 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
 
       assert git_rc == 0, "git describe should find the tag"
       actual_tag = String.trim(git_describe_output)
+
       assert actual_tag == temp_tag,
              "git describe should report the newly created tag. Expected: #{temp_tag}, Got: #{actual_tag}"
 
@@ -296,6 +297,7 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
 
       # The new version should match the temporary tag (without 'v' prefix if present)
       expected_version = String.trim_leading(String.trim(temp_tag), "v")
+
       assert version_after_value == expected_version,
              "Version after recompile should match new tag. Expected: #{expected_version}, Got: #{version_after_value}"
     after
