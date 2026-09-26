@@ -48,6 +48,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
 
@@ -341,9 +342,21 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         {:ok, nil}
 
       true ->
+        # bd-7e8ezw: mint this pass its OWN worker token and write a fresh
+        # `.mcp.json`. `Worktree.attach/2` may hand back the original run's
+        # checkout, whose `.mcp.json` carries a token whose worker lease has
+        # long expired, or a re-created one with no config at all. Either way
+        # the pass reported the `arbiter` server "not connected" and could not
+        # call `ci_mark_external` / `ci_rerun`, which its prompt tells it to use.
+        mcp_opts =
+          Dispatch.inject_mcp_config(context.task, worktree_path,
+            repo: context.repo,
+            agent_type: provider
+          )
+
         session_opts =
           [owner: worker_pid, worktree_path: worktree_path]
-          |> add_command_or_prompt(context, args, worktree_path, provider)
+          |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
         case ClaudeSession.start(session_opts) do
           {:ok, port} ->
@@ -356,7 +369,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     end
   end
 
-  defp add_command_or_prompt(opts, context, args, worktree_path, provider) do
+  defp add_command_or_prompt(opts, context, args, worktree_path, provider, mcp_opts) do
     case Map.get(args, :claude_command) do
       cmd when is_list(cmd) and cmd != [] ->
         opts
@@ -372,10 +385,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         adapter = Agents.for_type(provider)
         prompt = prompt_for(context)
 
-        agent_opts = [
-          workspace: context.workspace,
-          worktree_path: worktree_path
-        ]
+        agent_opts =
+          [
+            workspace: context.workspace,
+            worktree_path: worktree_path
+          ] ++ mcp_opts
 
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->

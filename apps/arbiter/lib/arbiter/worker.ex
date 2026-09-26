@@ -3980,13 +3980,23 @@ defmodule Arbiter.Worker do
   # child can echo a secret straight to the output surfaces (bd-62d3jh).
   # ClaudeSession.build_session_config/3 owns the shape so a respawn can't drift
   # out of sync with start/1 again.
+  #
+  # The stashed pristine argv rides along too (bd-7e8ezw): a respawn relaunches
+  # with the same `--mcp-config`, so it must hold its `init` event to the same
+  # MCP connection check the first session did.
   defp session_config_for(%State{} = state, provider, model) do
     Arbiter.Worker.ClaudeSession.build_session_config(
       state.task_id,
       "worker:" <> state.task_id,
-      [provider: provider, model: model] ++ carried_redact_opts(state)
+      [provider: provider, model: model, argv: stashed_spawn_argv(state)] ++
+        carried_redact_opts(state)
     )
   end
+
+  defp stashed_spawn_argv(%State{meta: %{claude_spawn: %{argv: argv}}}) when is_list(argv),
+    do: argv
+
+  defp stashed_spawn_argv(_state), do: nil
 
   # Reuse the redaction list the prior session already resolved: every session
   # on this worker is the same task, hence the same workspace, hence the same

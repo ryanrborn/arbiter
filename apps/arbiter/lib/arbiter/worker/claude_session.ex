@@ -176,9 +176,20 @@ defmodule Arbiter.Worker.ClaudeSession do
         Keyword.get_lazy(opts, :redact_values, fn ->
           Arbiter.Worker.WorkerEnv.secret_values(task_id)
         end),
-      composed_prompt: Keyword.get(opts, :composed_prompt)
+      composed_prompt: Keyword.get(opts, :composed_prompt),
+      mcp_server: expected_mcp_server(Keyword.get(opts, :argv))
     }
   end
+
+  # bd-7e8ezw: a spawn handed an Arbiter MCP config (`--mcp-config`, see
+  # `Arbiter.Agents.Claude.default_argv/2`) expects the Arbiter server to be
+  # connected; `check_mcp_connection/2` holds the `init` event to that. A spawn
+  # with no such flag (reviews, workspace-less probes) expects nothing.
+  defp expected_mcp_server(argv) when is_list(argv) do
+    if "--mcp-config" in argv, do: Arbiter.MCP.server_name()
+  end
+
+  defp expected_mcp_server(_argv), do: nil
 
   @doc """
   Start a Claude (or echo-spike) session in `worktree_path`, streaming output
@@ -240,7 +251,8 @@ defmodule Arbiter.Worker.ClaudeSession do
           # bd-9rdwe4: `:prompt` still means "raw prompt text" even when
           # `:command` (a caller-built argv) wins argv resolution below — it's
           # carried through purely for the worker to persist.
-          composed_prompt: Keyword.get(opts, :prompt)
+          composed_prompt: Keyword.get(opts, :prompt),
+          argv: argv
         )
 
       port_args = %{
@@ -407,6 +419,7 @@ defmodule Arbiter.Worker.ClaudeSession do
         session =
           session
           |> absorb_usage(event)
+          |> check_mcp_connection(event)
           |> capture_steps(event)
           |> track_async_tasks(event)
           |> track_agy_denials(event)
@@ -678,6 +691,48 @@ defmodule Arbiter.Worker.ClaudeSession do
       _ -> {String.split(trimmed, "\n"), ""}
     end
   end
+
+  # bd-7e8ezw: Claude's `init` event lists every MCP server with its connect
+  # status. A worker whose Arbiter server failed, or was dropped before it was
+  # even tried (a repo-local `disabledMcpjsonServers`), used to find out on its
+  # own, mid-task, and Arbiter never heard about it. Log it and put it in the
+  # worker's own stream, where the operator and the dashboard see it.
+  defp check_mcp_connection(
+         %{mcp_server: name} = session,
+         %{"type" => "system", "subtype" => "init"} = event
+       )
+       when is_binary(name) do
+    status = mcp_server_status(event["mcp_servers"], name)
+    session = Map.put(session, :mcp_status, status)
+
+    if status == "connected" do
+      session
+    else
+      Logger.warning(
+        "Arbiter.Worker.ClaudeSession: MCP server #{inspect(name)} did not connect " <>
+          "for task=#{session.task_id} (status=#{status}) — the worker has no typed " <>
+          "Arbiter MCP tools and must fall back to the `arb` CLI"
+      )
+
+      emit_line(
+        session,
+        "⚠ #{name} MCP server not connected (status: #{status}) — " <>
+          "use the `arb` CLI instead of the #{name} MCP tools",
+        false
+      )
+    end
+  end
+
+  defp check_mcp_connection(session, _event), do: session
+
+  defp mcp_server_status(servers, name) when is_list(servers) do
+    Enum.find_value(servers, "missing", fn
+      %{"name" => ^name} = server -> server["status"] || "unknown"
+      _ -> nil
+    end)
+  end
+
+  defp mcp_server_status(_servers, _name), do: "missing"
 
   # Capture structured usage off the two events that carry it. The `init` event
   # tells us the model and session_id up front; the terminal `result` event
