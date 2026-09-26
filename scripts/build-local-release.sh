@@ -14,6 +14,9 @@
 # be checked out there at the moment the build runs.
 set -euo pipefail
 
+# ERR trap to print which step failed on unexpected exit
+trap 'echo "error: script failed at line $LINENO" >&2' ERR
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/build-local-release.sh <clone-path> [output-dir]
@@ -114,7 +117,15 @@ export MIX_ENV=prod
 # #1728. Build it from source instead when a Rust toolchain is available, so
 # it links against *this* machine's glibc; the glibc guard at the end of this
 # script fails the build if we end up shipping an artifact that is too new.
-GLIBC_BASELINE="${ARB_GLIBC_BASELINE:-$(ldd --version 2>/dev/null | head -n 1 | awk '{print $NF}')}"
+# Extract GLIBC version without pipefail to avoid SIGPIPE when ldd is still
+# writing after head closes the pipe (#1993).
+if [ -z "${ARB_GLIBC_BASELINE:-}" ]; then
+  set +o pipefail
+  GLIBC_BASELINE=$(ldd --version 2>/dev/null | head -n 1 | awk '{print $NF}')
+  set -o pipefail
+else
+  GLIBC_BASELINE="$ARB_GLIBC_BASELINE"
+fi
 if ! printf '%s' "$GLIBC_BASELINE" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
   echo "warning: could not determine this host's glibc version; assuming the RHEL 8 baseline 2.28." >&2
   GLIBC_BASELINE="2.28"
@@ -138,7 +149,9 @@ mix compile
 mix cmd --app arbiter_web mix assets.deploy
 mix release arbiter --overwrite
 
-(cd apps/arbiter_cli && mix escript.build)
+# Force-recompile the CLI's version module to ensure the escript captures
+# the correct version when building right after a tag is added (#1943, #1993).
+(cd apps/arbiter_cli && mix compile --force && mix escript.build)
 
 OUTPUT_DIR="${2:-$CLONE_PATH/.local-release}"
 mkdir -p "$OUTPUT_DIR"
