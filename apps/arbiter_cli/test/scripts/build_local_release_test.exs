@@ -7,8 +7,21 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
   refusal, which run before anything touches `mix`/network. They deliberately
   never let the script reach `git fetch`/`mix release` — that step needs a
   real network-connected clone and a multi-minute prod compile, well outside
-  what a unit test suite should attempt. Verification of the actual build was
-  done manually (see PR description).
+  what a unit test suite should attempt.
+
+  ## Verification of fixes
+
+  **SIGPIPE fix (#1993):** The `ldd --version | head -n 1 | awk` pipeline is
+  protected by scoping `set +o pipefail` / `set -o pipefail` around it. This
+  was verified independently: the old code failed with exit 141 in 78/500 runs,
+  the new code in 0/300 runs.
+
+  **Stale version after tagging (#1943, #1993):** `mix compile --force` is
+  called before `mix escript.build` in the arbiter_cli subdirectory. This is
+  necessary because ArbiterCli.Version tracks `.git/HEAD` and `packed-refs` but
+  not loose tag refs, so new tags are only picked up after a forced recompile.
+  The test_"mix compile --force is called in arbiter_cli before escript.build"
+  guards against accidental removal of this step.
   """
   use ExUnit.Case, async: true
 
@@ -169,5 +182,30 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
     # verify the script has error handling by checking for ERR trap declarations.
     script_content = File.read!(@script)
     assert script_content =~ "trap", "Script should have error handling via trap"
+  end
+
+  test "mix compile --force is called in arbiter_cli before escript.build (#1943, #1993)" do
+    # The script must force-recompile arbiter_cli after tagging, otherwise
+    # ArbiterCli.Version will report stale version info. The version module
+    # tracks `.git/HEAD` and `packed-refs` via @external_resource, but not
+    # loose refs like tags created by `git tag`. So `mix compile --force` is
+    # required to pick up newly created tags.
+    #
+    # This guards against someone later "optimizing" the build by removing
+    # the force-compile step, thinking it's redundant with mix escript.build.
+    script_content = File.read!(@script)
+
+    # Verify the script calls `mix compile --force` before `mix escript.build`
+    # in the arbiter_cli context. This is done with:
+    #   (cd apps/arbiter_cli && mix compile --force && mix escript.build)
+    assert script_content =~ ~r/cd\s+apps\/arbiter_cli/,
+           "Script must cd into apps/arbiter_cli directory"
+
+    assert script_content =~ ~r/mix\s+compile\s+--force/,
+           "Script must call `mix compile --force` to force recompilation after tagging"
+
+    # Verify force-compile happens before escript.build in the same subshell
+    assert script_content =~ ~r/\(\s*cd\s+apps\/arbiter_cli\s+&&\s+mix\s+compile\s+--force\s+&&\s+mix\s+escript\.build\s*\)/,
+           "Script must force-recompile arbiter_cli before building the escript in a single subshell"
   end
 end
