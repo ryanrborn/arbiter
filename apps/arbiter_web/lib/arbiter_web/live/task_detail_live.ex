@@ -1940,7 +1940,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
           <%!-- Operator actions. A closed issue is terminal here: reopening
                it is `arb update` territory, not a dashboard button. --%>
-          <div :if={@task && @task.status != :closed} class="flex items-center gap-2">
+          <div :if={@task && @task.status != :closed} class="flex flex-wrap items-center gap-2">
             <%!-- Refine (bd-1lszsc). Offered on exactly the issues
                   `Arbiter.Sessions.Refine.eligible?/1` accepts — Backlog,
                   not running, not closed — and it sits *before* Move to
