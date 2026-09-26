@@ -295,6 +295,18 @@
   --ping-period: 1.8s;
 }
 
+/* bd-bcroux: below `sm` the session dock title bar grows to fit the
+   `max-sm:size-11`/`max-sm:h-11` touch targets on its close and size-preset
+   (Compact/Side/Max) buttons — otherwise those buttons, now taller than the
+   34px desktop strip, would poke out of it. Matches the Tailwind `sm`
+   breakpoint (40rem) so the CSS variable and the utility classes that key
+   off it never disagree about where the swap happens. */
+@media not all and (min-width: 40rem) {
+  :root {
+    --session-dock-strip-height: 48px;
+  }
+}
+
 /* bd-covojz: set by the session dock's hook on `document.documentElement` to
    the size the expanded window is *actually* rendering at — "side" only when a
    side panel both was asked for and fits (`resolveDockSize`). It is the page's

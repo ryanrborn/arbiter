@@ -600,33 +600,44 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       phx-hook=".LogStreamStick"
       data-live={to_string(@live)}
       style={@pane_style}
-      class={[
-        "text-[11.5px] leading-[var(--leading-log)] font-normal font-[family-name:var(--font-mono)]",
-        !@bare &&
-          "bg-[var(--surface-field)] border border-[var(--border-default)] rounded-[var(--radius-field)]",
-        @max_height && "overflow-x-hidden overflow-y-auto",
-        is_nil(@max_height) && "overflow-hidden",
-        @class
-      ]}
+      class={
+        [
+          "text-[11.5px] leading-[var(--leading-log)] font-normal font-[family-name:var(--font-mono)]",
+          !@bare &&
+            "bg-[var(--surface-field)] border border-[var(--border-default)] rounded-[var(--radius-field)]",
+          # bd-bcroux: the pane is its own horizontal scroll container so a long
+          # line can be touch-scrolled without the whole page moving sideways.
+          "overflow-x-auto",
+          @max_height && "overflow-y-auto",
+          is_nil(@max_height) && "overflow-y-hidden",
+          @class
+        ]
+      }
       {@rest}
     >
       <div
         :for={{line, i} <- Enum.with_index(@lines)}
         id={"#{@id}-line-#{i}"}
         style={@line_style}
-        class={[
-          "grid gap-3 px-3 py-1 min-h-[var(--row-log)] items-center",
-          "border-b border-[var(--arb-line-soft)] last:border-b-0",
-          "animate-[arb-fade-in_var(--dur-instant)_var(--arb-ease-out)]",
-          to_string(line.role) == "tool" && "bg-[var(--arb-panel)]"
-        ]}
+        class={
+          [
+            # bd-bcroux: `w-max` lets a row grow past the pane's own width when
+            # its text is long, which is what gives the pane's `overflow-x-auto`
+            # something to scroll; `min-w-full` keeps short rows (and their
+            # border/background) spanning the full pane width regardless.
+            "grid w-max min-w-full gap-3 px-3 py-1 min-h-[var(--row-log)] items-center",
+            "border-b border-[var(--arb-line-soft)] last:border-b-0",
+            "animate-[arb-fade-in_var(--dur-instant)_var(--arb-ease-out)]",
+            to_string(line.role) == "tool" && "bg-[var(--arb-panel)]"
+          ]
+        }
       >
         <span class="text-[var(--arb-text-ghost)] tabular-nums">{line.time}</span>
         <span class={log_stream_role_class(line.role)}>{line.role}</span>
         <span
           title={line.text}
           class={[
-            "overflow-hidden text-ellipsis whitespace-nowrap",
+            "whitespace-pre",
             if(Map.get(line, :emphasis, false),
               do: "text-[var(--arb-text-body)]",
               else: "text-[var(--text-secondary)]"
