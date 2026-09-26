@@ -39,16 +39,13 @@ defmodule Arbiter.ReleaseTest do
     end
 
     test "at runtime, in a fresh node, boots the Repo but not the endpoint, Autopilot, or :arbiter itself" do
-      unless Node.alive?() do
-        {:ok, hostname} = :inet.gethostname()
-        {:ok, _pid} = Node.start(:"release_test_primary@#{hostname}", :shortnames)
-      end
-
+      # No `name:` and a `:standard_io` control connection: the peer runs
+      # undistributed and is driven via `:peer.call/4`, so neither node
+      # needs epmd (CI runners don't have one running).
       code_paths = Enum.map(:code.get_path(), &to_charlist/1)
 
-      {:ok, peer_pid, peer_node} =
+      {:ok, peer_pid, _nonode} =
         :peer.start_link(%{
-          name: :"release_repo_peer_#{System.unique_integer([:positive])}",
           args: [~c"-pa" | code_paths],
           connection: :standard_io
         })
@@ -74,7 +71,7 @@ defmodule Arbiter.ReleaseTest do
         |> Keyword.update!(Arbiter.Repo, &Keyword.put(&1, :database, tmp_db))
 
       :ok =
-        :erpc.call(peer_node, Application, :put_all_env, [
+        :peer.call(peer_pid, Application, :put_all_env, [
           [
             arbiter: peer_arbiter_env,
             ash: Application.get_all_env(:ash),
@@ -82,13 +79,27 @@ defmodule Arbiter.ReleaseTest do
           ]
         ])
 
-      assert :ok == :erpc.call(peer_node, Arbiter.Release, :start_release_repo!, [])
+      # `start_release_repo!/0` links the Repo to its caller (in a real
+      # release that's the long-lived `eval` process), and each
+      # `:peer.call/4` runs in a short-lived process — so start and observe
+      # within one call, before that process exits and takes the Repo down.
+      {observed, _binding} =
+        :peer.call(peer_pid, Code, :eval_string, [
+          """
+          {Arbiter.Release.start_release_repo!(),
+           Process.whereis(Arbiter.Repo),
+           Process.whereis(ArbiterWeb.Endpoint),
+           Process.whereis(Arbiter.Board.Autopilot),
+           Application.started_applications()}
+          """
+        ])
 
-      assert :erpc.call(peer_node, Process, :whereis, [Arbiter.Repo]) != nil
-      assert :erpc.call(peer_node, Process, :whereis, [ArbiterWeb.Endpoint]) == nil
-      assert :erpc.call(peer_node, Process, :whereis, [Arbiter.Board.Autopilot]) == nil
+      {start_result, repo_pid, endpoint_pid, autopilot_pid, started_apps} = observed
 
-      started_apps = :erpc.call(peer_node, Application, :started_applications, [])
+      assert start_result == :ok
+      assert is_pid(repo_pid)
+      assert endpoint_pid == nil
+      assert autopilot_pid == nil
       refute Enum.any?(started_apps, fn {app, _, _} -> app == :arbiter end)
     end
   end
