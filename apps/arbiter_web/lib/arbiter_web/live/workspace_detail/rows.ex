@@ -98,6 +98,52 @@ defmodule ArbiterWeb.WorkspaceDetail.Rows do
   end
 
   @doc """
+  A heading over a chunk of `setting_row/1`s that becomes a native,
+  collapsible disclosure on small screens.
+
+  A pane like Policy's has more settings than fit comfortably on a phone
+  screen at once; grouping them under a heading it can fold shut makes the
+  list scannable there. At `sm:` and up both the `<details>` and its content
+  wrapper collapse to `display: contents`, so the group heading disappears
+  and the rows rejoin the parent `rows/1`'s single flat list — exactly what
+  it rendered before this component existed. The
+  `open` attribute is always present and the summary is hidden from `sm:` up,
+  so desktop has no way to close it: it just stays expanded.
+
+  A `display: contents` element generates no box, so the divider a group
+  would otherwise draw between itself and the next one (via `divide-y` on
+  the now-`contents` `<details>`/wrapper) never paints at `sm:` and up. The
+  boundary is instead drawn directly on the last real row of every group but
+  the last — a `setting_row`/`toggle_row` div, which keeps its own box at
+  every width — using `:not(:last-of-type)` on the `<details>` siblings,
+  which is unaffected by `display: contents` since it's a structural
+  selector, not a rendering one.
+  """
+  attr :title, :string, required: true
+  slot :inner_block, required: true
+
+  def mobile_group(assigns) do
+    ~H"""
+    <details
+      open
+      class="group/mg sm:contents sm:[&:not(:last-of-type)>div>*:last-child]:border-b sm:[&:not(:last-of-type)>div>*:last-child]:border-solid sm:[&:not(:last-of-type)>div>*:last-child]:border-[var(--border-default)]"
+    >
+      <summary class="mb-1 flex cursor-pointer list-none items-center gap-1.5 py-1.5 font-[family-name:var(--font-sans)] text-[11px] font-semibold uppercase tracking-wide text-[var(--text-label)] marker:hidden sm:hidden [&::-webkit-details-marker]:hidden">
+        <ArbiterWeb.CoreComponents.Core.icon
+          name="hero-chevron-right"
+          size={11}
+          class="flex-none transition-transform group-open/mg:rotate-90"
+        />
+        {@title}
+      </summary>
+      <div class="flex flex-col divide-y divide-solid divide-[var(--border-default)] sm:contents">
+        {render_slot(@inner_block)}
+      </div>
+    </details>
+    """
+  end
+
+  @doc """
   One setting: name, consequence, control.
 
   `:control` sits right-aligned on the name line. `:below` is for settings

@@ -297,341 +297,349 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
           phx-target={@myself}
         >
           <.rows>
-            <.setting_row
-              name="Tracker type"
-              consequence="which tracker issues sync to; none keeps them local to Arbiter"
-            >
-              <:control>
-                <Forms.select
-                  name="config[tracker_type]"
-                  options={Enum.map(@tracker_types, &{&1, &1})}
-                  value={cfg(@workspace, ["tracker", "type"], "none")}
-                  size="sm"
-                  class="w-[160px]"
-                />
-              </:control>
-            </.setting_row>
+            <.mobile_group title="Tracker, merge & routing">
+              <.setting_row
+                name="Tracker type"
+                consequence="which tracker issues sync to; none keeps them local to Arbiter"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[tracker_type]"
+                    options={Enum.map(@tracker_types, &{&1, &1})}
+                    value={cfg(@workspace, ["tracker", "type"], "none")}
+                    size="sm"
+                    class="w-[160px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Merger strategy"
-              consequence="how a finished branch reaches the primary branch"
-            >
-              <:control>
-                <Forms.select
-                  name="config[merger_strategy]"
-                  options={Enum.map(@merger_strategies, &{&1, &1})}
-                  value={cfg(@workspace, ["merge", "strategy"], "direct")}
-                  size="sm"
-                  class="w-[160px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Merger strategy"
+                consequence="how a finished branch reaches the primary branch"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[merger_strategy]"
+                    options={Enum.map(@merger_strategies, &{&1, &1})}
+                    value={cfg(@workspace, ["merge", "strategy"], "direct")}
+                    size="sm"
+                    class="w-[160px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Routing policy"
-              consequence="which rule picks the model tier for each dispatch"
-            >
-              <:control>
-                <Forms.select
-                  name="config[routing_policy]"
-                  options={Enum.map(@routing_policies, &{&1, &1})}
-                  value={cfg(@workspace, ["routing", "policy"], "static")}
-                  size="sm"
-                  class="w-[160px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Routing policy"
+                consequence="which rule picks the model tier for each dispatch"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[routing_policy]"
+                    options={Enum.map(@routing_policies, &{&1, &1})}
+                    value={cfg(@workspace, ["routing", "policy"], "static")}
+                    size="sm"
+                    class="w-[160px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Budget base policy"
-              consequence="routing.base_policy — the tie-breaker inside by_budget; every other policy ignores it"
-            >
-              <:control>
-                <Forms.select
-                  name="config[routing_base_policy]"
-                  options={[
-                    {"(unset — defaults to by_priority)", ""},
-                    {"by_priority", "by_priority"},
-                    {"by_difficulty", "by_difficulty"}
-                  ]}
-                  value={cfg(@workspace, ["routing", "base_policy"], "")}
-                  size="sm"
-                  class="w-[220px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Budget base policy"
+                consequence="routing.base_policy — the tie-breaker inside by_budget; every other policy ignores it"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[routing_base_policy]"
+                    options={[
+                      {"(unset — defaults to by_priority)", ""},
+                      {"by_priority", "by_priority"},
+                      {"by_difficulty", "by_difficulty"}
+                    ]}
+                    value={cfg(@workspace, ["routing", "base_policy"], "")}
+                    size="sm"
+                    class="w-[220px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Daily budget USD"
-              consequence="routing.budget_usd_per_day — by_budget drops to cheaper tiers once the day's spend passes this"
-            >
-              <:control>
-                <Forms.input
-                  name="config[routing_budget_usd_per_day]"
-                  value={cfg(@workspace, ["routing", "budget_usd_per_day"], "")}
-                  placeholder="e.g. 25"
-                  size="sm"
-                  class="w-[120px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Daily budget USD"
+                consequence="routing.budget_usd_per_day — by_budget drops to cheaper tiers once the day's spend passes this"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[routing_budget_usd_per_day]"
+                    value={cfg(@workspace, ["routing", "budget_usd_per_day"], "")}
+                    placeholder="e.g. 25"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
+            </.mobile_group>
 
-            <.toggle_row
-              name="Code review required before merge"
-              consequence="no branch merges until a review round approves it"
-              field="config[review_required]"
-              checked={review_required?(@workspace)}
-            />
+            <.mobile_group title="Code review & PR hygiene">
+              <.toggle_row
+                name="Code review required before merge"
+                consequence="no branch merges until a review round approves it"
+                field="config[review_required]"
+                checked={review_required?(@workspace)}
+              />
 
-            <.setting_row
-              name="ReviewGate max rounds"
-              consequence="the gate stops after this many rounds and hands the issue back unmerged; blank scales it by difficulty"
-            >
-              <:control>
-                <Forms.input
-                  name="config[review_gate_max_rounds]"
-                  value={cfg(@workspace, ["review_gate", "max_rounds"], "")}
-                  placeholder="by difficulty"
-                  size="sm"
-                  class="w-[120px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="ReviewGate max rounds"
+                consequence="the gate stops after this many rounds and hands the issue back unmerged; blank scales it by difficulty"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[review_gate_max_rounds]"
+                    value={cfg(@workspace, ["review_gate", "max_rounds"], "")}
+                    placeholder="by difficulty"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="ReviewGate per-round timeout"
-              consequence="review_gate.timeout_ms — a round still running past this is failed rather than waited on"
-            >
-              <:control>
-                <Forms.input
-                  name="config[review_gate_timeout_ms]"
-                  value={cfg(@workspace, ["review_gate", "timeout_ms"], "")}
-                  placeholder="1200000"
-                  size="sm"
-                  class="w-[120px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="ReviewGate per-round timeout"
+                consequence="review_gate.timeout_ms — a round still running past this is failed rather than waited on"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[review_gate_timeout_ms]"
+                    value={cfg(@workspace, ["review_gate", "timeout_ms"], "")}
+                    placeholder="1200000"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Reviewer dispatch mode"
-              consequence="review_automation.default — whether a reviewer is dispatched for a PR automatically or only on request"
-            >
-              <:control>
-                <Forms.select
-                  name="config[review_automation_default]"
-                  options={[{"(unset)", ""} | Enum.map(@review_automation_modes, &{&1, &1})]}
-                  value={cfg(@workspace, ["review_automation", "default"], "")}
-                  size="sm"
-                  class="w-[160px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Reviewer dispatch mode"
+                consequence="review_automation.default — whether a reviewer is dispatched for a PR automatically or only on request"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[review_automation_default]"
+                    options={[{"(unset)", ""} | Enum.map(@review_automation_modes, &{&1, &1})]}
+                    value={cfg(@workspace, ["review_automation", "default"], "")}
+                    size="sm"
+                    class="w-[160px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Auto-approve authors"
-              consequence="PRs opened by these logins skip the review gate; blank reviews everyone"
-            >
-              <:control>
-                <Forms.input
-                  name="config[review_automation_auto_authors]"
-                  value={auto_authors_text(@workspace)}
-                  placeholder="alice, bob"
-                  size="sm"
-                  class="w-[220px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Auto-approve authors"
+                consequence="PRs opened by these logins skip the review gate; blank reviews everyone"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[review_automation_auto_authors]"
+                    value={auto_authors_text(@workspace)}
+                    placeholder="alice, bob"
+                    size="sm"
+                    class="w-[220px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="PR title format"
-              consequence="merge.pr_title_format — how the merger writes the title of every PR it opens"
-            >
-              <:control>
-                <Forms.select
-                  name="config[merge_pr_title_format]"
-                  options={[{"Raw (default)", ""}, {"Conventional Commit", "conventional_commit"}]}
-                  value={cfg(@workspace, ["merge", "pr_title_format"], "")}
-                  size="sm"
-                  class="w-[200px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="PR title format"
+                consequence="merge.pr_title_format — how the merger writes the title of every PR it opens"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[merge_pr_title_format]"
+                    options={[{"Raw (default)", ""}, {"Conventional Commit", "conventional_commit"}]}
+                    value={cfg(@workspace, ["merge", "pr_title_format"], "")}
+                    size="sm"
+                    class="w-[200px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Watchdog max polls"
-              consequence="merge.watchdog_max_polls — the watchdog gives up on a PR after this many checks and leaves it for an operator"
-            >
-              <:control>
-                <Forms.input
-                  name="config[merge_watchdog_max_polls]"
-                  value={cfg(@workspace, ["merge", "watchdog_max_polls"], "")}
-                  placeholder="by auto_merge mode"
-                  size="sm"
-                  class="w-[140px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Watchdog max polls"
+                consequence="merge.watchdog_max_polls — the watchdog gives up on a PR after this many checks and leaves it for an operator"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[merge_watchdog_max_polls]"
+                    value={cfg(@workspace, ["merge", "watchdog_max_polls"], "")}
+                    placeholder="by auto_merge mode"
+                    size="sm"
+                    class="w-[140px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.toggle_row
-              name="Auto-merge on review approval"
-              consequence="merge.auto_merge — an approved PR merges itself instead of waiting for an operator"
-              field="config[merge_auto_merge]"
-              checked={Workspace.auto_merge?(@workspace)}
-            />
+              <.toggle_row
+                name="Auto-merge on review approval"
+                consequence="merge.auto_merge — an approved PR merges itself instead of waiting for an operator"
+                field="config[merge_auto_merge]"
+                checked={Workspace.auto_merge?(@workspace)}
+              />
 
-            <.toggle_row
-              name="Wait for CI pipeline before merging"
-              consequence="merge.watch_pipeline — the merger holds an approved PR until the pipeline is green"
-              field="config[merge_watch_pipeline]"
-              checked={Workspace.watch_pipeline?(@workspace)}
-            />
+              <.toggle_row
+                name="Wait for CI pipeline before merging"
+                consequence="merge.watch_pipeline — the merger holds an approved PR until the pipeline is green"
+                field="config[merge_watch_pipeline]"
+                checked={Workspace.watch_pipeline?(@workspace)}
+              />
 
-            <.toggle_row
-              name="Fast-forward primary checkout after merge"
-              consequence="merge.auto_sync_primary — your local primary checkout is advanced after each merge"
-              field="config[merge_auto_sync_primary]"
-              checked={Workspace.auto_sync_primary?(@workspace)}
-            />
+              <.toggle_row
+                name="Fast-forward primary checkout after merge"
+                consequence="merge.auto_sync_primary — your local primary checkout is advanced after each merge"
+                field="config[merge_auto_sync_primary]"
+                checked={Workspace.auto_sync_primary?(@workspace)}
+              />
+            </.mobile_group>
 
-            <.setting_row
-              name="Pause on quota exhaustion"
-              consequence="throttle stops dispatching at 100% of the 5h window; continue keeps dispatching into paid overage"
-            >
-              <:control>
-                <Forms.select
-                  name="config[quota_on_exhaustion]"
-                  options={[
-                    {"(unset — defaults to throttle)", ""} | Enum.map(@quota_modes, &{&1, &1})
-                  ]}
-                  value={cfg(@workspace, ["quota", "on_exhaustion"], "")}
-                  size="sm"
-                  class="w-[220px]"
-                />
-              </:control>
-            </.setting_row>
+            <.mobile_group title="Quotas & concurrency">
+              <.setting_row
+                name="Pause on quota exhaustion"
+                consequence="throttle stops dispatching at 100% of the 5h window; continue keeps dispatching into paid overage"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[quota_on_exhaustion]"
+                    options={[
+                      {"(unset — defaults to throttle)", ""} | Enum.map(@quota_modes, &{&1, &1})
+                    ]}
+                    value={cfg(@workspace, ["quota", "on_exhaustion"], "")}
+                    size="sm"
+                    class="w-[220px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Overage alert threshold USD"
-              consequence="quota.overage_alert_usd — you get told once overage spend passes this, dispatch is unaffected"
-            >
-              <:control>
-                <Forms.input
-                  name="config[quota_overage_alert_usd]"
-                  value={cfg(@workspace, ["quota", "overage_alert_usd"], "")}
-                  placeholder="e.g. 50"
-                  size="sm"
-                  class="w-[120px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Overage alert threshold USD"
+                consequence="quota.overage_alert_usd — you get told once overage spend passes this, dispatch is unaffected"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[quota_overage_alert_usd]"
+                    value={cfg(@workspace, ["quota", "overage_alert_usd"], "")}
+                    placeholder="e.g. 50"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Throttle threshold"
-              consequence="quota.throttle_threshold — throttling starts at this fraction of the window instead of at 100%"
-            >
-              <:control>
-                <Forms.input
-                  name="config[quota_throttle_threshold]"
-                  value={cfg(@workspace, ["quota", "throttle_threshold"], "")}
-                  placeholder="e.g. 0.8"
-                  size="sm"
-                  class="w-[120px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Throttle threshold"
+                consequence="quota.throttle_threshold — throttling starts at this fraction of the window instead of at 100%"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[quota_throttle_threshold]"
+                    value={cfg(@workspace, ["quota", "throttle_threshold"], "")}
+                    placeholder="e.g. 0.8"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Weekly (7d) threshold"
-              consequence="quota.weekly_threshold — dispatch holds at this fraction of the 7-day window (default 0.90); the 7d window resets at most weekly, so a hold here lasts days"
-            >
-              <:control>
-                <Forms.input
-                  name="config[quota_weekly_threshold]"
-                  value={cfg(@workspace, ["quota", "weekly_threshold"], "")}
-                  placeholder="e.g. 0.9"
-                  size="sm"
-                  class="w-[120px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Weekly (7d) threshold"
+                consequence="quota.weekly_threshold — dispatch holds at this fraction of the 7-day window (default 0.90); the 7d window resets at most weekly, so a hold here lasts days"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[quota_weekly_threshold]"
+                    value={cfg(@workspace, ["quota", "weekly_threshold"], "")}
+                    placeholder="e.g. 0.9"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Weekly warning policy"
-              consequence="quota.weekly_warning_policy — what a 7d allowed_warning does: ignore (default, advisory only) or hold (stop dispatching). A 7d rejected always holds either way."
-            >
-              <:control>
-                <Forms.select
-                  name="config[quota_weekly_warning_policy]"
-                  options={[
-                    {"(unset — defaults to ignore)", ""}
-                    | Enum.map(@quota_weekly_warning_policies, &{&1, &1})
-                  ]}
-                  value={cfg(@workspace, ["quota", "weekly_warning_policy"], "")}
-                  size="sm"
-                  class="w-[220px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Weekly warning policy"
+                consequence="quota.weekly_warning_policy — what a 7d allowed_warning does: ignore (default, advisory only) or hold (stop dispatching). A 7d rejected always holds either way."
+              >
+                <:control>
+                  <Forms.select
+                    name="config[quota_weekly_warning_policy]"
+                    options={[
+                      {"(unset — defaults to ignore)", ""}
+                      | Enum.map(@quota_weekly_warning_policies, &{&1, &1})
+                    ]}
+                    value={cfg(@workspace, ["quota", "weekly_warning_policy"], "")}
+                    size="sm"
+                    class="w-[220px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Max concurrent workers"
-              consequence="conductor.max_concurrent — the effective cap is the lowest of this, the account ceiling (P8, if configured), the system cap and quota headroom (P7)"
-            >
-              <:control>
-                <Forms.input
-                  name="config[conductor_max_concurrent]"
-                  value={cfg(@workspace, ["conductor", "max_concurrent"], "")}
-                  placeholder="uncapped"
-                  size="sm"
-                  class="w-[120px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Max concurrent workers"
+                consequence="conductor.max_concurrent — the effective cap is the lowest of this, the account ceiling (P8, if configured), the system cap and quota headroom (P7)"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[conductor_max_concurrent]"
+                    value={cfg(@workspace, ["conductor", "max_concurrent"], "")}
+                    placeholder="uncapped"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
+            </.mobile_group>
 
-            <.setting_row
-              name="PR-patrol authors"
-              consequence="pr_patrol.author_logins — the patrol only touches PRs from these logins; blank patrols everyone"
-            >
-              <:control>
-                <Forms.input
-                  name="config[pr_patrol_author_logins]"
-                  value={pr_patrol_author_logins_text(@workspace)}
-                  placeholder="alice, bob"
-                  size="sm"
-                  class="w-[220px]"
-                />
-              </:control>
-            </.setting_row>
+            <.mobile_group title="PR patrol">
+              <.setting_row
+                name="PR-patrol authors"
+                consequence="pr_patrol.author_logins — the patrol only touches PRs from these logins; blank patrols everyone"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[pr_patrol_author_logins]"
+                    value={pr_patrol_author_logins_text(@workspace)}
+                    placeholder="alice, bob"
+                    size="sm"
+                    class="w-[220px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.setting_row
-              name="Our forge login"
-              consequence="review_patrol.our_login — how the patrol tells its own review threads from everyone else's"
-            >
-              <:control>
-                <Forms.input
-                  name="config[review_patrol_our_login]"
-                  value={cfg(@workspace, ["review_patrol", "our_login"], "")}
-                  placeholder="arbiter-bot"
-                  size="sm"
-                  class="w-[180px]"
-                />
-              </:control>
-            </.setting_row>
+              <.setting_row
+                name="Our forge login"
+                consequence="review_patrol.our_login — how the patrol tells its own review threads from everyone else's"
+              >
+                <:control>
+                  <Forms.input
+                    name="config[review_patrol_our_login]"
+                    value={cfg(@workspace, ["review_patrol", "our_login"], "")}
+                    placeholder="arbiter-bot"
+                    size="sm"
+                    class="w-[180px]"
+                  />
+                </:control>
+              </.setting_row>
 
-            <.toggle_row
-              name="Resolve addressed bot review threads"
-              consequence="pr_patrol.resolve_bot_threads — the patrol closes a bot thread once the worker has answered it"
-              field="config[pr_patrol_resolve_bot_threads]"
-              checked={Workspace.pr_patrol_resolve_bot_threads?(@workspace)}
-            />
+              <.toggle_row
+                name="Resolve addressed bot review threads"
+                consequence="pr_patrol.resolve_bot_threads — the patrol closes a bot thread once the worker has answered it"
+                field="config[pr_patrol_resolve_bot_threads]"
+                checked={Workspace.pr_patrol_resolve_bot_threads?(@workspace)}
+              />
 
-            <.toggle_row
-              name="Resolve addressed human review threads"
-              consequence="pr_patrol.resolve_human_threads — the patrol closes a human thread once the worker has answered it"
-              field="config[pr_patrol_resolve_human_threads]"
-              checked={Workspace.pr_patrol_resolve_human_threads?(@workspace)}
-            />
+              <.toggle_row
+                name="Resolve addressed human review threads"
+                consequence="pr_patrol.resolve_human_threads — the patrol closes a human thread once the worker has answered it"
+                field="config[pr_patrol_resolve_human_threads]"
+                checked={Workspace.pr_patrol_resolve_human_threads?(@workspace)}
+              />
+            </.mobile_group>
           </.rows>
 
           <div class="mt-3 flex items-center gap-3">

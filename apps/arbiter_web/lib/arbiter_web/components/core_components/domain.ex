@@ -120,8 +120,9 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :stack_on_mobile, :boolean,
     default: false,
     doc:
-      "stack the title above the actions below `sm` and let the actions slot wrap (bd-39kw9e, Usage page only) — " <>
-        "every other index page keeps the original fixed row layout unless it opts in"
+      "stack the title above the actions below `sm` and let the actions slot wrap " <>
+        "(bd-39kw9e Usage page, bd-9inpfa Sessions page) — every other index page " <>
+        "keeps the original fixed row layout unless it opts in"
 
   attr :rest, :global
 
@@ -133,7 +134,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       class={[
         "flex gap-4",
         if(@stack_on_mobile,
-          do: "flex-col sm:flex-row sm:items-start sm:justify-between",
+          do: "flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4",
           else: "items-start justify-between"
         ),
         @class
