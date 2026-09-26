@@ -7,6 +7,8 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
   """
   use Arbiter.DataCase, async: false
 
+  import Ecto.Query
+
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.GoogleQuota
   alias Arbiter.Tasks.Workspace
@@ -160,6 +162,41 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       assert CloudCode.serialize_latest(quota_account_id!(ws.id, "antigravity"), "antigravity")[
                "message"
              ] == degraded_row.message
+    end
+
+    test "a degraded fetch that preserves last-good figures also keeps the prior captured_at" do
+      ws = workspace!()
+
+      body =
+        agy_usage_body([
+          %{
+            "name" => "Gemini Models",
+            "buckets" => [
+              %{"window" => "weekly", "remaining_fraction" => 0.25, "reset_time" => "1782250684"}
+            ]
+          }
+        ])
+
+      assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:ok, body}))
+      good_row = CloudCode.latest(quota_account_id!(ws.id, "antigravity"), "antigravity")
+
+      # Backdate the good row's `captured_at` so a later same-second refresh
+      # can't accidentally pass this assertion by coincidence.
+      backdated = DateTime.add(good_row.captured_at, -3_600, :second)
+
+      {1, nil} =
+        Arbiter.Repo.update_all(
+          from(q in Arbiter.Quota.GoogleQuota, where: q.id == ^good_row.id),
+          set: [captured_at: backdated]
+        )
+
+      # bd-au2xhz: a degraded fetch (e.g. a timeout) with no new model data
+      # must not stamp `captured_at` with `utc_now()` — that would make stale
+      # figures look freshly captured to the Gate/Providers page/`arb quota`.
+      assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:error, :timeout}))
+      degraded_row = CloudCode.latest(quota_account_id!(ws.id, "antigravity"), "antigravity")
+
+      assert degraded_row.captured_at == backdated
     end
   end
 

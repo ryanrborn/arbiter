@@ -143,7 +143,11 @@ defmodule Arbiter.Quota.CloudCode do
   # remaining quota directly from whatever credential `agy` itself holds
   # (bd-d7hmqn), replacing the old stored-token HTTP call entirely.
   @agy_usage_args ["--output-format", "json", "--print", "/usage"]
-  @default_agy_usage_timeout_ms 8_000
+  # Matches `Quota.await_snapshot/1`'s 20s wait on the on-demand path
+  # (`quota.ex:~659`) — bd-au2xhz raised this from 8s after measuring p99
+  # real `/usage` latency at 7.7s, which left ~8% of probe runs racing the
+  # old deadline.
+  @default_agy_usage_timeout_ms 20_000
 
   # Same rationale as the old liveness-probe cache this replaces: the `agy`
   # binary is large (~199 MB) and backgrounds its own language server, so
@@ -258,7 +262,7 @@ defmodule Arbiter.Quota.CloudCode do
 
     * `:agy_cmd` — override the `agy` executable name/path (default `"agy"`, resolved via `System.find_executable/1`)
     * `:agy_usage_probe` — override the subprocess call with a 0-arity fun returning `{:ok, decoded_json} | {:error, reason}` (tests)
-    * `:agy_probe_timeout` — max time to wait on the `agy` subprocess, ms (default 8000)
+    * `:agy_probe_timeout` — max time to wait on the `agy` subprocess, ms (default 20000)
     * `:agy_usage_cache_ttl_ms` — override the memoization TTL (tests; default 60000)
   """
   @spec antigravity(keyword()) :: snapshot()
@@ -395,10 +399,12 @@ defmodule Arbiter.Quota.CloudCode do
   defp fetch_snapshot(:antigravity, opts), do: antigravity(opts)
 
   defp upsert(account_id, provider, snapshot) do
-    {used_percent, reset_at, stored_snapshot} =
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    {used_percent, reset_at, stored_snapshot, captured_at} =
       case representative(snapshot) do
-        {nil, nil} -> preserve_last_good(account_id, provider, snapshot)
-        {used_percent, reset_at} -> {used_percent, reset_at, stringify(snapshot)}
+        {nil, nil} -> preserve_last_good(account_id, provider, snapshot, now)
+        {used_percent, reset_at} -> {used_percent, reset_at, stringify(snapshot), now}
       end
 
     attrs = %{
@@ -409,7 +415,7 @@ defmodule Arbiter.Quota.CloudCode do
       used_percent: used_percent,
       reset_at: reset_at,
       snapshot: stored_snapshot,
-      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      captured_at: captured_at
     }
 
     GoogleQuota
@@ -419,14 +425,19 @@ defmodule Arbiter.Quota.CloudCode do
 
   # A snapshot with no model data (a transient API error, or the "agy is live
   # but we hold no readable token" liveness-only status) must not clobber the
-  # last good reading's figures — but its `message`/`plan`/`captured_at` must
-  # still land in the stored `snapshot` column, since that's what
-  # `serialize_latest/2` (and therefore `arb quota`/the MCP quota tool) reads
-  # back verbatim. Falls back to writing the empty snapshot as-is when there
-  # is no previous row to preserve.
-  defp preserve_last_good(account_id, provider, snapshot) do
+  # last good reading's figures — but its `message`/`plan`/`captured_at` (the
+  # JSON `snapshot` column's own copy) must still land in the stored
+  # `snapshot` column, since that's what `serialize_latest/2` (and therefore
+  # `arb quota`/the MCP quota tool) reads back verbatim. The row's own
+  # `captured_at` **column** (bd-au2xhz) is a different story: it's what
+  # `Gate.stale?/1` and the Providers page use to judge freshness, so a
+  # degraded fetch must keep the *previous* row's value rather than stamping
+  # `now` over it — otherwise a transient timeout makes stale figures look
+  # freshly captured. Falls back to writing the empty snapshot as-is (with
+  # `now`) when there is no previous row to preserve.
+  defp preserve_last_good(account_id, provider, snapshot, now) do
     case latest(account_id, provider) do
-      %GoogleQuota{used_percent: used_percent, reset_at: reset_at, snapshot: prior}
+      %GoogleQuota{used_percent: used_percent, reset_at: reset_at, snapshot: prior} = row
       when not is_nil(prior) ->
         merged =
           Map.merge(
@@ -438,10 +449,10 @@ defmodule Arbiter.Quota.CloudCode do
             })
           )
 
-        {used_percent, reset_at, merged}
+        {used_percent, reset_at, merged, row.captured_at}
 
       _ ->
-        {nil, nil, stringify(snapshot)}
+        {nil, nil, stringify(snapshot), now}
     end
   end
 
@@ -777,6 +788,7 @@ defmodule Arbiter.Quota.CloudCode do
     timeout = Keyword.get(opts, :agy_probe_timeout, @default_agy_usage_timeout_ms)
     timeout_s = max(1, ceil(timeout / 1000))
     tmp = agy_usage_tmp_path()
+    started_at = System.monotonic_time(:millisecond)
 
     task =
       Task.async(fn ->
@@ -802,10 +814,12 @@ defmodule Arbiter.Quota.CloudCode do
 
           # `timeout -k 1` kills with SIGTERM at the deadline and SIGKILL a
           # second later; either way the shell reports 124/137 for a
-          # subprocess that overran, not an auth failure. Without this clause
-          # a merely-slow `agy` gets reported as "not authenticated".
+          # subprocess that overran, not an auth failure. Most of these
+          # (bd-au2xhz measured 53/117) are `agy` finishing `/usage` and then
+          # lingering — the temp file already holds a real, parseable
+          # reading, so read it before treating this as a timeout.
           {:ok, {_out, status}} when status in [124, 137] ->
-            {:error, :timeout}
+            agy_killed_outcome(tmp, started_at)
 
           {:ok, {_out, status}} ->
             {:error, {:exit, status}}
@@ -815,13 +829,26 @@ defmodule Arbiter.Quota.CloudCode do
 
           nil ->
             Task.shutdown(task, :brutal_kill)
-            {:error, :timeout}
+            log_agy_timeout(started_at)
         end
       after
         File.rm_rf(agy_usage_tmp_dir(tmp))
       end
 
     outcome
+  end
+
+  defp agy_killed_outcome(tmp, started_at) do
+    case read_agy_usage_output(tmp) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, :malformed} -> log_agy_timeout(started_at)
+    end
+  end
+
+  defp log_agy_timeout(started_at) do
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+    Logger.warning("Arbiter.Quota.CloudCode: agy usage probe timed out after #{elapsed_ms}ms")
+    {:error, :timeout}
   end
 
   # A private, unpredictably-named directory (not just a file) so the shell's
