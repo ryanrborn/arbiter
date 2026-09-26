@@ -557,6 +557,35 @@ defmodule Arbiter.Tasks.Issue do
         end)
       end
     end
+
+    # Inverse of `:promote_to_ready` — move a card from Ready back to Backlog.
+    #
+    # bd-a1bmyx: refinement is complete but the task was returned — move it back
+    # to Backlog so it can be re-refined if needed. The same reasons apply as
+    # `:promote_to_ready`: a named action (not a generic update), idempotent
+    # (demoting an already-backlog card is a no-op), and orthogonal to status.
+    #
+    # Refuses if the task has a live worker (demoting would orphan it) or if it
+    # is in a state where demotion is unsafe (in_progress, awaiting_verification,
+    # closed). Only undispatched/open tasks can be safely demoted.
+    update :return_to_backlog do
+      require_atomic? false
+
+      change {Arbiter.Tasks.Issue.Changes.GuardDemote, []}
+      change set_attribute(:refined, false)
+
+      # Broadcast the demotion event, same pattern as `:promote_to_ready`.
+      change fn changeset, _context ->
+        Ash.Changeset.after_transaction(changeset, fn
+          _changeset, {:ok, issue} ->
+            Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+            {:ok, issue}
+
+          _changeset, error ->
+            error
+        end)
+      end
+    end
   end
 
   @doc false

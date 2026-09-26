@@ -1959,6 +1959,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_reopen(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_verify(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_promote(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_demote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task

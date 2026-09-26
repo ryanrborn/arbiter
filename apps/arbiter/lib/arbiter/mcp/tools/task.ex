@@ -453,6 +453,34 @@ defmodule Arbiter.MCP.Tools.Task do
 
   defp with_promotion_note(result, %Scope{}), do: result
 
+  # ---- task_demote --------------------------------------------------------
+
+  @doc """
+  Move a task from Ready (refined: true) back to Backlog (refined: false).
+  Inverse of `task_promote`. Coordinator only, and idempotent.
+
+  A task can only be demoted if:
+  1. It has no live worker
+  2. Its status is :open (undispatched / not yet started)
+
+  Refuses if the task is in progress, awaiting verification, or closed.
+  """
+  @spec task_demote(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_demote(%Scope{} = scope, args) do
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id) do
+      case Ash.update(issue, %{}, action: :return_to_backlog) do
+        {:ok, demoted} ->
+          {:ok, Tools.serialize_task_summary(demoted)}
+
+        {:error, err} ->
+          {:error, {:invalid, Tools.ash_error_message(err)}}
+      end
+    end
+  end
+
   # ---- task_sync_upstream_close --------------------------------------------
 
   @doc """

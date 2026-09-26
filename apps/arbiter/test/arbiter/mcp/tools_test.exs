@@ -1786,6 +1786,67 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "task_demote/2" do
+    test "a coordinator demotes a task from Ready to Backlog", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      {:ok, task} = Ash.get(Issue, ctx.task.id)
+      assert task.refined == true
+
+      assert {:ok, data} = Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.refined == false
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.refined == false
+    end
+
+    test "demoting an already-backlog task is a no-op success", ctx do
+      assert ctx.task.refined == false
+
+      assert {:ok, data} = Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.refined == false
+    end
+
+    test "cannot demote a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dem-other", prefix: "dmo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => foreign.id})
+    end
+
+    test "refuses to demote a task with a live worker", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+
+      # Simulate a live worker by registering it in the Worker.Registry
+      {:ok, _} = Registry.register(Arbiter.Worker.Registry, ctx.task.id, nil)
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "live worker" or message =~ "worker"
+    end
+
+    test "refuses to demote a task that is in_progress", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress}, action: :update)
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "in progress" or message =~ "in_progress"
+    end
+
+    test "refuses to demote a task that is awaiting_verification", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :await_verification)
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "awaiting verification" or message =~ "awaiting_verification"
+    end
+  end
+
   describe "notify_list/2" do
     test "lists recent notifications scoped to the workspace (both tiers)", ctx do
       {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})
