@@ -459,7 +459,7 @@ defmodule ArbiterWeb.SessionIndexLive do
                 {short_id(session.id)}
               </span>
 
-              <span class="text-[12px] text-[var(--text-secondary)] truncate max-w-[26rem]">
+              <span class="text-[12px] text-[var(--text-secondary)] truncate max-w-full sm:max-w-[26rem]">
                 {session.cwd}
               </span>
 

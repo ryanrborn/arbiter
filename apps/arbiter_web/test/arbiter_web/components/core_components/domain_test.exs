@@ -92,6 +92,21 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
 
       assert html =~ "max-w-[var(--measure-prose)]"
     end
+
+    test "stacks title above actions on mobile, sits side-by-side from sm: up" do
+      assigns = %{}
+
+      html =
+        rendered_to_string(~H"""
+        <ArbiterWeb.CoreComponents.Domain.index_header title="Sessions">
+          <:actions><button>Launch session</button></:actions>
+        </ArbiterWeb.CoreComponents.Domain.index_header>
+        """)
+
+      assert html =~ "flex-col"
+      assert html =~ "sm:flex-row"
+      assert html =~ "Launch session"
+    end
   end
 
   describe "task_card/1" do

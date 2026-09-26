@@ -204,6 +204,19 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       assert second == [older.id]
     end
 
+    test "the cwd label never forces horizontal scroll on a phone-width viewport", %{conn: conn} do
+      launch!()
+
+      {:ok, _view, html} = live(conn, ~p"/sessions")
+
+      # A bare `max-w-[26rem]` (416px) is wider than a 375px viewport minus
+      # padding, and a flex item with no shrink basis holds that width even
+      # while wrapping onto its own line — capping it to the full row width
+      # on mobile and only widening to 26rem from sm: up keeps every row
+      # inside the viewport.
+      assert html =~ "max-w-full sm:max-w-[26rem]"
+    end
+
     test "shows the resolved display name, and the id stays reachable (bd-o2vtsz)", %{conn: conn} do
       named = launch!(name: "refinement session")
       unnamed = launch!()

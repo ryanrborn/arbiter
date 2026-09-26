@@ -93,6 +93,43 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
     end
   end
 
+  describe "mobile layout" do
+    test "the rail+body grid collapses to a single column below sm:", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert html =~ "grid-cols-1"
+      assert html =~ "sm:grid-cols-[168px_minmax(0,1fr)]"
+    end
+
+    test "the section rail scrolls horizontally as a tab strip on mobile", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      [rail] = Regex.run(~r/<nav id="ws-rail"[^>]*class="([^"]*)"/, html, capture: :all_but_first)
+
+      assert rail =~ "flex-row"
+      assert rail =~ "overflow-x-auto"
+      assert rail =~ "sm:flex-col"
+    end
+
+    test "the Policy pane's long settings list groups under disclosure headings, open by default",
+         %{
+           conn: conn
+         } do
+      ws = new_workspace()
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert html =~ ~s(<details open)
+      assert html =~ "Tracker, merge &amp; routing"
+      assert html =~ "Quotas &amp; concurrency"
+      # every setting row this screen has always shown must still be present,
+      # just now nested under a group heading
+      assert html =~ ~s(data-setting-row="Tracker type")
+      assert html =~ ~s(data-setting-row="Max concurrent workers")
+    end
+  end
+
   describe "consequence copy" do
     test "every setting row states what changing it does", %{conn: conn} do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "github"}}})

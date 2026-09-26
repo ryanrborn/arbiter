@@ -292,11 +292,11 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
           </:actions>
         </Domain.index_header>
 
-        <div class="grid min-h-[400px] grid-cols-[168px_minmax(0,1fr)] overflow-hidden rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]">
+        <div class="grid min-h-[400px] grid-cols-1 sm:grid-cols-[168px_minmax(0,1fr)] overflow-hidden rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]">
           <nav
             id="ws-rail"
             aria-label="Workspace settings"
-            class="flex flex-col gap-px border-r border-solid border-[var(--border-default)] py-[14px]"
+            class="flex flex-row gap-px overflow-x-auto border-b border-solid border-[var(--border-default)] py-[6px] sm:flex-col sm:overflow-x-visible sm:border-b-0 sm:border-r sm:py-[14px]"
           >
             <button
               :for={{slug, label} <- @sections}
@@ -305,7 +305,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               phx-value-section={slug}
               aria-selected={to_string(@section == slug)}
               class={[
-                "cursor-pointer border-l-[var(--border-accent-width)] border-solid px-[14px] py-[7px] text-left",
+                "flex-shrink-0 cursor-pointer whitespace-nowrap border-b-[var(--border-accent-width)] border-solid px-[14px] py-[7px] text-left",
+                "sm:border-b-0 sm:border-l-[var(--border-accent-width)]",
                 "font-[family-name:var(--font-sans)] text-[11.5px] leading-[1.3]",
                 @section == slug &&
                   "border-[var(--accent-primary)] bg-[var(--arb-raised)] font-medium text-[var(--text-title)]",
@@ -317,7 +318,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
             </button>
           </nav>
 
-          <div class="flex min-w-0 flex-col gap-4 px-[18px] pt-[18px] pb-[24px]">
+          <div class="flex min-w-0 flex-col gap-5 px-3 pt-4 pb-5 sm:gap-4 sm:px-[18px] sm:pt-[18px] sm:pb-[24px]">
             <%!-- Every header stays in the DOM alongside its pane, so the one
                  on screen is always the one the rail has selected. --%>
             <.section_header
