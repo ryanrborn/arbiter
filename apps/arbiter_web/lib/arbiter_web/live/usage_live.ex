@@ -324,7 +324,7 @@ defmodule ArbiterWeb.UsageLive do
           subtitle={"Actual spend over the #{since_label(@range)} from the usage ledger. Rework is the number to watch — extra sessions on one task."}
         >
           <:actions>
-            <div class="flex items-center gap-3">
+            <div class="flex flex-wrap items-center gap-3">
               <.segmented_control options={~w(7d 30d all)} value={@range} event="range" />
               <Feedback.live_badge id="usage-live" live={@live} />
             </div>

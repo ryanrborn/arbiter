@@ -122,7 +122,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
 
   def index_header(assigns) do
     ~H"""
-    <div class={["flex items-start justify-between gap-4", @class]} {@rest}>
+    <div class={["flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4", @class]} {@rest}>
       <div class="min-w-0">
         <h1 class="flex items-center gap-[9px] m-0 font-semibold text-[24px] leading-[1.2] tracking-[var(--tracking-section)] text-[var(--text-title)]">
           <ArbiterWeb.CoreComponents.Core.icon
@@ -146,7 +146,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           {@subtitle}
         </p>
       </div>
-      <div :if={@actions != []} class="flex items-center gap-2 min-w-0">
+      <div :if={@actions != []} class="flex flex-wrap items-center gap-2 min-w-0">
         {render_slot(@actions)}
       </div>
     </div>
