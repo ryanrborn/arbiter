@@ -107,6 +107,11 @@ defmodule Arbiter.Usage.Event do
     create :create do
       primary? true
 
+      change after_action(fn _changeset, record, _context ->
+               Arbiter.Quota.SpendCache.invalidate()
+               {:ok, record}
+             end)
+
       accept [
         :task_id,
         :source,
@@ -163,6 +168,11 @@ defmodule Arbiter.Usage.Event do
     # sessions together.
     update :refresh_snapshot do
       require_atomic? false
+
+      change after_action(fn _changeset, record, _context ->
+               Arbiter.Quota.SpendCache.invalidate()
+               {:ok, record}
+             end)
 
       accept [
         :workspace_id,

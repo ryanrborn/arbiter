@@ -50,14 +50,23 @@ defmodule Arbiter.Usage do
 
   use Ash.Domain
 
+  import Ecto.Query
+
+  alias Arbiter.Repo
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
+  alias Arbiter.Usage.LedgerRow
   require Ash.Query
 
   resources do
     resource Arbiter.Usage.Event
   end
+
+  # Trailing window `spend_by_account/1` and `spend_by_workspace/1` default
+  # to when no `since` is given — mirrors `Arbiter.Quota`'s own 30-day cost
+  # window (`@cost_window_days`), which is the sole caller of the default.
+  @spend_window_days 30
 
   @type group_by ::
           :day
@@ -174,6 +183,65 @@ defmodule Arbiter.Usage do
        |> sort_rollups(by)
        |> maybe_limit(opts)}
     end
+  end
+
+  @doc """
+  Every provider account's 30-day spend, in one grouped SQL aggregate —
+  `SELECT provider_account_id, provider, SUM(cost_usd) ... GROUP BY
+  provider_account_id, provider`, `since` filtered — rather than a scan per
+  account (bd-4p6pw7). Rows with no `provider_account_id` or no `cost_usd`
+  don't contribute a group, same as `summarize/1`'s cost rollups.
+
+  Returns `%{provider_account_id => %{ledger_provider => total_cost_usd}}`.
+  `Arbiter.Quota.SpendCache` is the memoized front door most callers should
+  use instead of calling this directly on every request.
+  """
+  @spec spend_by_account(DateTime.t()) :: %{
+          optional(String.t()) => %{optional(String.t()) => float()}
+        }
+  def spend_by_account(since \\ default_spend_since()) do
+    from(e in LedgerRow,
+      where: e.occurred_at >= ^since,
+      where: not is_nil(e.provider_account_id),
+      where: not is_nil(e.cost_usd),
+      group_by: [e.provider_account_id, e.provider],
+      select: {e.provider_account_id, e.provider, sum(e.cost_usd)}
+    )
+    |> Repo.all()
+    |> group_totals()
+  end
+
+  @doc """
+  Every workspace's 30-day spend, in one grouped SQL aggregate — the
+  `workspace_id` mirror of `spend_by_account/1`. Rows with no `workspace_id`
+  (a probe/pre-flight row) don't contribute a group, same as
+  `Arbiter.Quota.workspace_spend/1` always did.
+
+  Returns `%{workspace_id => %{ledger_provider => total_cost_usd}}`.
+  """
+  @spec spend_by_workspace(DateTime.t()) :: %{
+          optional(String.t()) => %{optional(String.t()) => float()}
+        }
+  def spend_by_workspace(since \\ default_spend_since()) do
+    from(e in LedgerRow,
+      where: e.occurred_at >= ^since,
+      where: not is_nil(e.workspace_id),
+      where: not is_nil(e.cost_usd),
+      group_by: [e.workspace_id, e.provider],
+      select: {e.workspace_id, e.provider, sum(e.cost_usd)}
+    )
+    |> Repo.all()
+    |> group_totals()
+  end
+
+  defp group_totals(rows) do
+    Enum.reduce(rows, %{}, fn {key, provider, total}, acc ->
+      Map.update(acc, key, %{provider => total}, &Map.put(&1, provider, total))
+    end)
+  end
+
+  defp default_spend_since do
+    DateTime.add(DateTime.utc_now(), -@spend_window_days * 86_400, :second)
   end
 
   # Providers that record `usage_events` rows for internal bookkeeping (e.g.

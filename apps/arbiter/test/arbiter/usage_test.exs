@@ -1394,4 +1394,56 @@ defmodule Arbiter.UsageTest do
       assert is_integer(ev.duration_ms), "wall-clock duration should be set"
     end
   end
+
+  describe "spend_by_account/1 and spend_by_workspace/1 (bd-4p6pw7)" do
+    test "groups cost by provider_account_id and provider in one aggregate" do
+      account_a = Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "a"})
+      account_b = Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "b"})
+
+      create_event!(%{provider: "claude", provider_account_id: account_a.id, cost_usd: 1.0})
+      create_event!(%{provider: "claude", provider_account_id: account_a.id, cost_usd: 2.5})
+      create_event!(%{provider: "openai", provider_account_id: account_a.id, cost_usd: 4.0})
+      create_event!(%{provider: "claude", provider_account_id: account_b.id, cost_usd: 9.0})
+
+      totals = Usage.spend_by_account()
+
+      assert_in_delta totals[account_a.id]["claude"], 3.5, 0.0001
+      assert_in_delta totals[account_a.id]["openai"], 4.0, 0.0001
+      assert_in_delta totals[account_b.id]["claude"], 9.0, 0.0001
+    end
+
+    test "groups cost by workspace_id and provider in one aggregate" do
+      create_event!(%{provider: "claude", workspace_id: "ws-spend-a", cost_usd: 1.25})
+      create_event!(%{provider: "claude", workspace_id: "ws-spend-a", cost_usd: 0.75})
+      create_event!(%{provider: "claude", workspace_id: "ws-spend-b", cost_usd: 5.0})
+
+      totals = Usage.spend_by_workspace()
+
+      assert_in_delta totals["ws-spend-a"]["claude"], 2.0, 0.0001
+      assert_in_delta totals["ws-spend-b"]["claude"], 5.0, 0.0001
+    end
+
+    test "drops rows with no cost_usd, no provider_account_id, or no workspace_id" do
+      create_event!(%{provider: "claude", cost_usd: nil, workspace_id: "ws-spend-nil-cost"})
+      create_event!(%{provider: "claude", cost_usd: 1.0, workspace_id: nil})
+
+      refute Map.has_key?(Usage.spend_by_workspace(), "ws-spend-nil-cost")
+      assert Usage.spend_by_account() == %{}
+    end
+
+    test "excludes rows older than `since`" do
+      account = Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "old"})
+      old = DateTime.add(DateTime.utc_now(), -40 * 86_400, :second)
+
+      create_event!(%{
+        provider: "claude",
+        provider_account_id: account.id,
+        cost_usd: 3.0,
+        occurred_at: old
+      })
+
+      since = DateTime.add(DateTime.utc_now(), -30 * 86_400, :second)
+      assert Usage.spend_by_account(since) == %{}
+    end
+  end
 end

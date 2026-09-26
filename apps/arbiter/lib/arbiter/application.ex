@@ -197,6 +197,10 @@ defmodule Arbiter.Application do
       # intents drain.
       {Task.Supervisor, name: Arbiter.Quota.CloudProbeSupervisor},
       Arbiter.Quota.CloudProbe,
+      # Owns the ETS table `Arbiter.Quota.provider_spend/1` and
+      # `workspace_spend/1` read their memoized 30-day ledger aggregates
+      # from (bd-4p6pw7) — see that module's docs.
+      Arbiter.Quota.SpendCache,
       # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
       # install opts in with `config :arbiter, :board_autopilot, enabled: true`
       # — auto-dispatch spends money, so an upgrade must not discover it by

@@ -79,7 +79,10 @@ defmodule ArbiterWeb.LiveHooks do
 
   require Logger
 
-  # Providers hidden from the UI pending fix; see module docstring for context.
+  # Providers hidden from the UI pending fix; see module docstring for
+  # context. Canonically `Arbiter.Quota.hidden_providers/0` (bd-4p6pw7): a
+  # module attribute can't call a function, so this is asserted equal to it
+  # in a test rather than duplicated by hand going stale.
   @hidden_providers ["codex", "gemini_cli"]
 
   @coordinator_ref Message.coordinator_ref()
@@ -123,7 +126,11 @@ defmodule ArbiterWeb.LiveHooks do
   def on_mount(:quota, _params, _session, socket) do
     case Arbiter.Quota.default_workspace_id() do
       {:ok, ws_id} ->
-        quotas = Arbiter.Quota.list_latest_for_workspace(ws_id) |> filter_hidden_providers()
+        # `:exclude_providers` drops a hidden provider's view before it's
+        # decorated with spend (bd-4p6pw7), rather than filtering the fully
+        # decorated list after the fact.
+        quotas =
+          Arbiter.Quota.list_latest_for_workspace(ws_id, exclude_providers: @hidden_providers)
 
         socket =
           socket
@@ -283,10 +290,5 @@ defmodule ArbiterWeb.LiveHooks do
       nil -> Map.put(incoming, key, Map.get(existing, key))
       _ -> incoming
     end
-  end
-
-  # Filter out providers marked as hidden from the UI.
-  defp filter_hidden_providers(quotas) do
-    Enum.reject(quotas, &(&1.provider in @hidden_providers))
   end
 end
