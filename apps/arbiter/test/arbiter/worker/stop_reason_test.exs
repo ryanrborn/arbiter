@@ -38,6 +38,49 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — a worker's own tool output does not fake auth death (bd-35ujxv)" do
+    # bd-4420va, 2026-09-25 20:58Z: a worker whose task IS Arbiter ran `mix
+    # test`, which logs fixture scenarios containing this exact wording
+    # verbatim. The worker's session ended normally, but Arbiter classified
+    # the run as `:auth_expired` from this Bash tool-result text alone,
+    # reopened the task, and counted toward the fleet-wide Claude AuthHold.
+    test "mix test's own CredentialWatchdog/AuthHold fixture output, as a tagged tool result, is not auth_expired" do
+      output_lines = [
+        "reading claude_session.ex",
+        "⏵ Bash(mix test test/arbiter/agents/credential_watchdog_test.exs)",
+        "⏴ tool result",
+        "⏴ 16:58:04.769 [warning] CredentialWatchdog: Claude credentials expired " <>
+          "(detected via worker report) — 2 consecutive Claude worker(s) died on auth — " <>
+          "... (last: API Error: 401 Invalid authentication credentials)",
+        "⏴ 16:58:04.770 [warning] AuthHold: Claude dispatch hold OPEN after 2 consecutive " <>
+          "auth death(s) — API Error: 401 Invalid authentication credentials",
+        "⏴ 16:54:57.055 [warning] Worker: worker for task=st-aztr4l stopped — " <>
+          "credentials expired (exit 1)",
+        "⏴ ..........",
+        "all tests passed"
+      ]
+
+      reason = StopReason.classify(0, output_lines)
+
+      refute reason.category == :auth_expired
+      # A clean exit with no genuine signature and no `arb done` sentinel
+      # tracked at this layer falls to the generic clean-exit category — the
+      # point being it is NOT mistaken for the worker's own credentials dying.
+      assert reason.category == :exited_without_done
+    end
+
+    test "an untagged (non-tool-result) auth signature in the same transcript still wins" do
+      output_lines = [
+        "⏴ tool result",
+        "⏴ (last: API Error: 401 Invalid authentication credentials)",
+        "API Error: 401 Invalid authentication credentials"
+      ]
+
+      reason = StopReason.classify(1, output_lines)
+      assert reason.category == :auth_expired
+    end
+  end
+
   describe "classify/2 — credit / rate limit" do
     test "insufficient credit balance" do
       reason = StopReason.classify(1, ["Your credit balance is too low to run this request."])

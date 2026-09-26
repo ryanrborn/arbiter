@@ -1491,6 +1491,16 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp assistant_block_lines(_block), do: []
 
   # Tool results are displayed (truncated) but never trip completion.
+  #
+  # bd-35ujxv: every body line, not just the "⏴ tool result"/"⏴ tool error"
+  # header, is tagged with the same glyph prefix. A worker's own `mix test`
+  # output (Bash tool results) routinely contains provider-error-shaped
+  # vocabulary verbatim — Arbiter's own fixtures log strings like "API Error:
+  # 401 Invalid authentication credentials" — and `Arbiter.Worker.StopReason`
+  # excludes glyph-tagged lines from its auth/quota/credit/rate-limit
+  # signature scan for exactly this reason. Before this, only the header line
+  # was tagged, so a multi-line tool result's *content* still looked like
+  # unattributed agent/CLI output to that scan.
   defp tool_result_lines(%{"type" => "tool_result"} = block) do
     label = if block["is_error"], do: "⏴ tool error", else: "⏴ tool result"
 
@@ -1501,6 +1511,7 @@ defmodule Arbiter.Worker.ClaudeSession do
       |> text_lines()
       |> Enum.reject(&(&1 == ""))
       |> truncate_lines(40)
+      |> Enum.map(&("⏴ " <> &1))
 
     Enum.map([label | lines], &{&1, false})
   end

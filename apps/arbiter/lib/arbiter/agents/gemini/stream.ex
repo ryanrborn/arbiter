@@ -196,6 +196,8 @@ defmodule Arbiter.Agents.Gemini.Stream do
     [{"⏵ #{name}(#{summarize_params(event["parameters"])})", false}]
   end
 
+  # bd-35ujxv: every body line, not just the header, is glyph-tagged — see the
+  # matching comment on `Arbiter.Worker.ClaudeSession.tool_result_lines/1`.
   def format_event(%{"type" => "tool_result"} = event) do
     label = if event["status"] == "error", do: "⏴ tool error", else: "⏴ tool result"
 
@@ -206,6 +208,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
       |> lines()
       |> Enum.reject(&(&1 == ""))
       |> truncate_lines(40)
+      |> Enum.map(&("⏴ " <> &1))
 
     Enum.map([label | body], &{&1, false})
   end
@@ -256,6 +259,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
       |> lines()
       |> Enum.reject(&(&1 == ""))
       |> truncate_lines(40)
+      |> Enum.map(&("⏴ " <> &1))
 
     Enum.map(["⏴ tool result" | body], &{&1, false})
   end
@@ -280,6 +284,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
       |> lines()
       |> Enum.reject(&(&1 == ""))
       |> truncate_lines(40)
+      |> Enum.map(&("⏴ " <> &1))
 
     Enum.map(["⏴ #{name} denied/failed" | body], &{&1, false})
   end

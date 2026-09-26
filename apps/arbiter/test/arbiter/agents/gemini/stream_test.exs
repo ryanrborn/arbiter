@@ -358,8 +358,11 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert {"⏴ tool result", false} in lines
       # agy's output carries the child shell's own \r\n; `lines/1` only
       # splits on \n (matching the existing Claude/gemini tool_result path),
-      # so the trailing \r rides along on the line — not stripped here.
-      assert {"hello-from-agy\r", false} in lines
+      # so the trailing \r rides along on the line — not stripped here. Every
+      # body line, not just the header, carries the "⏴ " tool-result glyph
+      # (bd-35ujxv) so `StopReason` can exclude tool output from its
+      # auth/quota/credit signature scan.
+      assert {"⏴ hello-from-agy\r", false} in lines
       assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
     end
 

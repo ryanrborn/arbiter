@@ -149,6 +149,21 @@ defmodule Arbiter.Worker.StopReason do
   They are intentionally broad: a false *refinement* (labelling a crash as
   rate-limited) is far cheaper than burying an auth-expiry as a generic
   failure.
+
+  bd-35ujxv: "broad" stops at tool-result content. A worker whose own task is
+  Arbiter itself routinely runs `mix test`, which logs fixture scenarios
+  containing this exact vocabulary verbatim ("API Error: 401 Invalid
+  authentication credentials", "AuthHold: Claude dispatch hold OPEN") — that
+  is the *worker's own Bash tool output*, not evidence its own session hit an
+  auth failure. A worker whose session otherwise ended normally was
+  misclassified `:auth_expired` from this, reopening its task and counting
+  toward the fleet-wide `AuthHold` streak. `signature_haystack/1` excludes
+  every line a display-line producer tagged as tool-result content (the "⏴ "
+  glyph prefix, applied to the header AND every body line) before any
+  signature regex below runs. A provider's *own* auth/quota/credit/rate-limit
+  failure is never reported as a tool result — it surfaces as the CLI's own
+  `result` event, assistant text, or raw stderr — so a genuine failure is
+  unaffected.
   """
 
   @typedoc "Classified stop category."
@@ -847,11 +862,34 @@ defmodule Arbiter.Worker.StopReason do
   # buffer from making the regex pass expensive.
   @tail_lines 80
 
+  # bd-35ujxv: a worker's own tool output (most commonly `mix test` run via
+  # Bash) routinely contains provider-error-shaped vocabulary verbatim —
+  # Arbiter's own test suite logs fixture strings like "API Error: 401
+  # Invalid authentication credentials" and "AuthHold: Claude dispatch hold
+  # OPEN" — which is not evidence the *worker's own* session hit that error.
+  # Every display-line producer (`ClaudeSession.tool_result_lines/1`,
+  # `Gemini.Stream`'s tool_result/step clauses, `Codex.Stream`'s
+  # exec_command_end/command_execution clauses) tags EVERY line of a tool
+  # result — header and body alike — with the "⏴ " glyph prefix, so those
+  # lines are excluded here before any signature regex runs.
+  # A provider's own auth/quota/credit/rate-limit/gateway failure is never
+  # reported as a tool result — it surfaces as the CLI's own `result` event,
+  # assistant text, or raw stderr, none of which carry this prefix — so a
+  # genuine failure is unaffected (see the "still classifies" tests in
+  # `stop_reason_test.exs`).
+  @tool_result_prefix "⏴ "
+
   defp signature_haystack(output_lines) do
     output_lines
+    |> Enum.reject(&tool_result_line?/1)
     |> Enum.take(-@tail_lines)
     |> Enum.join("\n")
   end
+
+  defp tool_result_line?(line) when is_binary(line),
+    do: String.starts_with?(line, @tool_result_prefix)
+
+  defp tool_result_line?(_line), do: false
 
   # bd-11abk2: an exec() failure (bad argv, E2BIG, missing binary) happens
   # before the child process runs, so it can produce no stdout/stderr at
