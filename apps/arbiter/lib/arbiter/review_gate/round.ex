@@ -28,7 +28,21 @@ defmodule Arbiter.ReviewGate.Round do
                           this specific pass (the synthetic reviewer/implementer
                           worker, not the author's run). Nil if it couldn't be
                           resolved.
-    * `round`          — 1-indexed revise-and-rediscuss round this pass belongs to.
+    * `round`          — 1-indexed revise-and-rediscuss round this pass belongs
+                          to, WITHIN its own `fix_round_attempt`. An automatic
+                          fix round (bd-a9zb7w) restarts a fresh ReviewGate that
+                          begins again at round 1, so `round` alone is not
+                          unique per task — see `fix_round_attempt`.
+    * `fix_round_attempt`
+                        — bd-6d3h8m: 0 for the original ReviewGate pass, N for
+                          the Nth automatic implementer fix round
+                          (`Arbiter.Worker.maybe_dispatch_fix_round/3`) that
+                          re-attached a fresh ReviewGate. `(fix_round_attempt,
+                          round)` together are unique per task/role/verdict
+                          pass; `review_gate_rounds_list` sorts on both so a
+                          task that went through a fix round reads as two
+                          consecutive passes instead of two interleaved
+                          round-1..3 sequences.
     * `role`           — `:review` (a reviewer pass) or `:impl` (an implementer
                           revise pass).
     * `verdict`        — `:approve`, `:request_changes` or `:timed_out` for a
@@ -153,6 +167,7 @@ defmodule Arbiter.ReviewGate.Round do
     custom_indexes do
       index [:task_id, :inserted_at]
       index [:task_id, :round]
+      index [:task_id, :fix_round_attempt, :round]
     end
   end
 
@@ -166,6 +181,7 @@ defmodule Arbiter.ReviewGate.Round do
         :task_id,
         :run_id,
         :round,
+        :fix_round_attempt,
         :role,
         :verdict,
         :findings,
@@ -204,6 +220,14 @@ defmodule Arbiter.ReviewGate.Round do
       allow_nil? false
       public? true
       constraints min: 1
+    end
+
+    attribute :fix_round_attempt, :integer do
+      allow_nil? false
+      public? true
+      default 0
+      constraints min: 0
+      description "0 for the original pass, N for the Nth automatic fix round. See moduledoc."
     end
 
     attribute :role, :atom do

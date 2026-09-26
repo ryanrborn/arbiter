@@ -44,8 +44,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       present, it must be a map whose `"min_incidents"` / `"min_distinct_tasks"`
       are positive integers (the loop-proposal evidence bar, bd-9j2g3x); if
       `"loop.ci"` is present it must be a map whose `"lint_share_threshold"` is
-      a number in (0, 1], `"min_fix_passes"` a positive integer and
-      `"check_commands"` a map of repo name → command string (bd-cuu8n3).
+      a number in (0, 1], `"min_fix_passes"` a positive integer,
+      `"check_commands"` a map of repo name → command string (bd-cuu8n3), and
+      `"flake_recurrence_threshold"` a positive integer (bd-6vullc).
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -409,6 +410,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_loop_fraction(Map.get(ci, "lint_share_threshold"), "loop.ci.lint_share_threshold")
     |> validate_positive_int(ci, "min_fix_passes", "loop.ci.min_fix_passes")
     |> validate_check_commands(Map.get(ci, "check_commands"))
+    |> validate_positive_int(
+      ci,
+      "flake_recurrence_threshold",
+      "loop.ci.flake_recurrence_threshold"
+    )
   end
 
   defp validate_loop_ci(changeset, _) do

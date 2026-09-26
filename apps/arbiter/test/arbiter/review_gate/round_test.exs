@@ -36,6 +36,19 @@ defmodule Arbiter.ReviewGate.RoundTest do
     assert %DateTime{} = round.inserted_at
   end
 
+  # bd-6d3h8m: defaults to 0 (the original pass) so every row written before
+  # this attribute existed, and every row a caller doesn't set it on, reads as
+  # "not a fix round" rather than nil/unknown.
+  test "fix_round_attempt defaults to 0" do
+    round = create!(%{verdict: :approve, converged: true})
+    assert round.fix_round_attempt == 0
+  end
+
+  test "fix_round_attempt records which automatic fix round's gate wrote the row" do
+    round = create!(%{fix_round_attempt: 2, verdict: :request_changes, converged: false})
+    assert round.fix_round_attempt == 2
+  end
+
   # bd-3xultf: the resolved tier is recorded alongside `reviewer_model` so
   # convergence analysis can segment by (and control for) the judge's tier —
   # a moving reviewer would otherwise read as a quality change.

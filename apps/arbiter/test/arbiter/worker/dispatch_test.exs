@@ -2586,6 +2586,45 @@ defmodule Arbiter.Worker.DispatchTest do
       assert prompt =~ "Fix the null guard."
     end
 
+    test "prefers the later fix round's findings even when its round number is lower (bd-6d3h8m)",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "fix pass task, fix round", workspace_id: ws.id})
+
+      # Pass 1 rejects at round 3 (fix_round_attempt 0). The automatic fix
+      # round resets numbering and pass 2 rejects again at round 1
+      # (fix_round_attempt 1) — the newer findings, but the lower round
+      # number. Sorting on `round` alone would surface pass 1's stale
+      # findings instead.
+      {:ok, _round1} =
+        Ash.create(Round, %{
+          task_id: task.id,
+          round: 3,
+          fix_round_attempt: 0,
+          role: :review,
+          verdict: :request_changes,
+          findings: "VERDICT: REQUEST_CHANGES\n\nStale pass-1 finding.",
+          finding_count: 1,
+          converged: false
+        })
+
+      {:ok, _round2} =
+        Ash.create(Round, %{
+          task_id: task.id,
+          round: 1,
+          fix_round_attempt: 1,
+          role: :review,
+          verdict: :request_changes,
+          findings: "VERDICT: REQUEST_CHANGES\n\nFresh pass-2 finding.",
+          finding_count: 1,
+          converged: false
+        })
+
+      prompt = Dispatch.prompt_for_task(task, [])
+
+      assert prompt =~ "Fresh pass-2 finding."
+      refute prompt =~ "Stale pass-1 finding."
+    end
+
     test "omits prior review findings section when task has no ReviewGate rounds", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "fresh task", workspace_id: ws.id})
 

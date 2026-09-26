@@ -173,6 +173,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OutputLog
@@ -722,6 +723,13 @@ defmodule Arbiter.Worker.ReviewGate do
       # implementer addresses findings between rounds.
       phase: :reviewing,
       round: 1,
+      # bd-6d3h8m: 0 for the original pass, N when this gate was spawned by the
+      # Nth automatic implementer fix round (`Worker.maybe_dispatch_fix_round/3`
+      # forwards `meta[:review_gate_fix_round_attempts]` through
+      # `spawn_review_gate/2`). `round` restarts at 1 on every fresh gate, so
+      # this is what keeps `record_round/5`'s rows distinguishable across a fix
+      # round instead of reading as a duplicate round 1..N.
+      fix_round_attempt: Keyword.get(opts, :fix_round_attempt, 0),
       # The implementer<->reviewer thread, oldest-first. Each entry:
       # %{round:, role: :reviewer | :implementer | :system, subject:, body:}.
       # Mirrors the durable mailbox rows; the source for the escalation payload.
@@ -1815,13 +1823,24 @@ defmodule Arbiter.Worker.ReviewGate do
   # the question back to the same provider: on bd-aro53b the fix round swapped
   # a true citation for an unverified one and uploaded mockup "screenshots" to
   # catbox.moe to satisfy the reviewer.
+  #
+  # bd-6d3h8m: likewise, a round whose EVERY `[NOT MET]` criterion the reviewer
+  # tagged as needing coordinator/operator action ends the loop here too —
+  # another revise round cannot make progress on something the reviewer
+  # already said an implementer can't fix (bd-28t80i's AC3, verifiable only
+  # post-deploy, repeated across 6 review rounds before this rule existed).
   defp route_after_reject(state, findings) do
     state = accumulate_open_findings(state, findings)
 
-    if EvidenceIntegrity.flagged?(findings) do
-      escalate_fabricated_evidence(state, findings)
-    else
-      do_route_after_reject(state, findings)
+    cond do
+      EvidenceIntegrity.flagged?(findings) ->
+        escalate_fabricated_evidence(state, findings)
+
+      CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings) ->
+        escalate_coordinator_only(state, findings)
+
+      true ->
+        do_route_after_reject(state, findings)
     end
   end
 
@@ -1839,6 +1858,21 @@ defmodule Arbiter.Worker.ReviewGate do
     )
 
     payload = EvidenceIntegrity.escalation_findings(findings, escalation_payload(state))
+    {:done, finish(state, {:request_changes, payload})}
+  end
+
+  # Reported as a plain `:request_changes` with `CoordinatorOnlyFindings.marker/0`
+  # leading the findings, mirroring `escalate_fabricated_evidence/2` above. That
+  # marker is what makes `Arbiter.Worker` skip its own automatic fix round too.
+  defp escalate_coordinator_only(state, findings) do
+    state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} every unmet criterion needs " <>
+        "coordinator/operator action; escalating instead of a revise round"
+    )
+
+    payload = CoordinatorOnlyFindings.escalation_findings(findings, escalation_payload(state))
     {:done, finish(state, {:request_changes, payload})}
   end
 
@@ -3516,6 +3550,7 @@ defmodule Arbiter.Worker.ReviewGate do
         task_id: state.task_id,
         run_id: run_id,
         round: state.round,
+        fix_round_attempt: Map.get(state, :fix_round_attempt, 0),
         role: role,
         verdict: verdict,
         findings: findings,
@@ -4822,7 +4857,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # trailing newline keeps the surrounding prompt spacing intact when empty.
   defp criteria_prompt_block(task) do
     if acceptance_present?(task.acceptance) do
-      ReviewVerification.criteria_block() <> "\n"
+      ReviewVerification.criteria_block() <>
+        "\n" <> CoordinatorOnlyFindings.coordinator_only_block() <> "\n"
     else
       ""
     end

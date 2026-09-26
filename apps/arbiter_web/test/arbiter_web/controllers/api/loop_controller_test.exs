@@ -169,6 +169,40 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert ci["meta"]["classes"] == ~w(lint flake_rerun test_fix infra unknown)
       assert body["markdown"] =~ "## CI: first-push red rate"
     end
+
+    # bd-6vullc: a flake recorded by two different fix_passes at the same test
+    # file:line reaches the JSON summary as a recurring-flake group with a
+    # count and the affected task ids, not just the markdown.
+    test "the JSON summary carries recurring flakes", %{conn: conn} do
+      ws = workspace!()
+      {:ok, t1} = Ash.create(Issue, %{title: "t1", difficulty: 2, workspace_id: ws.id})
+      {:ok, t2} = Ash.create(Issue, %{title: "t2", difficulty: 2, workspace_id: ws.id})
+
+      for task <- [t1, t2] do
+        {:ok, _} =
+          Loop.Flakes.record(%{
+            task_id: task.id,
+            repo: "arbiter",
+            ci_job: "mix test",
+            signature: "DataCase teardown timeout",
+            test_file: "test/coverage_test.exs",
+            test_line: 150
+          })
+      end
+
+      conn = get(conn, ~p"/api/loop/analyze", %{since: "24h"})
+      body = json_response(conn, 200)
+      ci = body["summary"]["ci"]
+
+      assert [flake] = ci["recurring_flakes"]
+      assert flake["repo"] == "arbiter"
+      assert flake["test_file"] == "test/coverage_test.exs"
+      assert flake["test_line"] == 150
+      assert flake["count"] == 2
+      assert Enum.sort(flake["task_ids"]) == Enum.sort([t1.id, t2.id])
+      assert ci["meta"]["flake_recurrence_threshold"]
+      assert body["markdown"] =~ "### Recurring flakes"
+    end
   end
 
   describe "POST /api/loop/propose" do

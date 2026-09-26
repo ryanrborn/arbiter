@@ -229,11 +229,13 @@ defmodule ArbiterWeb.Api.LoopController do
       outcomes_by_repo: ci.outcomes_by_repo,
       runs: Enum.map(ci.runs, &Map.take(&1, [:run_id, :task_id, :repo, :class, :basis, :reason])),
       lint_flags: Enum.map(ci.lint_flags, &Map.drop(&1, [:run_ids])),
+      recurring_flakes: Enum.map(ci.recurring_flakes, &Map.drop(&1, [:run_ids])),
       meta: %{
         undercount: ci.undercount,
         classes: Arbiter.Loop.FixPassClassifier.classes(),
         lint_share_threshold: ci.lint_share_threshold,
         min_fix_passes: ci.min_fix_passes,
+        flake_recurrence_threshold: ci.flake_recurrence_threshold,
         red_rate_definition:
           "share of tasks with a main run in the window and a PR that needed >= 1 CI fix_pass " <>
             "started in the window; attributed to the task's latest main run in the window"

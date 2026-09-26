@@ -291,7 +291,10 @@ defmodule Arbiter.MCP.Tools do
       all_rounds =
         Round
         |> Ash.Query.filter(task_id == ^task_id)
-        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        # bd-6d3h8m: sort on `fix_round_attempt` first — `round` restarts at 1
+        # on every automatic fix round's fresh gate, so sorting on `round`
+        # alone interleaves a fix round's rounds 1..N with the original pass's.
+        |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
         |> Ash.read!()
 
       rounds =
@@ -324,6 +327,7 @@ defmodule Arbiter.MCP.Tools do
       task_id: r.task_id,
       run_id: r.run_id,
       round: r.round,
+      fix_round_attempt: r.fix_round_attempt,
       role: r.role,
       verdict: r.verdict,
       findings: r.findings,
@@ -928,6 +932,74 @@ defmodule Arbiter.MCP.Tools do
         {:error, :busy} ->
           {:error, {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
       end
+    end
+  end
+
+  @doc """
+  Record a structured flake event for the current fix_pass (bd-6vullc): the
+  worker concluded a CI failure was a flake or infra issue — it re-ran the
+  job with no code change and it went green (or has evidence it's broken
+  repo-wide) — and this is the durable record of that conclusion, so a
+  recurring flake can be counted across fix_passes instead of living only in
+  one run's closing prose.
+
+  `ci_job`, `signature` are required. `test_file`/`test_line` are optional —
+  many flakes (infra, a rerun that clears on its own) have no test to name.
+  `repo` defaults to the calling task's repo when not given. `run_id` is
+  resolved to the task's most recent `fix_pass` run when not given.
+
+  This is a plain append-only record, not a verdict on the task or PR — it
+  does not reclassify a park the way `ci_mark_external` does, and calling it
+  doesn't require a live Watchdog.
+  """
+  @spec flake_record(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def flake_record(%Scope{} = scope, args) do
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, ci_job} <- require_string(args, "ci_job"),
+         {:ok, signature} <- require_string(args, "signature"),
+         {:ok, test_line} <- optional_integer(args, "test_line"),
+         {:ok, repo} <- resolve_flake_repo(scope, args, task_id) do
+      attrs = %{
+        task_id: task_id,
+        repo: repo,
+        ci_job: ci_job,
+        signature: signature,
+        test_file: fetch_string(args, "test_file"),
+        test_line: test_line,
+        note: fetch_string(args, "note"),
+        run_id: fetch_string(args, "run_id")
+      }
+
+      case Arbiter.Loop.Flakes.record(attrs) do
+        {:ok, event} ->
+          {:ok,
+           %{
+             id: event.id,
+             task_id: event.task_id,
+             repo: event.repo,
+             ci_job: event.ci_job,
+             test_file: event.test_file,
+             test_line: event.test_line,
+             signature: event.signature,
+             run_id: event.run_id
+           }}
+
+        {:error, error} ->
+          {:error, {:invalid, "could not record flake event: #{inspect(error)}"}}
+      end
+    end
+  end
+
+  defp resolve_flake_repo(scope, args, task_id) do
+    case fetch_string(args, "repo") || scope.repo do
+      repo when is_binary(repo) and repo != "" ->
+        {:ok, repo}
+
+      _ ->
+        case fetch_task(scope, args, task_id) do
+          {:ok, %Issue{repo: repo}} when is_binary(repo) and repo != "" -> {:ok, repo}
+          _ -> {:error, {:invalid, "`repo` is required and could not be inferred from the task"}}
+        end
     end
   end
 

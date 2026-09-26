@@ -145,6 +145,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "queue_restart_watchdog" => @deny_reason_ops,
     "ci_rerun" => @deny_reason_ops,
     "ci_mark_external" => @deny_reason_ops,
+    "flake_record" => @deny_reason_ops,
     "loop_pending_list" => @deny_reason_ops,
     "loop_pending_diff" => @deny_reason_ops,
     "loop_pending_apply" => @deny_reason_ops,

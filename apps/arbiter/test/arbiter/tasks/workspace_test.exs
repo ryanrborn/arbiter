@@ -736,7 +736,8 @@ defmodule Arbiter.Tasks.WorkspaceTest do
           "ci" => %{
             "lint_share_threshold" => 0.4,
             "min_fix_passes" => 5,
-            "check_commands" => %{"arbiter" => "mix precommit && mix audit"}
+            "check_commands" => %{"arbiter" => "mix precommit && mix audit"},
+            "flake_recurrence_threshold" => 4
           }
         }
       }
@@ -746,7 +747,8 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert Arbiter.Loop.ci_config(ws) == %{
                lint_share_threshold: 0.4,
                min_fix_passes: 5,
-               check_commands: %{"arbiter" => "mix precommit && mix audit"}
+               check_commands: %{"arbiter" => "mix precommit && mix audit"},
+               flake_recurrence_threshold: 4
              }
     end
 
@@ -781,6 +783,15 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       config = %{"loop" => %{"ci" => true}}
       assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-5", config: config})
       assert err |> Exception.message() |> String.contains?("loop.ci must be a map")
+    end
+
+    test "rejects a non-positive flake recurrence threshold (bd-6vullc)" do
+      config = %{"loop" => %{"ci" => %{"flake_recurrence_threshold" => 0}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-6", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.flake_recurrence_threshold must be a positive integer")
     end
   end
 

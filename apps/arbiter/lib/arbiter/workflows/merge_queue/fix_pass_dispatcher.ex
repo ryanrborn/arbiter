@@ -476,6 +476,16 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     The default mode, `auto`, picks between them for you; override it only when
     you know something it doesn't.
 
+    Whenever you conclude the failure was a FLAKE — you re-ran the job with NO
+    code change and it went green — record that with the `flake_record` MCP tool
+    BEFORE you exit: pass `ci_job` (the failing check's name) and `signature` (a
+    short, distinctive fragment of the failure — a log line, error message, or
+    teardown name), and `test_file`/`test_line` when you can identify the
+    specific failing test. This is what lets a flake that keeps recurring across
+    fix_passes get counted and surfaced, instead of the conclusion living only in
+    this run's closing summary. Do this for every flake conclusion, whether or
+    not you also call `ci_rerun` or `ci_mark_external`.
+
     If you conclude the failure is broken infrastructure repo-wide rather than
     anything about this branch — you have evidence, such as the same check
     failing on unrelated branches today, and nothing in this diff touching the

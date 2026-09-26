@@ -2189,6 +2189,60 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.ci_mark_external/2
     },
     %{
+      name: "flake_record",
+      tiers: @both,
+      description:
+        "Record a structured flake event (bd-6vullc): a fix_pass concluded a CI failure was " <>
+          "a flake or infra issue — re-ran the job with no code change and it went green, or " <>
+          "there's evidence it's broken repo-wide. This is what lets recurring flakes be " <>
+          "counted across fix_passes and surfaced in `arb loop analyze`, instead of living " <>
+          "only in one run's closing prose. Call it INSTEAD of (or alongside) `ci_rerun` / " <>
+          "`ci_mark_external` whenever you conclude the failure wasn't your diff — name the " <>
+          "failing test's file:line when you can identify one, and always give a short " <>
+          "`signature` (a distinctive fragment of the failure, e.g. a log line or error " <>
+          "message) so occurrences without a test location still group together.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" =>
+              "Task the fix_pass is running for. A worker may omit this (its own task)."
+          },
+          "ci_job" => %{
+            "type" => "string",
+            "description" => "Required. The failing CI job/check name."
+          },
+          "signature" => %{
+            "type" => "string",
+            "description" =>
+              "Required. A short, distinctive fragment of the failure (a log line, error " <>
+                "message, or teardown name) — the grouping key when no test file:line is known."
+          },
+          "test_file" => %{
+            "type" => "string",
+            "description" =>
+              "The failing test's file, when identifiable, e.g. \"test/coverage_test.exs\"."
+          },
+          "test_line" => %{
+            "type" => "integer",
+            "description" => "The failing test's line, when identifiable."
+          },
+          "note" => %{
+            "type" => "string",
+            "description" => "Optional evidence for the flake/infra conclusion."
+          },
+          "repo" => %{
+            "type" => "string",
+            "description" => "Defaults to the calling task's repo when omitted."
+          }
+        },
+        "required" => ["ci_job", "signature"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.flake_record/2
+    },
+    %{
       name: "repo_list",
       tiers: @coordinator,
       description:

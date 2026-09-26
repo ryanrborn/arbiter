@@ -1,6 +1,7 @@
 defmodule Arbiter.MCP.ToolsTest do
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Loop.FlakeEvent
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -4969,6 +4970,85 @@ defmodule Arbiter.MCP.ToolsTest do
       assert round2.converged == true
     end
 
+    # bd-6d3h8m: an automatic fix round (bd-a9zb7w) re-attaches a fresh
+    # ReviewGate that restarts its own round numbering at 1, so rounds 1..3 of
+    # the original pass and rounds 1..3 of the fix-round pass both get
+    # `round: 1, 2, 3` — sorting on `round` alone (the pre-fix behavior)
+    # interleaves them as round1/round1/round2/round2/round3/round3 instead of
+    # reading as two consecutive passes.
+    test "a fix round's rounds do not interleave with the original pass's (bd-6d3h8m)", ctx do
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Arbiter.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: 0,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES pass 1 round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Arbiter.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: 1,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES pass 2 round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, count: 6, total_count: 6}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert Enum.map(rounds, &{&1.fix_round_attempt, &1.round}) == [
+               {0, 1},
+               {0, 2},
+               {0, 3},
+               {1, 1},
+               {1, 2},
+               {1, 3}
+             ]
+
+      assert Enum.map(rounds, & &1.findings) == [
+               "VERDICT: REQUEST_CHANGES pass 1 round 1",
+               "VERDICT: REQUEST_CHANGES pass 1 round 2",
+               "VERDICT: REQUEST_CHANGES pass 1 round 3",
+               "VERDICT: REQUEST_CHANGES pass 2 round 1",
+               "VERDICT: REQUEST_CHANGES pass 2 round 2",
+               "VERDICT: REQUEST_CHANGES pass 2 round 3"
+             ]
+    end
+
+    test "fix_round_attempt defaults to 0 for a row that doesn't specify one", ctx do
+      {:ok, _} =
+        Ash.create(Arbiter.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          findings: "VERDICT: APPROVE",
+          finding_count: 0,
+          converged: true
+        })
+
+      assert {:ok, %{rounds: [round]}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert round.fix_round_attempt == 0
+    end
+
     test "requires task_id", ctx do
       assert {:error, {:invalid, msg}} = Tools.review_gate_rounds_list(ctx.coordinator, %{})
       assert msg =~ "task_id"
@@ -5492,6 +5572,74 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:error, {:unauthorized, _}} =
                Tools.ci_mark_external(ctx.worker, %{"task_id" => other.id, "note" => "infra"})
+    end
+  end
+
+  describe "flake_record/2 (bd-6vullc)" do
+    test "records a flake event for the calling worker's own task", ctx do
+      assert {:ok, data} =
+               Tools.flake_record(ctx.worker, %{
+                 "ci_job" => "mix test",
+                 "signature" => "DataCase teardown timeout",
+                 "test_file" => "test/coverage_test.exs",
+                 "test_line" => 150
+               })
+
+      assert data.task_id == ctx.task.id
+      assert data.repo == "shipyard"
+      assert data.ci_job == "mix test"
+      assert data.test_file == "test/coverage_test.exs"
+      assert data.test_line == 150
+      assert data.signature == "DataCase teardown timeout"
+
+      assert [event] = Ash.read!(FlakeEvent)
+      assert event.task_id == ctx.task.id
+    end
+
+    test "ci_job is required", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.flake_record(ctx.worker, %{"signature" => "timeout"})
+
+      assert msg =~ "ci_job"
+    end
+
+    test "signature is required", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.flake_record(ctx.worker, %{"ci_job" => "mix test"})
+
+      assert msg =~ "signature"
+    end
+
+    test "a worker may not record a flake for another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.flake_record(ctx.worker, %{
+                 "task_id" => other.id,
+                 "ci_job" => "mix test",
+                 "signature" => "timeout"
+               })
+    end
+
+    test "test_file/test_line and note are optional", ctx do
+      assert {:ok, data} =
+               Tools.flake_record(ctx.worker, %{
+                 "ci_job" => "deploy",
+                 "signature" => "runner OOM",
+                 "note" => "same OOM on two unrelated branches today"
+               })
+
+      assert data.test_file == nil
+      assert data.test_line == nil
+    end
+
+    test "is visible to a worker, not just the coordinator" do
+      names =
+        %Scope{tier: :worker, workspace_id: "ws", task_id: "t"}
+        |> Catalog.visible()
+        |> Enum.map(& &1.name)
+
+      assert "flake_record" in names
     end
   end
 

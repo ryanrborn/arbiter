@@ -1842,7 +1842,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       try do
         Round
         |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
-        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
         |> Ash.read!()
       rescue
         e ->
@@ -1858,11 +1858,13 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp review_summary([], _runs), do: nil
 
   defp review_summary(rounds, runs) do
-    # Rows arrive sorted (round asc, inserted_at asc), so the last `:review`
-    # row IS the latest reviewer pass. `:impl` rows are revise passes within a
-    # round and never carry a verdict, so they are not candidates.
-    latest = rounds |> Enum.filter(&(&1.role == :review)) |> List.last()
-    highest = rounds |> Enum.map(& &1.round) |> Enum.max()
+    # Rows arrive sorted (fix_round_attempt asc, round asc, inserted_at asc),
+    # so the last `:review` row IS the latest reviewer pass, across fix
+    # rounds. `:impl` rows are revise passes within a round and never carry a
+    # verdict, so they are not candidates.
+    reviews = Enum.filter(rounds, &(&1.role == :review))
+    latest = List.last(reviews)
+    total_reviews = length(reviews)
 
     # A round whose reviewer pass left no row (or left one with no verdict) is
     # inconclusive, not approved — the gate reached a terminal it could not act
@@ -1871,8 +1873,8 @@ defmodule ArbiterWeb.TaskDetailLive do
     run_id = latest && latest.run_id
 
     %{
-      count: highest,
-      round: (latest && latest.round) || highest,
+      count: total_reviews,
+      round: (latest && latest.round) || total_reviews,
       verdict: verdict,
       label: review_verdict_label(verdict),
       # Only offer the deep link when the round's own run is actually on this

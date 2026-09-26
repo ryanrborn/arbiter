@@ -238,4 +238,89 @@ defmodule Arbiter.Loop.CiSectionTest do
       assert CiSection.default_min_fix_passes() > 0
     end
   end
+
+  describe "recurring flakes (bd-6vullc)" do
+    defp flake(task_id, attrs \\ %{}) do
+      Map.merge(
+        %{
+          task_id: task_id,
+          run_id: "run-#{task_id}",
+          repo: "arbiter",
+          ci_job: "mix test",
+          test_file: "test/coverage_test.exs",
+          test_line: 150,
+          signature: "DataCase teardown timeout"
+        },
+        Map.new(attrs)
+      )
+    end
+
+    test "the same test file:line recurring at least N times is surfaced with counts and task ids" do
+      ci = %{
+        tasks: [],
+        fix_passes: [],
+        flake_events: [
+          flake("t1"),
+          flake("t2"),
+          flake("t3", %{signature: "a different signature entirely"})
+        ]
+      }
+
+      section = CiSection.build(ci, flake_recurrence_threshold: 2)
+
+      assert [group] = section.recurring_flakes
+      assert group.repo == "arbiter"
+      assert group.test_file == "test/coverage_test.exs"
+      assert group.test_line == 150
+      assert group.count == 3
+      assert Enum.sort(group.task_ids) == ["t1", "t2", "t3"]
+    end
+
+    test "below the threshold is not surfaced" do
+      ci = %{
+        tasks: [],
+        fix_passes: [],
+        flake_events: [flake("t1"), flake("t2", %{task_id: "t2"})]
+      }
+
+      section = CiSection.build(ci, flake_recurrence_threshold: 3)
+
+      assert section.recurring_flakes == []
+    end
+
+    test "events with no test location group by signature instead" do
+      ci = %{
+        tasks: [],
+        fix_passes: [],
+        flake_events: [
+          flake("t1", %{test_file: nil, test_line: nil, signature: "runner OOM"}),
+          flake("t2", %{test_file: nil, test_line: nil, signature: "runner OOM"})
+        ]
+      }
+
+      section = CiSection.build(ci, flake_recurrence_threshold: 2)
+
+      assert [group] = section.recurring_flakes
+      assert group.test_file == nil
+      assert group.signature == "runner OOM"
+      assert group.count == 2
+    end
+
+    test "different repos with the same test location are not merged" do
+      ci = %{
+        tasks: [],
+        fix_passes: [],
+        flake_events: [flake("t1", %{repo: "arbiter"}), flake("t2", %{repo: "shipyard"})]
+      }
+
+      section = CiSection.build(ci, flake_recurrence_threshold: 2)
+
+      assert section.recurring_flakes == []
+    end
+
+    test "an empty window has no recurring flakes and the default threshold is exposed" do
+      assert CiSection.empty().recurring_flakes == []
+      assert CiSection.default_flake_recurrence_threshold() > 0
+    end
+  end
 end
