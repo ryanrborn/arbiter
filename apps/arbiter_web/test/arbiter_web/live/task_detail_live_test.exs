@@ -819,7 +819,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
 
       # Button is shown for refined + open tasks
       assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
