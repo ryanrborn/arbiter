@@ -205,7 +205,8 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
            "Script must call `mix compile --force` to force recompilation after tagging"
 
     # Verify force-compile happens before escript.build in the same subshell
-    assert script_content =~ ~r/\(\s*cd\s+apps\/arbiter_cli\s+&&\s+mix\s+compile\s+--force\s+&&\s+mix\s+escript\.build\s*\)/,
+    assert script_content =~
+             ~r/\(\s*cd\s+apps\/arbiter_cli\s+&&\s+mix\s+compile\s+--force\s+&&\s+mix\s+escript\.build\s*\)/,
            "Script must force-recompile arbiter_cli before building the escript in a single subshell"
   end
 end
