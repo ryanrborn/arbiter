@@ -128,6 +128,65 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     Output.halt(1)
   end
 
+  # ---- cold deploy: server was already down before the deploy began -------
+  #
+  # bd-5zvux5: reached only when the pre-restart `Doctor.reachable?()` sample
+  # was already false, so there was nothing healthy to protect with a
+  # rollback — this covers a first-ever bootstrap deploy (no `current` yet)
+  # and a planned-downtime deploy (e.g. a DB move) alike. Unlike
+  # `emit_rollback/5`, this never attempts a rollback and never frames a still
+  # -red doctor result as this deploy's fault; it reports the new release's
+  # own doctor outcome as-is.
+  def emit_cold_deploy(:json, tag, actions, timeout_ms, pre_deploy_fails) do
+    results = Doctor.checks()
+    ok = Doctor.green?(results)
+
+    Output.emit_json(%{
+      version: tag,
+      deployed: true,
+      already_current: false,
+      rolled_back: false,
+      cold_deploy: true,
+      was_running: false,
+      actions: action_payload(actions),
+      base_url: Client.base_url(),
+      checks: Enum.map(results, &Map.from_struct/1),
+      ok: ok,
+      timed_out_after_s: div(timeout_ms, 1000),
+      pre_existing_blocking_failures: pre_deploy_fails
+    })
+
+    unless ok, do: Output.halt(1)
+  end
+
+  def emit_cold_deploy(:text, tag, _actions, timeout_ms, pre_deploy_fails) do
+    IO.puts("")
+
+    IO.puts(
+      "Deployed release #{tag} — the server was already down before this deploy began, so " <>
+        "there was nothing healthy to roll back to. Not attempting a rollback."
+    )
+
+    if pre_deploy_fails != [] do
+      IO.puts("(pre-existing, before this deploy: #{Enum.join(pre_deploy_fails, ", ")})")
+    end
+
+    IO.puts("")
+
+    IO.puts(
+      "Doctor did not report green within #{div(timeout_ms, 1000)}s — this reflects release " <>
+        "#{tag}'s own state, not a rollback failure:"
+    )
+
+    IO.puts("")
+    results = Doctor.checks()
+    Doctor.report(results)
+    IO.puts("")
+    IO.puts("hint: tail #{Start.phoenix_log_path()} for startup output.")
+
+    unless Doctor.green?(results), do: Output.halt(1)
+  end
+
   # ---- rollback outcome rendering (bd-bksulf) ------------------------------
 
   @typedoc "What `ReleaseDeploy`'s automatic rollback actually did."

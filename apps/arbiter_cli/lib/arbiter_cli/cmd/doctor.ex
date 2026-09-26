@@ -62,8 +62,17 @@ defmodule ArbiterCli.Cmd.Doctor do
   auto-rollback wait actually needs.
   """
   @spec green?() :: boolean()
-  def green? do
-    Enum.all?(checks(), fn r ->
+  def green?, do: green?(checks())
+
+  @doc """
+  Same as `green?/0`, but against a result list the caller already fetched —
+  lets a caller that needs both the raw checks and the green verdict (e.g. to
+  render a report from the same probe) do so from a single `checks()` call
+  instead of one HTTP round-trip per use.
+  """
+  @spec green?([Checks.Result.t()]) :: boolean()
+  def green?(results) do
+    Enum.all?(results, fn r ->
       r.status == :ok or (r.status == :fail and not r.blocks_readiness)
     end)
   end
@@ -74,8 +83,14 @@ defmodule ArbiterCli.Cmd.Doctor do
   does without duplicating the formatting.
   """
   @spec report() :: boolean()
-  def report do
-    results = checks()
+  def report, do: report(checks())
+
+  @doc """
+  Same as `report/0`, but against a result list the caller already fetched —
+  see `green?/1`.
+  """
+  @spec report([Checks.Result.t()]) :: boolean()
+  def report(results) do
     Formatter.emit_text(results)
     Enum.all?(results, fn r -> r.status == :ok end)
   end
