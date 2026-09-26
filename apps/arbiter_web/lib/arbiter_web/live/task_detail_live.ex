@@ -1999,8 +1999,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               phx-click="return_to_backlog"
               title="Return to Backlog for further refinement"
             >
-              <ArbiterWeb.CoreComponents.Core.icon name="hero-arrow-left-mini" />
-              Return to Backlog
+              <ArbiterWeb.CoreComponents.Core.icon name="hero-arrow-left-mini" /> Return to Backlog
             </ArbiterWeb.CoreComponents.Core.button>
             <ArbiterWeb.CoreComponents.Core.button size="sm" phx-click="open_edit">
               <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-pencil-square-mini" /></:icon>

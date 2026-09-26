@@ -59,8 +59,7 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardDemote do
       current_status == :closed ->
         Changeset.add_error(cs,
           field: :refined,
-          message:
-            "Cannot demote a closed task. Only undispatched or open tasks can be demoted."
+          message: "Cannot demote a closed task. Only undispatched or open tasks can be demoted."
         )
 
       # Check for live workers

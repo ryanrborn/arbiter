@@ -154,7 +154,12 @@ defmodule Arbiter.Worker.Dispatch do
     opts = normalize_opts(opts)
 
     with {:ok, task} <- load_task(task_id),
-         :ok <- ensure_refined(task),
+         # bd-a1bmyx: Autopilot re-checks refined before dispatching to catch
+         # demotions (refined: true → false) that happen between when Autopilot
+         # plans the dispatch and when it actually runs. We only do this for
+         # Autopilot dispatches (marked with `autopilot: true`), not manual
+         # dispatches via CLI/API which are allowed to dispatch unrefined tasks.
+         :ok <- maybe_ensure_refined(task, opts),
          opts = apply_issue_repo_default(task, opts),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_awaiting_review(task_id),
@@ -874,12 +879,23 @@ defmodule Arbiter.Worker.Dispatch do
   defp ensure_not_closed(%Issue{status: :closed, id: id}), do: {:error, {:task_closed, id}}
   defp ensure_not_closed(_task), do: :ok
 
-  # bd-a1bmyx: a task can be demoted (refined: true → false) between when it was
-  # scheduled for dispatch and when dispatch actually runs. Catch this race by
-  # re-checking refined right before dispatch starts, so a demoted task fails
-  # dispatch cleanly rather than being handed to a worker.
-  defp ensure_refined(%Issue{refined: true}), do: :ok
-  defp ensure_refined(%Issue{id: id}), do: {:error, {:task_not_ready, id}}
+  # bd-a1bmyx: Autopilot re-checks refined before dispatching to catch demotions
+  # (refined: true → false) that happen between when Autopilot plans the dispatch
+  # and when it actually runs. Manual dispatch (via CLI/API) is allowed to dispatch
+  # unrefined tasks, so we only check for Autopilot dispatches (marked with
+  # `dispatched_by: "autopilot"`).
+  defp maybe_ensure_refined(%Issue{} = task, opts) do
+    case Keyword.get(opts, :dispatched_by) do
+      "autopilot" ->
+        case task.refined do
+          true -> :ok
+          _ -> {:error, {:task_not_ready, task.id}}
+        end
+
+      _ ->
+        :ok
+    end
+  end
 
   # Invariant backstop for the dispatch window (bd-cgmidt): when a live worker has
   # just been attached to `task_id`, guarantee the task is not `:closed`. A close
