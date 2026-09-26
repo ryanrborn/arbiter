@@ -210,7 +210,34 @@ defmodule ArbiterWeb.Api.LoopController do
       finding_categories: length(report.finding_categories),
       finding_residue: finding_residue_summary(report.finding_residue),
       difficulty_misestimates: length(report.difficulty_misestimates),
-      fleet_wide_suggestions: Enum.count(report.suggestions, &(&1.verdict == :fleet_wide))
+      fleet_wide_suggestions: Enum.count(report.suggestions, &(&1.verdict == :fleet_wide)),
+      ci: ci_summary(report.ci)
+    }
+  end
+
+  # bd-cuu8n3: the CI section, structured. Per-run rows carry their class,
+  # basis and reason (not the briefed check logs — those can run to kilobytes
+  # per run); `meta` states the approved-PR-only undercount so a JSON caller
+  # reads the same caveat the markdown prints.
+  defp ci_summary(ci) do
+    %{
+      red_rate: ci.red_rate,
+      by_repo: ci.by_repo,
+      by_model: ci.by_model,
+      by_difficulty: ci.by_difficulty,
+      outcomes: ci.outcomes,
+      outcomes_by_repo: ci.outcomes_by_repo,
+      runs: Enum.map(ci.runs, &Map.take(&1, [:run_id, :task_id, :repo, :class, :basis, :reason])),
+      lint_flags: Enum.map(ci.lint_flags, &Map.drop(&1, [:run_ids])),
+      meta: %{
+        undercount: ci.undercount,
+        classes: Arbiter.Loop.FixPassClassifier.classes(),
+        lint_share_threshold: ci.lint_share_threshold,
+        min_fix_passes: ci.min_fix_passes,
+        red_rate_definition:
+          "share of tasks with a main run in the window and a PR that needed >= 1 CI fix_pass " <>
+            "started in the window; attributed to the task's latest main run in the window"
+      }
     }
   end
 

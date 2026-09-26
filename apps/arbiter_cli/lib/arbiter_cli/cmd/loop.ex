@@ -22,6 +22,22 @@ defmodule ArbiterCli.Cmd.Loop do
   days). `--json` prints the raw envelope (markdown + structured summary)
   instead of just the report.
 
+  The report includes a **CI section** (bd-cuu8n3): the first-push CI red
+  rate — the share of PR-bearing tasks that needed at least one CI fix_pass —
+  by repo, provider/model and difficulty, with counts; and every fix_pass run
+  in the window classified deterministically (no model call) as `lint`,
+  `flake_rerun`, `test_fix`, `infra` or `unknown`, with the unknown share
+  reported. `--json` carries it under `summary.ci`.
+
+  Known undercount: a fix_pass is only dispatched for an *approved* PR blocked
+  on red CI, so a push that went red and was fixed during review is not
+  counted — the red rate is a lower bound. (`summary.ci.meta.undercount` says
+  the same in JSON.)
+
+  A repo whose lint share exceeds `loop.ci.lint_share_threshold` becomes a
+  `repo_doc_patch` proposal under `--propose` ("run <check command> before
+  push").
+
   Without `--propose` the pass is read-only, exactly as it has always been.
   `--propose` additionally persists the proposals the report implies into the
   reviewable queue below — nothing is applied, at any evidence level.
@@ -40,8 +56,9 @@ defmodule ArbiterCli.Cmd.Loop do
       arb loop propose repo-doc-patch --repo <repo> --lesson "..."
                        [--category "..."] [--workspace <id>]
 
-  The Stage 1 pass cannot yet attribute a finding category to one repo, so
-  this is the entry point onto rung 2 of the destination ladder today: an
+  The Stage 1 pass cannot yet attribute a reviewer-finding category to one
+  repo — its only automatic repo_doc_patch producer is the CI lint share
+  above — so this is the entry point for any other repo lesson: an
   operator who has read a repo-specific lesson names the repo (its
   `repo_paths` key in that workspace) and the lesson text directly. `--lesson`
   must be a single line with no `arbiter:begin`/`arbiter:end` marker. Lands

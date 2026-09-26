@@ -42,7 +42,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       every value is one of the modes above.
     * If `"loop"` is present, it must be a map; if `"loop.evidence_bar"` is
       present, it must be a map whose `"min_incidents"` / `"min_distinct_tasks"`
-      are positive integers (the loop-proposal evidence bar, bd-9j2g3x).
+      are positive integers (the loop-proposal evidence bar, bd-9j2g3x); if
+      `"loop.ci"` is present it must be a map whose `"lint_share_threshold"` is
+      a number in (0, 1], `"min_fix_passes"` a positive integer and
+      `"check_commands"` a map of repo name → command string (bd-cuu8n3).
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -374,6 +377,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_loop(changeset, loop) when is_map(loop) do
     changeset
     |> validate_evidence_bar(Map.get(loop, "evidence_bar"))
+    |> validate_loop_ci(Map.get(loop, "ci"))
     |> validate_autonomy(loop)
   end
 
@@ -391,6 +395,51 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_evidence_bar(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "loop.evidence_bar must be a map")
+  end
+
+  # bd-cuu8n3: the loop analyser's CI section — the lint share over which a
+  # repo gets a `repo_doc_patch` proposal, the sample floor, and per-repo
+  # check commands. `Arbiter.Loop.ci_config/1` also falls back leniently, but
+  # a typo here should fail loudly at write time rather than silently revert
+  # to the default threshold.
+  defp validate_loop_ci(changeset, nil), do: changeset
+
+  defp validate_loop_ci(changeset, ci) when is_map(ci) do
+    changeset
+    |> validate_loop_fraction(Map.get(ci, "lint_share_threshold"), "loop.ci.lint_share_threshold")
+    |> validate_positive_int(ci, "min_fix_passes", "loop.ci.min_fix_passes")
+    |> validate_check_commands(Map.get(ci, "check_commands"))
+  end
+
+  defp validate_loop_ci(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "loop.ci must be a map")
+  end
+
+  defp validate_loop_fraction(changeset, nil, _label), do: changeset
+
+  defp validate_loop_fraction(changeset, value, label) do
+    if fraction?(value) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message: "#{label} must be a number in (0, 1]; got: #{inspect(value)}"
+      )
+    end
+  end
+
+  defp validate_check_commands(changeset, nil), do: changeset
+
+  defp validate_check_commands(changeset, cmds) do
+    if is_map(cmds) and
+         Enum.all?(cmds, fn {k, v} -> is_binary(k) and is_binary(v) and v != "" end) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message: "loop.ci.check_commands must map repo names to command strings"
+      )
+    end
   end
 
   # bd-6edc0u: Stage 3 autonomous routing. The opt-in must be a real boolean —
