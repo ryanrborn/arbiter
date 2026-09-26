@@ -293,7 +293,9 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
       assert Ash.get!(Issue, task.id).review_park_reason == "head_not_pushed"
 
       # The reviewer was never launched: no sentinel, no verdict, no coverage.
-      {git_dir, 0} = git(["rev-parse", "--absolute-git-dir"], wt)
+      # (The fixture writes its sentinel to the COMMON git dir: since bd-a22hib
+      # a reviewer runs in its round's own linked checkout, not in `wt`.)
+      {git_dir, 0} = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], wt)
       refute File.exists?(Path.join(String.trim(git_dir), "review_gate_push_check_ran"))
       refute Worker.state(author).meta[:review_gate_verdict] == :approve
       assert coverage_rows(task.id) == []
@@ -404,7 +406,12 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
   # ---- AC2: stamps and coverage name the pushed head -----------------------
 
   describe "reviewed-SHA stamp and coverage (AC2)" do
-    test "an approval of an unpushed local head produces no coverage row for the PR",
+    # bd-a22hib: this used to prove the stamping path REFUSED a head the
+    # reviewer had itself committed into the implementer's worktree. The
+    # reviewer now runs in a detached throwaway checkout, so its drive-by commit
+    # can no longer move the branch at all: the branch stays on the pushed head,
+    # and the stamp and coverage row name exactly the SHA it was handed.
+    test "a reviewer's drive-by commit cannot move the branch; the pushed head is what is recorded",
          %{repo: repo, ws: ws, tmp: tmp} do
       task = new_task(ws)
       branch = "feature/push-5"
@@ -420,24 +427,20 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
         pr_ref: "owner/repo#228"
       )
 
-      wait_until(
-        fn ->
-          Enum.any?(escalations(ws, task), &(&1.subject =~ "review coverage write failed"))
-        end,
-        20_000
-      )
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha != nil end, 20_000)
 
-      # The reviewer's own drive-by commit left HEAD off the remote branch.
-      refute sha(wt, "HEAD") == pushed_head
+      # The drive-by commit landed in the reviewer's throwaway checkout, not on
+      # the branch under review.
+      assert sha(wt, "HEAD") == pushed_head
+      refute File.exists?(Path.join(wt, "reviewer-note.txt"))
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == pushed_head
 
-      assert coverage_rows(task.id) == [],
-             "a coverage row was written for a head the PR does not carry"
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == pushed_head
+      wait_until(fn -> coverage_rows(task.id) != [] end)
+      assert [%{head_sha: ^pushed_head}] = coverage_rows(task.id)
 
-      assert Ash.get!(Issue, task.id).last_reviewed_sha == nil,
-             "the reviewed-SHA stamp named an unpushed head"
-
-      page = Enum.find(escalations(ws, task), &(&1.subject =~ "review coverage write failed"))
-      assert page.body =~ "head_not_pushed"
+      refute Enum.any?(escalations(ws, task), &(&1.subject =~ "review coverage write failed"))
     end
 
     test "pushed_head/1 refuses an unpushed local head and passes a pushed one",

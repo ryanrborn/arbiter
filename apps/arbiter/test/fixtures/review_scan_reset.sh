@@ -13,7 +13,7 @@
 # `state.verdict_scans` is not reset per round, `recover_verdict_from_scans/1`
 # would resurrect that round-1 pass's transcript during round 2's escalation
 # and dispatch a review of code the implementer already revised past.
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --git-common-dir)"
 counter_file="$git_dir/review_scan_reset_pass"
 go_file="$git_dir/review_scan_reset_go"
 pass=0

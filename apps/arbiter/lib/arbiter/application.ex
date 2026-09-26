@@ -245,6 +245,13 @@ defmodule Arbiter.Application do
   #     the reattach path and as orphan detection. Primary-gated: a duplicate
   #     boot must not mark the live instance's sessions ended. It never kills an
   #     unrecognised live scope; see Arbiter.Sessions.Adoption.
+  #   * review_checkout_sweep: remove in-gate reviewer checkouts a ReviewGate
+  #     left behind because the previous node died under it (its `terminate/2`
+  #     never ran). Primary-gated for the same reason as reconcile: a duplicate
+  #     boot must not delete the live instance's checkouts. Only leaves older
+  #     than this VM are touched, so a gate that starts while the sweep runs is
+  #     safe. See Arbiter.Worker.ReviewGate.sweep_orphaned_review_checkouts/1
+  #     and bd-a22hib.
   #   * merge_queue: eagerly start one MergeQueue per existing workspace once the
   #     tree is up, so a cold boot misses no `:worker_done` events.
   #
@@ -279,6 +286,15 @@ defmodule Arbiter.Application do
            Arbiter.Sessions.Adoption.sweep_on_boot(primary?: primary?)
          end},
         id: :session_adoption_boot_task,
+        restart: :temporary
+      ),
+      Supervisor.child_spec(
+        {Task,
+         fn ->
+           primary? = Arbiter.SingleInstance.primary?()
+           Arbiter.Worker.ReviewGate.sweep_orphaned_review_checkouts(primary?: primary?)
+         end},
+        id: :review_checkout_sweep_boot_task,
         restart: :temporary
       ),
       Supervisor.child_spec(

@@ -159,6 +159,61 @@ defmodule Arbiter.Reviews.Checkout do
     end
   end
 
+  @doc """
+  Reclaim throwaway checkouts whose owner is gone: every leaf directly under
+  the worktree root whose name starts with `"<prefix>-"` and whose directory
+  mtime is older than `:before`. Returns the paths removed.
+
+  For a caller that normally tears its checkout down itself but cannot on every
+  path — the in-gate reviewer (`Arbiter.Worker.ReviewGate`, bd-a22hib) releases
+  its round's checkout from `terminate/2`, which a server restart or a
+  brutal kill never runs. Run on boot, with `:before` defaulting to the moment
+  this VM started, so a checkout a gate provisioned in THIS VM (its leaf was
+  created after boot) is never swept out from under it.
+
+  Options:
+
+    * `:prefix` — required; the leaf prefix the owning caller provisions with.
+    * `:root` — the directory to scan (default `Arbiter.Config.Paths.worktree_root/0`).
+    * `:before` — unix seconds; only leaves last modified before this go
+      (default: this VM's start time).
+
+  Best-effort like `teardown/1`: an unreadable root is `[]`, never a raise.
+  """
+  @spec sweep_orphans(keyword()) :: [String.t()]
+  def sweep_orphans(opts) do
+    prefix = Keyword.fetch!(opts, :prefix) <> "-"
+    root = Keyword.get_lazy(opts, :root, &Arbiter.Config.Paths.worktree_root/0)
+    before = Keyword.get_lazy(opts, :before, &vm_started_at/0)
+
+    case File.ls(root) do
+      {:ok, leaves} ->
+        for leaf <- leaves,
+            String.starts_with?(leaf, prefix),
+            path = Path.join(root, leaf),
+            stale?(path, before) do
+          :ok = teardown(path)
+          Logger.info("Reviews.Checkout: swept orphaned checkout #{path}")
+          path
+        end
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp stale?(path, before) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory, mtime: mtime}} -> mtime < before
+      _ -> false
+    end
+  end
+
+  defp vm_started_at do
+    {uptime_ms, _} = :erlang.statistics(:wall_clock)
+    System.os_time(:second) - div(uptime_ms, 1000)
+  end
+
   # ---- internals -------------------------------------------------------
 
   defp add_detached(repo_path, head_sha, opts) do

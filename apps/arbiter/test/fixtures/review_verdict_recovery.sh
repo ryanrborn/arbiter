@@ -11,8 +11,8 @@
 # and this script's re-prompt pass waits on a "go" file before exiting, so
 # the test has a deterministic window to make that mutation before the
 # ReviewGate's final escalation runs.
-marker="$(git rev-parse --git-dir)/review_gate_recovery_attempt"
-go_file="$(git rev-parse --git-dir)/review_gate_recovery_go"
+marker="$(git rev-parse --git-common-dir)/review_gate_recovery_attempt"
+go_file="$(git rev-parse --git-common-dir)/review_gate_recovery_go"
 
 if [ -f "$marker" ]; then
   # Re-prompt pass: wait for the test to signal it has mutated the first

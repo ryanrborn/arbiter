@@ -2228,7 +2228,9 @@ defmodule Arbiter.Worker.Dispatch do
   so cutting the network would cut the review's whole output path.
 
   Public so the posture is assertable without reaching into a spawned
-  session's argv.
+  session's argv — and so the in-gate ReviewGate reviewer, which runs in its
+  round's own detached checkout, gets this exact posture rather than a copy of
+  it (`Arbiter.Worker.ReviewGate.session_security_policy/3`, bd-a22hib).
   """
   @spec review_security_policy(SecurityPolicy.t(), keyword()) :: SecurityPolicy.t()
   def review_security_policy(%SecurityPolicy{} = policy, opts) do

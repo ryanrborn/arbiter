@@ -4,7 +4,7 @@
 # mockup "screenshots" on files.catbox.moe and an unverified citation. Every
 # pass says the same thing. A counter (kept in `.git`, like the other reviewer
 # fixtures) records how many reviewing passes ran.
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --git-common-dir)"
 counter_file="$git_dir/review_fabricated_evidence_pass"
 pass=0
 [ -f "$counter_file" ] && pass="$(cat "$counter_file")"

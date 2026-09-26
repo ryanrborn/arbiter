@@ -320,4 +320,52 @@ defmodule Arbiter.Reviews.CheckoutTest do
       assert :ok = Checkout.teardown(nil)
     end
   end
+
+  describe "sweep_orphans/1" do
+    # bd-a22hib: a ReviewGate that never reached `terminate/2` (the server was
+    # restarted under it, or it was killed outright) leaves its round's
+    # checkout behind. The boot sweep reclaims those — and only those: a leaf
+    # another prefix owns, or one created after `:before` (a gate already
+    # running in this VM), is left alone.
+    test "removes stale prefixed leaves, git registration included, and nothing else" do
+      {clone, _head_sha} = origin_and_clone()
+      root = Path.join(Path.dirname(clone), "wt-root")
+      File.mkdir_p!(root)
+
+      stale = Path.join(root, "gate-review-aaaa-1")
+
+      {_, 0} =
+        System.cmd("git", ["-C", clone, "worktree", "add", "-q", "--detach", stale, "HEAD"])
+
+      stale_plain = Path.join(root, "gate-review-bbbb-2")
+      File.mkdir_p!(stale_plain)
+
+      fresh = Path.join(root, "gate-review-cccc-3")
+      File.mkdir_p!(fresh)
+
+      other_prefix = Path.join(root, "review-dddd-4")
+      File.mkdir_p!(other_prefix)
+
+      now = System.os_time(:second)
+      old = now - 3_600
+
+      for path <- [stale, stale_plain, other_prefix], do: File.touch!(path, old)
+
+      removed = Checkout.sweep_orphans(prefix: "gate-review", root: root, before: now - 60)
+
+      assert Enum.sort(removed) == Enum.sort([stale, stale_plain])
+      refute File.exists?(stale)
+      refute File.exists?(stale_plain)
+      assert File.dir?(fresh)
+      assert File.dir?(other_prefix)
+
+      {out, 0} = System.cmd("git", ["-C", clone, "worktree", "list", "--porcelain"])
+      refute out =~ stale
+    end
+
+    test "is a no-op for a root that does not exist" do
+      missing = Path.join(System.tmp_dir!(), "no-root-#{System.unique_integer([:positive])}")
+      assert [] == Checkout.sweep_orphans(prefix: "gate-review", root: missing)
+    end
+  end
 end

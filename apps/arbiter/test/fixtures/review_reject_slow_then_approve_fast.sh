@@ -16,7 +16,7 @@
 # status --porcelain`) tells the passes apart.
 sleep_tenths_1="${1:-19}"
 sleep_tenths_later="${2:-0}"
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --git-common-dir)"
 counter_file="$git_dir/review_reject_slow_then_approve_fast_pass"
 pass=0
 [ -f "$counter_file" ] && pass="$(cat "$counter_file")"

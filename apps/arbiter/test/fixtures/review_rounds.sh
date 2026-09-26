@@ -25,7 +25,7 @@
 # "addressed" claim would (correctly) fail the mechanical no-diff backstop. A
 # reviewer persuaded by a rebuttal is exactly the case `[OBSOLETE]` exists for.
 later_verdict="${1:-APPROVE}"
-marker="$(git rev-parse --git-dir)/review_gate_round_attempt"
+marker="$(git rev-parse --git-common-dir)/review_gate_round_attempt"
 
 if [ -f "$marker" ]; then
   echo "re-reviewing the updated diff after the implementer's revision"
