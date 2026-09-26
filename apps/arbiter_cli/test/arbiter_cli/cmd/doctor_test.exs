@@ -120,6 +120,17 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert out =~ "mix phx.server"
   end
 
+  test "connection refused on a release install hints at the service manager, not mix phx.server" do
+    Process.put(:bd2_dev_build, false)
+    stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 1
+    assert out =~ "[fail] phoenix reachable"
+    refute out =~ "mix phx.server"
+    assert out =~ "systemctl --user start arbiter"
+  end
+
   test "no workspaces → workspace check fails with hint" do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},

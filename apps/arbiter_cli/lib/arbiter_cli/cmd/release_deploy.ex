@@ -48,8 +48,30 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
        leaving the server on the last-known-good version. The command then exits
        non-zero so the operator knows the new version was rejected. **Unless
        this deploy crossed a migration** — see "Cross-migration rollback".
+       **Unless the server was already down before this deploy began** — see
+       "Cold deploy" below.
     8. **Prune.** Retain the current release plus the 3 most-recent prior
        releases under `<data-home>/releases/`; delete anything older.
+
+  ## Cold deploy (bd-5zvux5)
+
+  Step 7's auto-rollback assumes there was a healthy server to protect. Two
+  cases break that assumption: a first-ever deploy to a fresh host (no
+  `current` yet — the runbook's bootstrap step), and a planned-downtime
+  deploy like moving the SQLite database into place, which requires the
+  server *stopped* while the file is copied (SQLite allows exactly one
+  writer). In both, the pre-flight doctor snapshot (step 1 of "What it does")
+  finds the stack down before this command has touched anything.
+
+  This is detected automatically — no flag needed — from the same
+  `Doctor.reachable?()` sample `Restart.perform/2` takes right before it
+  stops/starts anything. When that sample is false, a subsequent green-wait
+  timeout skips auto-rollback entirely: there is nothing healthy to roll back
+  to, so `current` stays on the new release (already unpacked, swapped, and
+  started) and the command reports that release's own doctor result as the
+  outcome, not "the stack is down" framed as this deploy's fault. When the
+  sample is true — the ordinary case — auto-rollback behaves exactly as
+  before.
 
   ## Migration ordering (bd-bksulf)
 
@@ -308,9 +330,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         {:ok, actions, was_running} ->
           handle_restart_ok(ctx, actions, was_running)
 
-        {:timeout, _actions, _was_running} ->
-          outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
-          Formatter.emit_rollback(mode, tag, outcome, timeout_ms, pre_deploy_fails)
+        {:timeout, actions, was_running} ->
+          handle_restart_timeout(ctx, actions, was_running, pre_deploy_fails)
       end
     end
   end
@@ -365,6 +386,27 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
           pruned
         )
     end
+  end
+
+  # `Restart.perform/2` samples `Doctor.reachable?()` itself, right before it
+  # stops/starts anything — the same reading `was_running` in
+  # `handle_restart_ok/3` already carries for display. Reusing it here is what
+  # distinguishes "this deploy broke a healthy server" (roll back, as today)
+  # from "the stack was already down before this deploy touched anything"
+  # (bd-5zvux5: a first-ever bootstrap, or a planned-downtime deploy like a DB
+  # move where the operator stops the server on purpose). In the latter case
+  # there is no healthy prior state to protect, so rolling back — or even
+  # framing the still-red doctor result as this deploy's fault — is wrong:
+  # the new release stays current, already started, and whatever doctor says
+  # about it now is reported as-is.
+  defp handle_restart_timeout(ctx, actions, false, pre_deploy_fails) do
+    Formatter.emit_cold_deploy(ctx.mode, ctx.tag, actions, ctx.timeout_ms, pre_deploy_fails)
+  end
+
+  defp handle_restart_timeout(ctx, _actions, true, pre_deploy_fails) do
+    %{current_link: current_link, rollback_plan: rollback_plan, timeout_ms: timeout_ms} = ctx
+    outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
+    Formatter.emit_rollback(ctx.mode, ctx.tag, outcome, timeout_ms, pre_deploy_fails)
   end
 
   # ---- post-swap version verification --------------------------------------

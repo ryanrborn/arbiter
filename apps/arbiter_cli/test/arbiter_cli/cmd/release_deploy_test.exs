@@ -621,6 +621,78 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
   end
 
+  # ---- cold deploy: server was already down before the deploy began -------
+  #
+  # bd-5zvux5: the pre-flight doctor snapshot distinguishes "the stack was
+  # already down before this deploy touched anything" (first-ever deploy, or
+  # a planned-downtime deploy like a DB move where the operator stops the
+  # server on purpose) from "this deploy broke a healthy server". Only the
+  # latter should ever auto-roll-back — rolling back when there was nothing
+  # healthy to preserve just relabels "stack is down" as this deploy's fault.
+  describe "cold deploy (server unreachable before the deploy began)" do
+    # Unlike `stub_release/4` (whose `/api/workspaces` route is a static
+    # 200/fixture), this keeps `/api/workspaces` transport-erroring for every
+    # request — before the swap, during the green-wait, and after — so
+    # `Restart.perform/2`'s pre-restart `Doctor.reachable?()` sample (which
+    # `ReleaseDeploy` uses to tell cold from warm) is genuinely false, the
+    # same as a truly stopped server.
+    defp stub_release_stack_down(tag, tarball, sha) do
+      api_path = "/repos/#{@repo}/releases/latest"
+
+      stub_routes([
+        {{"get", api_path}, {release_json(tag), 200}},
+        {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
+        {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha) end},
+        {{"get", "/api/workspaces"},
+         fn conn -> Req.Test.transport_error(conn, :econnrefused) end},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+    end
+
+    test "no prior release, still unreachable after restart: deploys without rolling back",
+         %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_stack_down(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      refute out =~ "Rolled back"
+      refute out =~ "No prior release to roll back to"
+      assert out =~ @vsn
+      assert out =~ "was already down before this deploy began"
+
+      # current still points at the new release — nothing was rolled back.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+      assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+    end
+
+    test "a prior release exists (planned-downtime deploy, e.g. a DB move): still does not roll back",
+         %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag)
+      point_current(home, prior)
+
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_stack_down(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      refute out =~ "Rolled back to #{prior_tag}"
+      assert out =~ "was already down before this deploy began"
+
+      # current still points at the new release, not back at the prior one.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+    end
+  end
+
   # ---- migration ordering (bd-bksulf) ------------------------------------
 
   describe "migration ordering" do
