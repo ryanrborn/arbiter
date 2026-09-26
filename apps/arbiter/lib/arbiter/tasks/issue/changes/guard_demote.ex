@@ -78,7 +78,7 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardDemote do
   end
 
   defp has_live_workers?(task_id) do
-    WorkerRegistry.all_for(task_id) |> Enum.any?()
+    WorkerRegistry.live_for(task_id) |> Enum.any?()
   rescue
     _ -> false
   end

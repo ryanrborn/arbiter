@@ -185,6 +185,25 @@ defmodule ArbiterWeb.BoardLive do
   def handle_event("refine", %{"id" => id}, socket),
     do: {:noreply, ArbiterWeb.RefineEntry.open(socket, id)}
 
+  def handle_event("return_to_backlog", %{"id" => id}, socket) do
+    case Arbiter.Tasks.Issue.get(id) do
+      {:ok, task} ->
+        case Ash.update(task, %{}, action: :return_to_backlog) do
+          {:ok, _demoted} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Returned to Backlog for further refinement.")
+             |> refresh_all()}
+
+          {:error, err} ->
+            {:noreply, put_flash(socket, :error, ArbiterWeb.TaskForm.error_message(err))}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   # ---- the scheduler switch -------------------------------------------------
 
   # One switch for the whole install, because there is one scheduler. Pausing
@@ -859,6 +878,13 @@ defmodule ArbiterWeb.BoardLive do
                   <:status :if={entry.card.over_budget}>
                     <.over_budget_flag />
                   </:status>
+                  <:actions>
+                    <ArbiterWeb.DemoteEntry.demote_button
+                      id={"board-demote-#{entry.card.id}"}
+                      issue_id={entry.card.id}
+                      variant="ghost"
+                    />
+                  </:actions>
                 </.task_card>
               </div>
 
