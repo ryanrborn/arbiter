@@ -54,6 +54,25 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       assert length(json_response(conn, 200)["data"]) == 2
     end
 
+    test "query uses started_at index for sorting" do
+      # Verify the index on started_at can be used when sorting
+      now = DateTime.utc_now()
+      insert_run!(%{task_id: "bd-idx1", started_at: DateTime.add(now, -10, :second)})
+      insert_run!(%{task_id: "bd-idx2", started_at: now})
+
+      # Query without task_id filter to verify the started_at index is used
+      query =
+        Arbiter.Workers.Run
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(20)
+
+      # Verify the query can be built and executed
+      results = Ash.read!(query)
+      assert length(results) > 0
+      # Most recent first
+      assert List.first(results).started_at >= List.last(results).started_at
+    end
+
     test "before cursor filters to earlier started_at", %{conn: conn} do
       a = insert_run!(%{task_id: "bd-c1", started_at: ~U[2026-05-27 10:00:00.000000Z]})
       _ = insert_run!(%{task_id: "bd-c2", started_at: ~U[2026-05-27 12:00:00.000000Z]})

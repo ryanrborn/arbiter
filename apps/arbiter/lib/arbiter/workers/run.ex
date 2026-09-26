@@ -90,6 +90,10 @@ defmodule Arbiter.Workers.Run do
       # surfaced by `GET /api/workers/history?task_id=…` and `arb worker runs`.
       index [:task_id, :started_at]
 
+      # Powers "all runs sorted by started_at, newest first" — the general list
+      # reads behind GET /api/workers/history without task_id filter (bd-a8w4xb).
+      index [:started_at]
+
       # Powers "how did runs die, grouped by typed category" without a scan
       # (bd-apwfmy).
       index [:stop_category]
