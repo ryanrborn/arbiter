@@ -564,7 +564,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   defp latest_review_round_findings(task_id) do
     Round
     |> Ash.Query.filter(task_id == ^task_id and role == :review)
-    |> Ash.Query.sort(round: :desc, inserted_at: :desc)
+    |> Ash.Query.sort(fix_round_attempt: :desc, round: :desc, inserted_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> List.first()

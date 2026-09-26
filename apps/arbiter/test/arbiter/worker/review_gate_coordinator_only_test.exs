@@ -8,9 +8,12 @@ defmodule Arbiter.Worker.ReviewGateCoordinatorOnlyTest do
   On bd-28t80i (PR #2050, 2026-09-25) every round flagged AC3 — verifiable only
   post-deploy — and the fleet still ran 4 implementer passes and 6 reviews
   chasing it before the fix-round budget forced an escalation. The fixture
-  here (`review_findings_bd_28t80i_round3.md`) is a reconstruction of that
-  shape (a `[NOT MET]` criterion tagged `[NEEDS-COORDINATOR]` alongside a
-  `[MET]` one), not a verbatim transcript.
+  here (`review_findings_bd_28t80i_round3.md`) is bd-28t80i's actual round-3
+  review text (read from `review_gate_rounds`, live DB, read-only), trimmed to
+  its CRITERIA and first finding, with the `[NEEDS-COORDINATOR]` tag added to
+  the AC3 line — the real review said in prose that AC3 "needs a coordinator
+  or operator", but this feature (`bd-6d3h8m`) postdates that round, so the
+  tag itself was never actually emitted.
   """
 
   use Arbiter.DataCase, async: false
