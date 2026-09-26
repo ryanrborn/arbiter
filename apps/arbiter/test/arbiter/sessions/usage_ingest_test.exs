@@ -8,6 +8,8 @@ defmodule Arbiter.Sessions.UsageIngestTest do
   alias Arbiter.Sessions.UsageIngest
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
+  alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Tasks.Workspace
   require Ash.Query
 
   defp tmp_dir!(tag) do
@@ -449,6 +451,85 @@ defmodule Arbiter.Sessions.UsageIngestTest do
       assert_in_delta Enum.sum(Enum.map(rows, & &1.cost_usd)), 3.0781575, 0.0000001
 
       assert {:ok, %{rows_written: 0}} = UsageIngest.ingest(dirs: [dir])
+    end
+  end
+
+  describe "provider_account_id" do
+    test "a coordinator session with no workspace uses the install-wide account" do
+      dir = tmp_dir!("ingest-account")
+      sid = "sess-#{System.unique_integer([:positive])}"
+      write!(dir, sid, [turn(sid, "m1", now(), 10, 100), cost_state(sid, 2.5, start_ms())])
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      assert [ev] = rows_for(sid)
+
+      assert ev.provider_account_id != nil,
+             "provider_account_id must be set for coordinator sessions"
+
+      assert is_binary(ev.provider_account_id)
+    end
+
+    test "a browser-hosted session with a workspace uses that workspace's account" do
+      # Create a workspace
+      {:ok, ws} = Ash.create(Workspace, %{name: "test-workspace"})
+
+      # Create a provider account for this workspace
+      {:ok, account} = Ash.create(ProviderAccount, %{provider: :claude, slug: "test-account"})
+
+      # Link the workspace to the account
+      {:ok, _join} =
+        Ash.create(Arbiter.Accounts.WorkspaceProviderAccount, %{
+          workspace_id: ws.id,
+          provider_account_id: account.id,
+          provider: :claude
+        })
+
+      # Create a browser session with this workspace
+      config_dir = tmp_dir!("browser-session-ws")
+      project_dir = Path.join(config_dir, "projects/-home-ryan-dev-admiral")
+      File.mkdir_p!(project_dir)
+      sid = "sess-#{System.unique_integer([:positive])}"
+
+      write!(project_dir, sid, [
+        turn(sid, "m1", now(), 10, 100),
+        cost_state(sid, 2.5, start_ms())
+      ])
+
+      session = %{config_dir: config_dir, workspace_id: ws.id}
+
+      assert {:ok, %{rows_written: 1}} =
+               UsageIngest.ingest(dirs: [], sessions: [session])
+
+      assert [ev] = rows_for(sid)
+
+      assert ev.provider_account_id == account.id,
+             "coordinator session should use the workspace's provider account"
+
+      assert ev.workspace_id == ws.id,
+             "workspace_id should be stamped for workspace-bound sessions"
+    end
+
+    test "arb usage --by account attributes coordinator-session spend to the resolved account" do
+      dir = tmp_dir!("ingest-by-account")
+      sid = "sess-#{System.unique_integer([:positive])}"
+      write!(dir, sid, [turn(sid, "m1", now(), 10, 100), cost_state(sid, 3.5, start_ms())])
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      # The row should have a provider_account_id set
+      assert [ev] = rows_for(sid)
+      assert ev.provider_account_id != nil
+
+      # Verify that the usage summarization includes this row under its account
+      since = DateTime.add(now(), -1, :day)
+
+      {:ok, by_account} = Usage.summarize(by: :account, since: since)
+      account_row = Enum.find(by_account, &(&1.group == ev.provider_account_id))
+
+      assert account_row, "the account should appear in the usage summary"
+      assert account_row.total_cost_usd >= 3.5
+      assert account_row.tokens_in >= 10
     end
   end
 end
