@@ -80,14 +80,34 @@ defmodule Arbiter.Agents.Gemini.Security do
     * `allowNonWorkspaceAccess: false` did **not** stop an out-of-worktree
       access in `always-proceed`: a `touch <outside>/marker` via `run_command`
       succeeded, and so did a `view_file` read of a file outside the workspace.
-      We still emit the key (it is the documented switch and costs nothing), but
-      the load-bearing out-of-worktree guard is the `write_file(...)` deny list
-      below plus `:strict`'s allowlist-only shell — not this flag. Note this
-      applies to `write_file` specifically: unlike `command`/`read_file`, an
-      out-of-worktree `write_to_file` with *no* matching allow rule at all
-      still succeeded under `"proceed-in-sandbox"` — `write_file` is
-      deny-list-gated, not allowlist-gated, in every `toolPermission` value
-      probed.
+      We still emit the key (it is the documented switch and costs nothing).
+    * **`write_file(...)` permission rules do not gate agy's native
+      `write_to_file` tool at all (bd-25ivqe AC6, agy 1.2.11).** The claim in
+      an earlier revision of this moduledoc — that `write_file` is
+      "deny-list-gated" the way `command`/`read_file` are — was never actually
+      confirmed against a real match; the only rule tried against a live write
+      (`write_file(/etc/**)`) happened to coincide with a path the OS itself
+      denies to a non-root user, which looks identical to an agy-side deny
+      from the outside. Re-probed directly against a path the calling user
+      genuinely can write (a throwaway `$HOME`-adjacent workspace dir, and
+      `/tmp`): an exactly-matching `write_file(<dir>/**)` deny, a blanket
+      `write_file(**)` deny, and `--sandbox` (which bwraps `run_command` but
+      not the native tool) all still let `write_to_file` succeed outside the
+      worktree with no denial and no error. `disabledTools` (a real
+      `settings.json` key, confirmed present in the binary) also does not
+      stop it — that key gates MCP-server tools, not agy's own built-ins. So
+      **there is currently no `settings.json` lever, in any `toolPermission`
+      value, that confines `write_to_file` to the worktree.** The
+      `write_file(...)` deny rules below are still emitted (harmless, and
+      they cost nothing against a future agy release that starts honoring
+      them), but they are not load-bearing today. This is what post-merge
+      probe bd-7h2cuk observed live: `arb inbox`/notes worked (the allowlist
+      fix), but a `write_to_file` created a file outside any worktree with no
+      denial. Closing this gap needs either an upstream agy fix or real OS
+      isolation (a restricted user, namespace, or filesystem jail around the
+      whole process) — out of scope for this settings-translation module; see
+      AC6 in bd-25ivqe, explicitly post-merge and non-blocking for exactly
+      this reason.
     * `--sandbox` does not change `init.permission_mode` (it still echoes
       whatever `toolPermission` says); see the Mapping section above for why
       it is no longer part of `:strict`'s argv despite once being. As on the

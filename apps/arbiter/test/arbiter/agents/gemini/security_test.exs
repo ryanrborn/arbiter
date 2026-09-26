@@ -333,6 +333,39 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
     end
   end
 
+  describe "AC6 (bd-25ivqe) — write_file deny does not gate write_to_file (post-merge probe bd-7h2cuk)" do
+    test "the generated document still carries a write_file(**) deny for a review policy" do
+      # Kept here as the premise the next test disproves: the deny rule is
+      # emitted (see "a worktree-backed review spawn's read-only deny
+      # survives translation" above), it just is not enforced by agy against
+      # its own native write tool (see the moduledoc's "Honesty about
+      # enforcement level" section).
+      review =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          "permissions" => %{"deny" => ["Edit", "Write", "NotebookEdit"]}
+        })
+
+      assert "write_file(**)" in Security.deny_rules(review)
+    end
+
+    test "a write_to_file outside the worktree still succeeds despite a matching write_file deny" do
+      # Captured live against agy 1.2.11 with `permissions.deny:
+      # ["write_file(**)"]` (a blanket rule that matches every path) and
+      # `toolPermission: "proceed-in-sandbox"`: `write_to_file` to a path
+      # outside the worktree still comes back DONE, not ERROR/denied. This is
+      # the live root cause behind bd-7h2cuk's finding (arb/notes worked, but
+      # a stray file was created outside any worktree with no denial) — there
+      # is currently no `settings.json` rule that confines `write_to_file` to
+      # the worktree. If this ever starts failing, agy has started honoring
+      # `write_file` denies and the moduledoc's honesty section (and AC6's
+      # "not a merge gate" reasoning) should be revisited.
+      step = fixture("agy_write_to_file_deny_not_enforced.json")["step_update"]
+
+      assert step["tool_name"] == "write_to_file"
+      assert step["state"] == "DONE"
+    end
+  end
+
   describe "no_public_upload (bd-80talz)" do
     test "the resolved default policy denies read_url/execute_url for every documented host" do
       deny = Security.deny_rules(SecurityPolicy.resolve(nil))

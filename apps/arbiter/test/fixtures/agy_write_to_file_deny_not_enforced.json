@@ -1,0 +1,1 @@
+{"event":"step_update","step_update":{"conversation_id":"868c309c-be12-4fa1-a944-f9002211b6b6","step_index":2,"state":"DONE","step_type":"tool","tool_name":"write_to_file","duration_seconds":0.031914416,"tool_info":{"name":"write_to_file","parameters":{"TargetFile":"/tmp/tmp.2WegfUTQ5J/fixture-capture.txt"}}}}
