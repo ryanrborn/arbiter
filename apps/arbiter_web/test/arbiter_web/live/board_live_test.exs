@@ -521,7 +521,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       {:ok, view, _html} = live(conn, "/")
 
-      html =
+      _html =
         view
         |> element(
           ~s(#board-column-ready [id="card-#{task.id}"] button[phx-click="return_to_backlog"])
