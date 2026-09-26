@@ -833,6 +833,33 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  describe "POST /api/issues/:id/demote" do
+    test "demotes a task from Ready to Backlog", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "demote me", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert refined.refined == true
+
+      conn = post(conn, ~p"/api/issues/#{refined.id}/demote")
+
+      body = json_response(conn, 200)
+      assert body["refined"] == false
+    end
+
+    test "demoting an already-backlog task is a no-op success", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+
+      assert issue.refined == false
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/demote")
+
+      body = json_response(conn, 200)
+      assert body["refined"] == false
+    end
+  end
+
   # bd-9so315 — post-merge verification over REST (the `arb` CLI's transport).
   describe "verify_after_deploy over REST" do
     test "create + patch set the flag and it is rendered", %{conn: conn, ws: ws} do

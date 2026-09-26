@@ -1993,7 +1993,7 @@ defmodule ArbiterWeb.TaskDetailLive do
             </ArbiterWeb.CoreComponents.Core.button>
             <%!-- Return to Backlog — inverse of promote. Only shown when refined=true and status=:open. --%>
             <ArbiterWeb.CoreComponents.Core.button
-              :if={@task.refined and @task.status == :open}
+              :if={ArbiterWeb.DemoteEntry.eligible?(@task)}
               size="sm"
               variant="secondary"
               phx-click="return_to_backlog"

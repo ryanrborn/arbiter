@@ -13,6 +13,7 @@ defmodule ArbiterWeb.Api.IssueController do
     * `POST   /api/issues/:id/close`   — :close (body: optional `reason`)
     * `POST   /api/issues/:id/reopen`  — :reopen
     * `POST   /api/issues/:id/promote` — :promote
+    * `POST   /api/issues/:id/demote`  — :demote (return to backlog)
     * `POST   /api/issues/:id/verify`  — :verify (body: `outcome` +
       `evidence`) — records the post-merge restart-and-observe result
       (bd-9so315)
@@ -276,6 +277,13 @@ defmodule ArbiterWeb.Api.IssueController do
     with {:ok, issue} <- Ash.get(Issue, id),
          {:ok, promoted} <- Ash.update(issue, promote_args, action: :promote_to_ready) do
       render(conn, :show, issue: promoted)
+    end
+  end
+
+  def demote(conn, %{"id" => id}) do
+    with {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, demoted} <- Ash.update(issue, %{}, action: :return_to_backlog) do
+      render(conn, :show, issue: demoted)
     end
   end
 

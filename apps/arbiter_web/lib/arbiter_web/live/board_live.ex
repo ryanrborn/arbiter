@@ -880,6 +880,7 @@ defmodule ArbiterWeb.BoardLive do
                   </:status>
                   <:actions>
                     <ArbiterWeb.DemoteEntry.demote_button
+                      :if={ArbiterWeb.DemoteEntry.eligible?(entry.card)}
                       id={"board-demote-#{entry.card.id}"}
                       issue_id={entry.card.id}
                       variant="ghost"

@@ -157,7 +157,7 @@ defmodule Arbiter.Worker.Dispatch do
          # bd-a1bmyx: Autopilot re-checks refined before dispatching to catch
          # demotions (refined: true → false) that happen between when Autopilot
          # plans the dispatch and when it actually runs. We only do this for
-         # Autopilot dispatches (marked with `autopilot: true`), not manual
+         # Autopilot dispatches (marked with `dispatched_by: "autopilot"`), not manual
          # dispatches via CLI/API which are allowed to dispatch unrefined tasks.
          :ok <- maybe_ensure_refined(task, opts),
          opts = apply_issue_repo_default(task, opts),
