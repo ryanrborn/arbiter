@@ -158,10 +158,15 @@ defmodule ArbiterWeb.WorkspaceDetail.WorkerSecurityComponent do
         "mode" => params["mode"],
         "allow" => rule_list(params["allow"]),
         "deny" => rule_list(params["deny"]),
-        "safe_defaults" =>
+        # bd-4420va: written as an exclude list (the unchecked categories)
+        # rather than the checked ones — `safe_defaults` is a legacy, inert
+        # key now (see `Arbiter.Agents.SecurityPolicy`); a category is only
+        # ever dropped by naming it in `safe_defaults_exclude`, so every
+        # other current and future default category keeps applying.
+        "safe_defaults_exclude" =>
           categories
           |> Enum.map(&Atom.to_string/1)
-          |> Enum.filter(&(Map.get(safe_defaults, &1) == "true"))
+          |> Enum.reject(&(Map.get(safe_defaults, &1) == "true"))
       },
       "sandbox" => %{
         "enabled" => params["sandbox_enabled"] == "true",

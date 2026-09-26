@@ -254,20 +254,51 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert p.sandbox.network == true
     end
 
-    test "safe_defaults are replaced (not unioned) and unknown categories dropped" do
+    # bd-4420va: a pinned `safe_defaults` list used to *replace* the baseline
+    # wholesale, so a workspace that pinned it before a new category shipped
+    # (vstim pinning the 4 categories that existed pre-v0.1.78) silently never
+    # got the new ones (:no_public_upload, :no_pr_create, :no_async_wait,
+    # :no_gh_publish never applied). The legacy key is now read-but-inert: it
+    # no longer narrows the resolved set. `safe_defaults_exclude` is the only
+    # supported way to drop a category (see the next describe block).
+    test "a legacy pinned safe_defaults list no longer narrows the resolved set" do
       p =
         SecurityPolicy.merge(SecurityPolicy.base(), %{
-          "permissions" => %{"safe_defaults" => ["no_force_push", "bogus_category"]}
+          "permissions" => %{
+            "safe_defaults" => [
+              "no_destructive_fs",
+              "no_force_push",
+              "no_secret_reads",
+              "no_outside_writes"
+            ]
+          }
         })
 
-      assert p.permissions.safe_defaults == [:no_force_push]
+      assert :no_public_upload in p.permissions.safe_defaults
+      assert :no_pr_create in p.permissions.safe_defaults
+      assert :no_async_wait in p.permissions.safe_defaults
+      assert :no_gh_publish in p.permissions.safe_defaults
+
+      assert Enum.sort(p.permissions.safe_defaults) ==
+               Enum.sort(SecurityPolicy.safe_default_categories())
     end
 
-    test "an empty safe_defaults opts the domain out" do
+    test "an empty legacy safe_defaults no longer opts the domain out (must exclude by name now)" do
       p =
         SecurityPolicy.merge(SecurityPolicy.base(), %{"permissions" => %{"safe_defaults" => []}})
 
-      assert p.permissions.safe_defaults == []
+      assert Enum.sort(p.permissions.safe_defaults) ==
+               Enum.sort(SecurityPolicy.safe_default_categories())
+    end
+
+    test "unknown category names in safe_defaults_exclude are dropped" do
+      p =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          "permissions" => %{"safe_defaults_exclude" => ["no_force_push", "bogus_category"]}
+        })
+
+      refute :no_force_push in p.permissions.safe_defaults
+      assert :no_destructive_fs in p.permissions.safe_defaults
     end
 
     test "accepts atom-keyed override maps (app env / programmatic)" do
@@ -427,6 +458,72 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       # litterbox is catbox's temporary host, litter.catbox.moe — covered by
       # catbox.moe's subdomain rule rather than listed on its own.
       refute "litter.catbox.moe" in SecurityPolicy.public_upload_hosts()
+    end
+  end
+
+  # bd-4420va: vstim pinned `agent.security.permissions.safe_defaults` to the
+  # 4 categories that existed before v0.1.78 (#2061 / bd-80talz added 4 more).
+  # A pinned list used to *replace* the baseline, so vstim silently never got
+  # :no_public_upload, :no_pr_create, :no_async_wait or :no_gh_publish, with
+  # nothing surfacing the gap. `safe_defaults_exclude` is now the only
+  # supported way to drop a category by name.
+  describe "a pinned safe_defaults list does not opt a workspace out of new categories (bd-4420va)" do
+    @vstim_pinned_config %{
+      "agent" => %{
+        "security" => %{
+          "permissions" => %{
+            "safe_defaults" => [
+              "no_destructive_fs",
+              "no_force_push",
+              "no_secret_reads",
+              "no_outside_writes"
+            ]
+          }
+        }
+      }
+    }
+
+    test "resolves :no_public_upload (and every other current default) despite the old pinned list" do
+      p = SecurityPolicy.resolve(%{config: @vstim_pinned_config})
+
+      for category <- SecurityPolicy.safe_default_categories() do
+        assert category in p.permissions.safe_defaults,
+               "expected #{category} to still be resolved for a workspace with an old pinned safe_defaults list"
+      end
+    end
+
+    test "an explicit safe_defaults_exclude still drops a category by name, and is the only way to" do
+      config =
+        put_in(
+          @vstim_pinned_config,
+          ["agent", "security", "permissions", "safe_defaults_exclude"],
+          ["no_public_upload"]
+        )
+
+      p = SecurityPolicy.resolve(%{config: config})
+
+      refute :no_public_upload in p.permissions.safe_defaults
+      # Everything else (including the other categories missing from the
+      # legacy pinned list) still resolves.
+      assert :no_pr_create in p.permissions.safe_defaults
+      assert :no_async_wait in p.permissions.safe_defaults
+      assert :no_gh_publish in p.permissions.safe_defaults
+    end
+
+    test "the resolved summary names the workspace's excluded/missing default categories" do
+      config =
+        put_in(
+          @vstim_pinned_config,
+          ["agent", "security", "permissions", "safe_defaults_exclude"],
+          ["no_public_upload", "no_secret_reads"]
+        )
+
+      summary = SecurityPolicy.resolve(%{config: config}) |> SecurityPolicy.summary()
+
+      assert Enum.sort(summary["safe_defaults_exclude"]) == [
+               "no_public_upload",
+               "no_secret_reads"
+             ]
     end
   end
 end

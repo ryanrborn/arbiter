@@ -81,8 +81,12 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       refute "WebFetch" in rules
     end
 
-    test "opting out of safe_defaults empties the baseline" do
-      rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
+    test "excluding no_destructive_fs drops the rm -rf deny" do
+      rules =
+        Security.deny_rules(
+          policy(%{"permissions" => %{"safe_defaults_exclude" => ["no_destructive_fs"]}})
+        )
+
       refute Enum.any?(rules, &(&1 =~ "rm -rf"))
     end
 
@@ -95,8 +99,12 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       assert "Bash(glab mr create:*)" in rules
     end
 
-    test "opting out of safe_defaults also drops the PR-create deny" do
-      rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
+    test "opting out via safe_defaults_exclude also drops the PR-create deny" do
+      rules =
+        Security.deny_rules(
+          policy(%{"permissions" => %{"safe_defaults_exclude" => ["no_pr_create"]}})
+        )
+
       refute Enum.any?(rules, &(&1 =~ "gh pr create"))
     end
 
@@ -113,8 +121,12 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       assert "ScheduleWakeup" in rules
     end
 
-    test "opting out of safe_defaults also drops the async-wait deny" do
-      rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
+    test "opting out via safe_defaults_exclude also drops the async-wait deny" do
+      rules =
+        Security.deny_rules(
+          policy(%{"permissions" => %{"safe_defaults_exclude" => ["no_async_wait"]}})
+        )
+
       refute "Monitor" in rules
       refute "ScheduleWakeup" in rules
     end
@@ -157,8 +169,12 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       assert "Bash(curl *catbox.moe*)" in Jason.decode!(json)["permissions"]["deny"]
     end
 
-    test "opting out of safe_defaults drops it" do
-      rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
+    test "opting out via safe_defaults_exclude drops it" do
+      rules =
+        Security.deny_rules(
+          policy(%{"permissions" => %{"safe_defaults_exclude" => ["no_public_upload"]}})
+        )
+
       refute Enum.any?(rules, &(&1 =~ "catbox"))
     end
   end

@@ -35,7 +35,8 @@ syntax.
     allow: ["…"],            # operator-added allow rules
     deny:  ["…"],            # operator-added deny rules
     safe_defaults: [:no_destructive_fs, :no_force_push,
-                    :no_secret_reads, :no_outside_writes]
+                    :no_secret_reads, :no_outside_writes],
+    safe_defaults_exclude: []   # names dropped from the current default set
   },
   sandbox: %{
     enabled: true,
@@ -77,7 +78,16 @@ the tightest allow-list posture.
 ### Safe-by-default deny
 
 `safe_defaults` is the **non-empty** baseline every adapter must deny, even in
-`auto`. The categories:
+`auto`. It always resolves to the **current full set of default categories
+minus any explicit exclusions** — a workspace can only shrink it by naming
+categories in `safe_defaults_exclude`, never by pinning a fixed list. This
+means a workspace config written before a new category existed still picks
+that category up automatically the moment it ships (see bd-4420va: a pinned
+`safe_defaults` from before v0.1.78 silently missed `:no_public_upload` until
+this rule was added). The legacy `permissions.safe_defaults` config key is
+still accepted for backward compatibility but is **inert** — its value is
+ignored entirely, since the resolved set is always computed from the current
+defaults. The categories:
 
 | Category             | Blocks (examples)                                         |
 |----------------------|-----------------------------------------------------------|
@@ -124,14 +134,25 @@ matched. The worker prompt's `NO PUBLIC UPLOADS` rule
 (`Arbiter.Worker.EvidenceIntegrity.worker_block/0`) says the same thing to
 every provider, Codex included.
 
-Set `safe_defaults: []` to opt a domain out (not recommended). **Effective floor
-caveat:** the isolated `CLAUDE_CONFIG_DIR/settings.json` is generated once from
-the install-default policy (which includes all four safe-default categories) and
-Claude unions deny lists across settings sources. Setting `safe_defaults: []` in
-workspace config removes those categories from the per-spawn `--settings` deny
-list, but the config-dir floor still carries them. The practical effect is that
-the config-dir safe-default denies are a **hard minimum** that cannot be removed
-through workspace config alone — only changing `SecurityPolicy.base/0` or the
+To opt a domain out of specific categories, name them in
+`permissions.safe_defaults_exclude` (e.g. `["no_destructive_fs"]`, not
+recommended). This is the **only** way to drop a default category —
+`safe_defaults_exclude` unions across resolution layers (workspace, repo
+override, per-dispatch), so once a category is excluded anywhere in the
+chain it stays excluded; nothing can re-add it back except removing the
+exclusion. The old `permissions.safe_defaults: []` key (a literal, replacing
+list) is **inert** — it is still accepted so existing configs keep parsing,
+but its value has no effect on the resolved deny set, which is always
+`safe_default_categories() -- safe_defaults_exclude`. `arb server doctor` and
+`arb prime` flag any workspace whose resolved policy is missing a current
+default category, naming which ones. **Effective floor caveat:** the isolated
+`CLAUDE_CONFIG_DIR/settings.json` is generated once from the install-default
+policy (which includes every safe-default category) and Claude unions deny
+lists across settings sources. Excluding a category in workspace config
+removes it from the per-spawn `--settings` deny list, but the config-dir
+floor still carries it. The practical effect is that the config-dir
+safe-default denies are a **hard minimum** that cannot be removed through
+workspace config alone — only changing `SecurityPolicy.base/0` or the
 install-level `:worker_security_policy` app env removes them.
 
 ### Sandbox
@@ -241,9 +262,14 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 
 `base/0` → `:worker_security_policy` app env → `workspace.config["agent"]["security"]`
 → `workspace.config["agent"]["security"]["repos"][repo]` (only when a repo name
-is passed) → per-dispatch override. `allow`/`deny` **union** across layers;
-`mode`, `safe_defaults`, and `sandbox` fields are **replaced** by the highest
-layer that sets them.
+is passed) → per-dispatch override. `allow`/`deny`/`safe_defaults_exclude`
+**union** across layers; `mode` and `sandbox` fields are **replaced** by the
+highest layer that sets them. `safe_defaults` itself is never set directly —
+it is always recomputed as `safe_default_categories() -- safe_defaults_exclude`
+after every layer is applied, so it always reflects the current default set
+minus whatever any layer has excluded by name. The legacy `safe_defaults`
+config key is parsed for backward compatibility but does not affect
+resolution.
 
 ## How the Claude adapter maps it
 
