@@ -32,6 +32,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_close` | coordinator | `Ash.update(issue, …, action: :close)` |
   | `task_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
   | `task_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
+  | `task_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
   | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
@@ -612,6 +613,25 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_promote/2
+    },
+    %{
+      name: "task_demote",
+      tiers: @coordinator,
+      description:
+        "Demote a task from Ready back to Backlog (set `refined: false`) via the `:return_to_backlog` action. " <>
+          "Coordinator only. Idempotent by design — demoting an already-backlog task is a no-op success, " <>
+          "not an error. A task can only be demoted if it has no live worker and its status is `:open` " <>
+          "(undispatched). Refuses to demote tasks that are `:in_progress`, `:awaiting_verification`, or `:closed` " <>
+          "with a clear reason — demoting those would orphan the worker or undo completed work.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Task id (required)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.task_demote/2
     },
     %{
       name: "task_sync_upstream_close",

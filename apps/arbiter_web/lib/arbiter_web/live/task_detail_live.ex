@@ -561,6 +561,33 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
+  # ---- return to Backlog ----
+  #
+  # Inverse of promote: move a task from Ready back to Backlog.
+  # Refused if the task has a live worker or is in an unsafe state.
+
+  def handle_event("return_to_backlog", _params, socket) do
+    case socket.assigns.task do
+      %Issue{refined: false} ->
+        {:noreply, socket}
+
+      %Issue{} = task ->
+        case Ash.update(task, %{}, action: :return_to_backlog) do
+          {:ok, _demoted} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Returned to Backlog for further refinement.")
+             |> refresh_all()}
+
+          {:error, err} ->
+            {:noreply, put_flash(socket, :error, TaskForm.error_message(err))}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   # ---- dispatch ----
   #
   # Dispatch spends real API credits, so the modal is the confirmation step:
@@ -1963,6 +1990,17 @@ defmodule ArbiterWeb.TaskDetailLive do
                     `icon` slot is documented as a *leading* element, so it
                     goes in the inner block instead. --%>
               Move to Ready <ArbiterWeb.CoreComponents.Core.icon name="hero-arrow-right-mini" />
+            </ArbiterWeb.CoreComponents.Core.button>
+            <%!-- Return to Backlog — inverse of promote. Only shown when refined=true and status=:open. --%>
+            <ArbiterWeb.CoreComponents.Core.button
+              :if={@task.refined and @task.status == :open}
+              size="sm"
+              variant="secondary"
+              phx-click="return_to_backlog"
+              title="Return to Backlog for further refinement"
+            >
+              <ArbiterWeb.CoreComponents.Core.icon name="hero-arrow-left-mini" />
+              Return to Backlog
             </ArbiterWeb.CoreComponents.Core.button>
             <ArbiterWeb.CoreComponents.Core.button size="sm" phx-click="open_edit">
               <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-pencil-square-mini" /></:icon>
