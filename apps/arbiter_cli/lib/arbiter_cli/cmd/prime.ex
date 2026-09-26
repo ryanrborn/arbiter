@@ -277,7 +277,7 @@ defmodule ArbiterCli.Cmd.Prime do
     tracker_type = get_in(ws, ["config", "tracker", "type"]) || "none"
     IO.puts("  tracker: #{tracker_type}")
 
-    emit_security_posture(ws["security_posture"])
+    emit_security_posture(ws["security_posture"], ws["config"])
     IO.puts("")
 
     maybe_emit_standing_orders_section(ws_section.standing_orders)
@@ -400,11 +400,12 @@ defmodule ArbiterCli.Cmd.Prime do
   # The resolved worker security posture (server-computed; see
   # ArbiterWeb.Api.WorkspaceJSON). Surfaced so a fresh coordinator session sees,
   # up front, what a worker spawned in this domain may and may not do.
-  defp emit_security_posture(%{} = posture) do
+  defp emit_security_posture(%{} = posture, config) do
     sandbox = posture["sandbox"] || %{}
     deny = List.wrap(posture["deny"])
     safe = List.wrap(posture["safe_defaults"])
     allow = List.wrap(posture["allow"])
+    missing = List.wrap(posture["safe_defaults_exclude"])
 
     net = if Map.get(sandbox, "network", true), do: "on", else: "tools-off"
 
@@ -420,9 +421,34 @@ defmodule ArbiterCli.Cmd.Prime do
       "    deny:    #{length(safe)} safe-default + #{length(deny)} custom" <>
         ", allow: #{length(allow)}"
     )
+
+    # bd-4420va: name every current default category this workspace's
+    # resolved policy excludes, so an operator sees it here rather than
+    # discovering it live in a worker's --settings.
+    if missing != [] do
+      IO.puts("    WARNING: missing safe-default categories: #{Enum.join(missing, ", ")}")
+    end
+
+    if has_legacy_safe_defaults_key?(config) do
+      IO.puts(
+        "    WARNING: legacy safe_defaults key present in config — it is ignored, use " <>
+          "safe_defaults_exclude"
+      )
+    end
   end
 
-  defp emit_security_posture(_), do: :ok
+  defp emit_security_posture(_, _config), do: :ok
+
+  defp has_legacy_safe_defaults_key?(config) when is_map(config) do
+    config
+    |> get_in(["agent", "security", "permissions"])
+    |> case do
+      %{} = permissions -> Map.has_key?(permissions, "safe_defaults")
+      _ -> false
+    end
+  end
+
+  defp has_legacy_safe_defaults_key?(_config), do: false
 
   defp emit_workers_section({:ok, []}, worker) do
     IO.puts("== Active #{worker}s ==")
