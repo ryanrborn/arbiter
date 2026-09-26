@@ -221,6 +221,35 @@ async function run(page, cdp, sessionId) {
           `summaries visible: ${groupsShown}`
         )
 
+        if (width === DESKTOP) {
+          // `Rows.mobile_group/1`'s groups collapse to `display: contents` at
+          // `sm:`, so the divider each group would otherwise draw against its
+          // neighbour has to be repainted on a real box (a row, not the
+          // now-boxless `<details>`/wrapper). This proves it actually is:
+          // every adjacent pair of settings rows in the Policy pane still has
+          // a visible line between them, group boundaries included.
+          const missingDividers = await page.eval(`(() => {
+            // Scoped to PolicyConfigComponent's own root — the workspace-name
+            // and repo-overrides rows sit in *separate* \`Rows.rows/1\`
+            // containers earlier/later in the DOM, each with their own
+            // \`border-y\`, so a missing border between them is not this bug.
+            const rows = [...document.querySelectorAll("#policy-config [data-setting-row]")]
+              .filter((el) => el.offsetParent !== null)
+            const hasBorder = (el, side) => parseFloat(getComputedStyle(el)[side]) > 0
+            const gaps = []
+            for (let i = 0; i < rows.length - 1; i++) {
+              const drawn = hasBorder(rows[i], "borderBottomWidth") || hasBorder(rows[i + 1], "borderTopWidth")
+              if (!drawn) gaps.push(rows[i].dataset.settingRow + " / " + rows[i + 1].dataset.settingRow)
+            }
+            return gaps
+          })()`)
+          check(
+            `workspace policy pane ${width}px/${theme} row dividers unbroken`,
+            missingDividers.length === 0,
+            missingDividers.length === 0 ? "every adjacent row pair has a line" : missingDividers.join(", ")
+          )
+        }
+
         await screenshot(cdp, sessionId, `workspace-policy-${width}-${theme}`)
       }
     }
