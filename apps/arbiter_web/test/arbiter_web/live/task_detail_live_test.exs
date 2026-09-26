@@ -1946,6 +1946,41 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert summary =~ "approved"
     end
 
+    test "an automatic fix round's later approval reads as approved, not the earlier rejection",
+         %{conn: conn, task: task} do
+      # bd-6d3h8m: pass 1 rejects at round 3 (fix_round_attempt 0), then the
+      # automatic fix round resets round numbering to 1 for pass 2
+      # (fix_round_attempt 1), which approves. Sorting on `round` alone would
+      # order pass 2's round 1 approval BEFORE pass 1's round 3 rejection, so
+      # the summary would show "changes requested" for a task that was
+      # actually approved.
+      r1 = review_run(task, 1)
+      r2 = review_run(task, 2)
+
+      round!(task, %{
+        round: 3,
+        fix_round_attempt: 0,
+        run_id: r1.id,
+        verdict: :request_changes,
+        finding_count: 2
+      })
+
+      round!(task, %{
+        round: 1,
+        fix_round_attempt: 1,
+        run_id: r2.id,
+        verdict: :approve,
+        converged: true
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      summary = view |> element("#review-round-summary") |> render()
+
+      assert summary =~ "approved"
+      refute summary =~ "changes requested"
+    end
+
     test "a single request_changes round reads honestly, not as an approval",
          %{conn: conn, task: task} do
       r1 = review_run(task, 1)

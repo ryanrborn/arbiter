@@ -116,6 +116,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
@@ -5616,6 +5617,12 @@ defmodule Arbiter.Worker do
         |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
         |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
+        # bd-6d3h8m: the fresh gate a fix round attaches restarts its own
+        # round numbering at 1, so it needs to know which fix-round attempt it
+        # is to tag its `Arbiter.ReviewGate.Round` rows distinguishably —
+        # otherwise `review_gate_rounds_list` reads two interleaved 1..N
+        # sequences as if they were one.
+        |> maybe_opt(:fix_round_attempt, Map.get(meta, :review_gate_fix_round_attempts))
 
       case Arbiter.Worker.ReviewGate.start(opts) do
         {:ok, pid} ->
@@ -5832,6 +5839,15 @@ defmodule Arbiter.Worker do
       # otherwise carries the implementer's replies and the whole diff.
       EvidenceIntegrity.escalation?(findings) ->
         give_up_fix_round(dispatcher, state, attempts, :fabricated_evidence)
+
+      # bd-6d3h8m: every `[NOT MET]` criterion in this round is one the
+      # reviewer already says needs coordinator/operator action, not another
+      # implementer round (e.g. a criterion only verifiable post-deploy). A
+      # fix round can't make progress on something the reviewer already said
+      # it can't fix — on bd-28t80i this ran 4 implementer passes against the
+      # same "needs deploy" AC3 gap before escalating anyway.
+      CoordinatorOnlyFindings.escalation?(findings) ->
+        give_up_fix_round(dispatcher, state, attempts, :needs_coordinator)
 
       attempts >= cap ->
         give_up_fix_round(dispatcher, state, attempts, :budget_exhausted)

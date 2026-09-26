@@ -4969,6 +4969,85 @@ defmodule Arbiter.MCP.ToolsTest do
       assert round2.converged == true
     end
 
+    # bd-6d3h8m: an automatic fix round (bd-a9zb7w) re-attaches a fresh
+    # ReviewGate that restarts its own round numbering at 1, so rounds 1..3 of
+    # the original pass and rounds 1..3 of the fix-round pass both get
+    # `round: 1, 2, 3` — sorting on `round` alone (the pre-fix behavior)
+    # interleaves them as round1/round1/round2/round2/round3/round3 instead of
+    # reading as two consecutive passes.
+    test "a fix round's rounds do not interleave with the original pass's (bd-6d3h8m)", ctx do
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Arbiter.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: 0,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES pass 1 round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Arbiter.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: 1,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES pass 2 round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, count: 6, total_count: 6}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert Enum.map(rounds, &{&1.fix_round_attempt, &1.round}) == [
+               {0, 1},
+               {0, 2},
+               {0, 3},
+               {1, 1},
+               {1, 2},
+               {1, 3}
+             ]
+
+      assert Enum.map(rounds, & &1.findings) == [
+               "VERDICT: REQUEST_CHANGES pass 1 round 1",
+               "VERDICT: REQUEST_CHANGES pass 1 round 2",
+               "VERDICT: REQUEST_CHANGES pass 1 round 3",
+               "VERDICT: REQUEST_CHANGES pass 2 round 1",
+               "VERDICT: REQUEST_CHANGES pass 2 round 2",
+               "VERDICT: REQUEST_CHANGES pass 2 round 3"
+             ]
+    end
+
+    test "fix_round_attempt defaults to 0 for a row that doesn't specify one", ctx do
+      {:ok, _} =
+        Ash.create(Arbiter.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          findings: "VERDICT: APPROVE",
+          finding_count: 0,
+          converged: true
+        })
+
+      assert {:ok, %{rounds: [round]}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert round.fix_round_attempt == 0
+    end
+
     test "requires task_id", ctx do
       assert {:error, {:invalid, msg}} = Tools.review_gate_rounds_list(ctx.coordinator, %{})
       assert msg =~ "task_id"

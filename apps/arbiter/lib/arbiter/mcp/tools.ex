@@ -291,7 +291,10 @@ defmodule Arbiter.MCP.Tools do
       all_rounds =
         Round
         |> Ash.Query.filter(task_id == ^task_id)
-        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        # bd-6d3h8m: sort on `fix_round_attempt` first — `round` restarts at 1
+        # on every automatic fix round's fresh gate, so sorting on `round`
+        # alone interleaves a fix round's rounds 1..N with the original pass's.
+        |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
         |> Ash.read!()
 
       rounds =
@@ -324,6 +327,7 @@ defmodule Arbiter.MCP.Tools do
       task_id: r.task_id,
       run_id: r.run_id,
       round: r.round,
+      fix_round_attempt: r.fix_round_attempt,
       role: r.role,
       verdict: r.verdict,
       findings: r.findings,
