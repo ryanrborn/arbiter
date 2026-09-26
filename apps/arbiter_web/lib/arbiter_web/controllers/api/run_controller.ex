@@ -35,6 +35,7 @@ defmodule ArbiterWeb.Api.RunController do
         |> filter_before(before)
         |> Ash.Query.sort(started_at: :desc)
         |> Ash.Query.limit(limit)
+        |> exclude_output_lines()
         |> Ash.read!()
 
       render(conn, :index, runs: runs)
@@ -64,6 +65,33 @@ defmodule ArbiterWeb.Api.RunController do
 
   defp filter_before(query, nil), do: query
   defp filter_before(query, %DateTime{} = dt), do: Ash.Query.filter(query, started_at < ^dt)
+
+  defp exclude_output_lines(query) do
+    Ash.Query.select(query, [
+      :id,
+      :task_id,
+      :task_title,
+      :repo,
+      :workspace_id,
+      :worker_type,
+      :status,
+      :model,
+      :started_at,
+      :completed_at,
+      :exit_code,
+      :failure_reason,
+      :failure_summary,
+      :resolved_skills,
+      :standing_orders_digest,
+      :routing_policy,
+      :model_tier,
+      :thinking,
+      :difficulty_at_dispatch,
+      :provider,
+      :session_id,
+      :resumed_from_run_id
+    ])
+  end
 
   # ---- param coercion ----
 
