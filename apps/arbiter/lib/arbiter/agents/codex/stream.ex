@@ -255,6 +255,8 @@ defmodule Arbiter.Agents.Codex.Stream do
     [{"⏵ $ #{command_string(event["command"])}", false}]
   end
 
+  # bd-35ujxv: every body line, not just the header, is glyph-tagged — see the
+  # matching comment on `Arbiter.Worker.ClaudeSession.tool_result_lines/1`.
   def format_event(%{"type" => "exec_command_end"} = event) do
     code = number(event["exit_code"])
     label = if code in [0, nil], do: "⏴ command done", else: "⏴ command exited #{code}"
@@ -266,6 +268,7 @@ defmodule Arbiter.Agents.Codex.Stream do
       |> lines()
       |> Enum.reject(&(&1 == ""))
       |> truncate_lines(40)
+      |> Enum.map(&("⏴ " <> &1))
 
     Enum.map([label | body], &{&1, false})
   end
@@ -315,6 +318,7 @@ defmodule Arbiter.Agents.Codex.Stream do
       |> lines()
       |> Enum.reject(&(&1 == ""))
       |> truncate_lines(40)
+      |> Enum.map(&("⏴ " <> &1))
 
     Enum.map([label | body], &{&1, false})
   end
