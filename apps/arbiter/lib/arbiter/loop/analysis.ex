@@ -33,7 +33,15 @@ defmodule Arbiter.Loop.Analysis do
       `Arbiter.Loop.Corpus` supplies the calibration on `meta.scarcity`.
   """
 
-  alias Arbiter.Loop.{Corpus, FailureClassifier, FindingBuckets, Proposals, Report, Scarcity}
+  alias Arbiter.Loop.{
+    CiSection,
+    Corpus,
+    FailureClassifier,
+    FindingBuckets,
+    Proposals,
+    Report,
+    Scarcity
+  }
 
   @small_sample_caveat "At ~15 dispatches/day most single-window deltas are not statistically significant — treat single-window movements as hypotheses, not results."
 
@@ -89,6 +97,7 @@ defmodule Arbiter.Loop.Analysis do
           opts
           |> Keyword.put(:meta, meta)
           |> Keyword.put_new_lazy(:evidence_bar, fn -> Arbiter.Loop.evidence_bar(workspace_id) end)
+          |> Keyword.put_new_lazy(:ci_config, fn -> Arbiter.Loop.ci_config(workspace_id) end)
         )
         |> add_zero_token_notes(meta)
 
@@ -156,8 +165,25 @@ defmodule Arbiter.Loop.Analysis do
       cells: cells(main_rows),
       suggestions: suggestions(finding_categories, evidence_bar(opts)),
       finding_residue: finding_residue(opts),
+      ci: ci_section(opts),
       notes: [@small_sample_caveat, own_draw_note()]
     }
+  end
+
+  # bd-cuu8n3: `Corpus.fetch/1` carries the PR cohort and every in-window
+  # fix_pass with its evidence on `meta.ci`; `CiSection` classifies and
+  # aggregates. `:ci_config` (resolved from workspace config by `analyze/1`)
+  # sets the lint-feedback threshold and check commands. A report built with
+  # no `meta.ci` (a hand-assembled caller) carries the empty section.
+  defp ci_section(opts) do
+    case opts |> Keyword.get(:meta, %{}) |> Map.get(:ci) do
+      %{} = ci ->
+        config = Keyword.get(opts, :ci_config) || %{}
+        CiSection.build(ci, Enum.to_list(config))
+
+      _ ->
+        CiSection.empty()
+    end
   end
 
   # The scarcity frame `Arbiter.Loop.Corpus.fetch/1` computed for this window.

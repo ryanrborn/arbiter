@@ -31,6 +31,11 @@ defmodule Arbiter.Loop.Report do
       **first-class corpus-integrity finding** symmetric with
       `misclassification` above: count, rate, distinct tasks and a retained,
       bounded, newest-first sample with `{task_id, run_id}` citations.
+    * `ci` (bd-cuu8n3) — the first-push CI red rate (share of PR-bearing
+      tasks that needed ≥ 1 fix_pass) by repo, provider/model and difficulty,
+      and every fix_pass's deterministic outcome class with the `unknown`
+      share reported. Built by `Arbiter.Loop.CiSection`; carries the
+      approved-PR-only undercount verbatim.
     * `notes` — the small-sample caveats, rendered verbatim.
   """
 
@@ -45,6 +50,7 @@ defmodule Arbiter.Loop.Report do
             cells: [],
             suggestions: [],
             finding_residue: Arbiter.Loop.Corpus.empty_finding_residue(),
+            ci: Arbiter.Loop.CiSection.empty(),
             notes: []
 
   @type t :: %__MODULE__{}
@@ -60,6 +66,7 @@ defmodule Arbiter.Loop.Report do
       misclassification(r),
       finding_categories(r),
       finding_residue(r),
+      ci(r),
       cells(r),
       difficulty_misestimates(r),
       suggestions(r),
@@ -308,6 +315,102 @@ defmodule Arbiter.Loop.Report do
     #{cites}
     """
   end
+
+  # bd-cuu8n3: rendered unconditionally, like the corpus-integrity sections
+  # — a window with no fix_passes says "0 of N", and the undercount caveat is
+  # stated every time the rate is.
+  defp ci(%{ci: ci}) do
+    rr = Map.get(ci, :red_rate, %{tasks: 0, red: 0, rate: nil})
+    oc = Map.get(ci, :outcomes, %{total: 0, counts: %{}, unknown_share: nil, by_basis: %{}})
+    counts = Map.get(oc, :counts, %{})
+    basis = Map.get(oc, :by_basis, %{})
+    total = Map.get(oc, :total, 0)
+
+    classes =
+      Arbiter.Loop.FixPassClassifier.classes()
+      |> Enum.map_join("\n", fn c ->
+        n = Map.get(counts, c, 0)
+        "| `#{c}` | #{n} | #{pct_of(n, total)} |"
+      end)
+
+    by_repo_outcomes =
+      ci
+      |> Map.get(:outcomes_by_repo, [])
+      |> Enum.map_join("\n", fn o ->
+        c = o.counts
+
+        "| #{o.repo || "?"} | #{o.total} | #{c.lint} | #{c.flake_rerun} | #{c.test_fix} | #{c.infra} | #{c.unknown} | #{pct(o.lint_share)} |"
+      end)
+
+    """
+    ## CI: first-push red rate and fix_pass outcomes
+
+    **First-push CI red rate:** #{g(rr, :red)} of #{g(rr, :tasks)} PR-bearing task(s) this window
+    needed at least one CI fix_pass — **#{pct(Map.get(rr, :rate))}**. A task is attributed
+    to its latest main run in the window (provider/model) and its issue difficulty.
+
+    > #{Map.get(ci, :undercount, Arbiter.Loop.CiSection.undercount())}
+
+    #{rate_table("repo", Map.get(ci, :by_repo, []), &to_string(&1 || "?"))}
+    #{rate_table("provider/model", Map.get(ci, :by_model, []), &to_string/1)}
+    #{rate_table("difficulty", Map.get(ci, :by_difficulty, []), &dlabel/1)}
+    ### Fix_pass outcomes
+
+    Every fix_pass run in the window, classified deterministically (no model
+    call) from its steps (diff made? job re-run? `ci_mark_external`?), the
+    failing CI jobs it was briefed with, and — only as a fallback — its closing
+    summary. **#{total}** fix_pass run(s); **unknown share: #{pct(Map.get(oc, :unknown_share))}**.
+    Decided from steps: #{g(basis, :steps)}, from CI job names/logs: #{g(basis, :checks)},
+    from summary text: #{g(basis, :summary)}, undecided: #{g(basis, :none)}.
+
+    | class | runs | share |
+    |---|---|---|
+    #{classes}
+
+    | repo | fix_passes | lint | flake_rerun | test_fix | infra | unknown | lint share |
+    |---|---|---|---|---|---|---|---|
+    #{by_repo_outcomes}
+    #{lint_flags(ci)}
+    """
+  end
+
+  defp ci(_), do: ""
+
+  defp rate_table(label, rows, fmt_key) do
+    body =
+      Enum.map_join(rows, "\n", fn r ->
+        "| #{fmt_key.(r.key)} | #{r.tasks} | #{r.red} | #{pct(r.rate)} |"
+      end)
+
+    """
+    | #{label} | tasks with PR | needed fix_pass | red rate |
+    |---|---|---|---|
+    #{body}
+    """
+  end
+
+  defp lint_flags(%{lint_flags: [_ | _] = flags} = ci) do
+    body =
+      Enum.map_join(flags, "\n", fn f ->
+        "- **#{f.repo}** — #{f.lint} of #{f.total} fix_passes were lint (#{pct(f.share)}) → " <>
+          "`repo_doc_patch`: require `#{f.check_command}` before push (#{f.check_command_source})."
+      end)
+
+    """
+
+    **Lint share over #{pct(Map.get(ci, :lint_share_threshold))}** (≥ #{Map.get(ci, :min_fix_passes)} fix_passes) —
+    each becomes a `repo_doc_patch` proposal under `--propose`:
+
+    #{body}
+    """
+  end
+
+  defp lint_flags(ci) do
+    "\nNo repo's lint share exceeded #{pct(Map.get(ci, :lint_share_threshold))} this window."
+  end
+
+  defp pct_of(_n, 0), do: "n/a"
+  defp pct_of(n, total), do: pct(n / total)
 
   defp cells(%{cells: []}), do: ""
 

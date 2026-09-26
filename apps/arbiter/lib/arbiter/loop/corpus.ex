@@ -89,6 +89,23 @@ defmodule Arbiter.Loop.Corpus do
   `:no_observed_tokens`), the same way `transcript_reads` refuses to report a
   blind window as a fully-structured one.
 
+  ## CI: the PR cohort and its fix_passes (bd-cuu8n3)
+
+  `meta.ci` feeds `Arbiter.Loop.CiSection`. It carries two bounded sets:
+
+    * `tasks` — one entry per task with a `:main` run in the window,
+      attributed to its **latest** main run there (repo, provider, model,
+      workspace) plus the issue's difficulty and whether it has a PR
+      (`issues.pr_ref`).
+    * `fix_passes` — every `:fix_pass` run started in the window, with the
+      `evidence` `Arbiter.Loop.FixPassClassifier.classify/1` reads:
+      the failing checks recovered from the run's archived prompt
+      (`Arbiter.Worker.PromptLog`), step signals from `worker_run_steps` (did
+      it edit/commit, re-run a job, call `ci_mark_external`), and its closing
+      summary — the CLI's own `result_message` when captured, else the prose in
+      the last 60 lines of its transcript. Each read is bounded per run, like
+      the failed-run tail above.
+
   ## The one write
 
   `record_pass_cost/1` inserts a single `Arbiter.Usage.Event` row (step
@@ -105,13 +122,14 @@ defmodule Arbiter.Loop.Corpus do
 
   require Logger
 
-  alias Arbiter.Loop.{FailureClassifier, FindingBuckets, Scarcity}
+  alias Arbiter.Loop.{FailureClassifier, FindingBuckets, FixPassClassifier, Scarcity}
   alias Arbiter.Quota
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Overage
   alias Arbiter.Repo
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.PromptLog
 
   @tail_n 40
 
@@ -140,8 +158,11 @@ defmodule Arbiter.Loop.Corpus do
           failed_runs: non_neg_integer(),
           transcript_reads: non_neg_integer(),
           scarcity: scarcity(),
-          finding_residue: finding_residue()
+          finding_residue: finding_residue(),
+          ci: ci()
         }
+
+  @type ci :: %{tasks: [map()], fix_passes: [map()]}
 
   @type scarcity :: %{
           unit: :window_share_5h | :cost_usd,
@@ -222,7 +243,8 @@ defmodule Arbiter.Loop.Corpus do
       failed_runs: failed,
       transcript_reads: reads,
       scarcity: scarcity,
-      finding_residue: finding_residue(since, until)
+      finding_residue: finding_residue(since, until),
+      ci: ci(since, until)
     }
 
     {:ok, rows, meta}
@@ -516,6 +538,177 @@ defmodule Arbiter.Loop.Corpus do
       {base, items}
     end)
   end
+
+  # ---- CI: PR cohort + fix_pass evidence (bd-cuu8n3) -----------------------
+
+  @summary_tail_n 60
+  # The last few steps' outputs are enough to recognise the tool-result
+  # bodies inside a 60-line tail (`FixPassClassifier.final_summary/2`).
+  @summary_step_outputs 8
+  @summary_text_limit 2_000
+
+  defp ci(since, until) do
+    mains =
+      query(
+        """
+        SELECT task_id, repo, model, provider, workspace_id
+        FROM worker_runs
+        WHERE worker_type = 'main' AND started_at >= ?1 AND started_at < ?2
+        ORDER BY started_at DESC
+        """,
+        [iso(since), iso(until)]
+      )
+
+    fix_passes =
+      query(
+        """
+        SELECT id AS run_id, task_id, repo, workspace_id, result_message
+        FROM worker_runs
+        WHERE worker_type = 'fix_pass' AND started_at >= ?1 AND started_at < ?2
+        ORDER BY started_at DESC
+        """,
+        [iso(since), iso(until)]
+      )
+
+    issues =
+      (mains ++ fix_passes)
+      |> Enum.map(&base_task_id(&1["task_id"]))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> issues_by_id()
+
+    %{tasks: ci_tasks(mains, issues), fix_passes: ci_fix_passes(fix_passes, issues)}
+  end
+
+  # One entry per task, attributed to its latest main run in the window
+  # (`mains` is newest-first, so the first row per task wins).
+  defp ci_tasks(mains, issues) do
+    mains
+    |> Enum.reject(&is_nil(&1["task_id"]))
+    |> Enum.uniq_by(&base_task_id(&1["task_id"]))
+    |> Enum.map(fn r ->
+      id = base_task_id(r["task_id"])
+      issue = Map.get(issues, id, %{})
+
+      %{
+        task_id: id,
+        repo: r["repo"],
+        model: r["model"],
+        provider: r["provider"],
+        workspace_id: r["workspace_id"] || issue["workspace_id"],
+        difficulty: issue["difficulty"] && int(issue["difficulty"]),
+        pr?: is_binary(issue["pr_ref"]) and issue["pr_ref"] != ""
+      }
+    end)
+  end
+
+  defp ci_fix_passes([], _issues), do: []
+
+  defp ci_fix_passes(fix_passes, issues) do
+    run_ids = Enum.map(fix_passes, & &1["run_id"])
+    steps = steps_by_run(run_ids)
+    outputs = last_step_outputs(run_ids)
+
+    Enum.map(fix_passes, fn r ->
+      run_id = r["run_id"]
+      id = base_task_id(r["task_id"])
+      run_steps = Map.get(steps, run_id, [])
+
+      evidence =
+        run_steps
+        |> FixPassClassifier.step_signals()
+        |> Map.merge(%{
+          checks: run_id |> read_prompt() |> FixPassClassifier.parse_checks(),
+          summary: fix_pass_summary(r["result_message"], run_id, Map.get(outputs, run_id, []))
+        })
+
+      %{
+        run_id: run_id,
+        task_id: id,
+        repo: r["repo"],
+        workspace_id: r["workspace_id"] || get_in(issues, [id, "workspace_id"]),
+        evidence: evidence
+      }
+    end)
+  end
+
+  defp issues_by_id([]), do: %{}
+
+  defp issues_by_id(ids) do
+    query(
+      "SELECT id, difficulty, pr_ref, workspace_id FROM issues WHERE id IN (#{placeholders(ids)})",
+      ids
+    )
+    |> Map.new(&{&1["id"], &1})
+  end
+
+  # Only a git-shaped step's output is fetched — it is where a commit or a
+  # pushed ref update shows (`FixPassClassifier.step_signals/1`) — so the read
+  # stays bounded to what the classifier looks at.
+  defp steps_by_run(run_ids) do
+    query(
+      """
+      SELECT run_id, name, input_summary, is_error,
+             CASE WHEN input_summary LIKE '%git%' THEN output_summary END AS output_summary
+      FROM worker_run_steps
+      WHERE run_id IN (#{placeholders(run_ids)})
+      ORDER BY occurred_at
+      """,
+      run_ids
+    )
+    |> Enum.group_by(
+      & &1["run_id"],
+      &%{
+        name: &1["name"],
+        input_summary: &1["input_summary"],
+        output_summary: &1["output_summary"],
+        is_error: &1["is_error"]
+      }
+    )
+  end
+
+  defp last_step_outputs(run_ids) do
+    query(
+      """
+      SELECT run_id, output_summary FROM (
+        SELECT run_id, output_summary,
+               ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY occurred_at DESC) AS rn
+        FROM worker_run_steps
+        WHERE run_id IN (#{placeholders(run_ids)})
+      )
+      WHERE rn <= #{@summary_step_outputs}
+      """,
+      run_ids
+    )
+    |> Enum.group_by(& &1["run_id"], & &1["output_summary"])
+  end
+
+  defp read_prompt(run_id) do
+    case PromptLog.read(run_id) do
+      {:ok, text} -> text
+      {:error, _} -> nil
+    end
+  end
+
+  defp fix_pass_summary(result_message, run_id, step_outputs) do
+    text =
+      if is_binary(result_message) and String.trim(result_message) != "" do
+        result_message
+      else
+        case OutputLog.tail_lines(run_id, @summary_tail_n) do
+          {:ok, lines} -> FixPassClassifier.final_summary(lines, step_outputs)
+          {:error, _} -> ""
+        end
+      end
+
+    # The close of the summary is where the verdict lives, so keep its end.
+    if String.length(text) > @summary_text_limit,
+      do: String.slice(text, -@summary_text_limit, @summary_text_limit),
+      else: text
+  end
+
+  defp placeholders(ids),
+    do: ids |> Enum.with_index(1) |> Enum.map_join(",", fn {_id, i} -> "?#{i}" end)
 
   # ---- finding residue (bd-5ja2vb) ----------------------------------------
 

@@ -728,6 +728,62 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  # bd-cuu8n3: the loop analyser's CI section reads `loop.ci`.
+  describe "config validation: loop.ci" do
+    test "accepts a threshold, a sample floor and check commands" do
+      config = %{
+        "loop" => %{
+          "ci" => %{
+            "lint_share_threshold" => 0.4,
+            "min_fix_passes" => 5,
+            "check_commands" => %{"arbiter" => "mix precommit && mix audit"}
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-ci-1", config: config})
+
+      assert Arbiter.Loop.ci_config(ws) == %{
+               lint_share_threshold: 0.4,
+               min_fix_passes: 5,
+               check_commands: %{"arbiter" => "mix precommit && mix audit"}
+             }
+    end
+
+    test "rejects a threshold outside (0, 1]" do
+      config = %{"loop" => %{"ci" => %{"lint_share_threshold" => 1.5}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-2", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.lint_share_threshold must be a number in (0, 1]")
+    end
+
+    test "rejects a non-positive sample floor" do
+      config = %{"loop" => %{"ci" => %{"min_fix_passes" => 0}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.min_fix_passes must be a positive integer")
+    end
+
+    test "rejects check_commands that are not a repo => string map" do
+      config = %{"loop" => %{"ci" => %{"check_commands" => %{"arbiter" => 1}}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-4", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.check_commands must map repo names to command strings")
+    end
+
+    test "rejects loop.ci when it is not a map" do
+      config = %{"loop" => %{"ci" => true}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-5", config: config})
+      assert err |> Exception.message() |> String.contains?("loop.ci must be a map")
+    end
+  end
+
   # bd-9j2g3x: the loop-engineering evidence bar is workspace-configurable, with
   # the documented 3-incidents / 2-distinct-tasks bar as the default.
   describe "config validation: loop.evidence_bar" do

@@ -137,6 +137,38 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert residue["distinct_tasks"] == 1
       assert body["markdown"] =~ "memoisation key"
     end
+
+    # bd-cuu8n3: the CI section reaches `--json` as structured data — the red
+    # rate with counts and breakdowns, every fix_pass's class, the unknown
+    # share, and the approved-PR-only undercount as metadata.
+    test "the JSON summary carries the CI section", %{conn: conn} do
+      ws = workspace!()
+      {:ok, red} = Ash.create(Issue, %{title: "red", difficulty: 2, workspace_id: ws.id})
+      {:ok, green} = Ash.create(Issue, %{title: "green", difficulty: 2, workspace_id: ws.id})
+      red = Ash.update!(red, %{pr_ref: "#1"})
+      green = Ash.update!(green, %{pr_ref: "#2"})
+
+      run!(%{task_id: red.id, provider: "claude"})
+      run!(%{task_id: green.id, provider: "claude"})
+      fp = run!(%{task_id: red.id, worker_type: :fix_pass, provider: "claude"})
+
+      conn = get(conn, ~p"/api/loop/analyze", %{since: "24h"})
+      body = json_response(conn, 200)
+      ci = body["summary"]["ci"]
+
+      assert ci["red_rate"] == %{"tasks" => 2, "red" => 1, "rate" => 0.5}
+      assert %{"key" => "arbiter", "tasks" => 2, "red" => 1} = hd(ci["by_repo"])
+      assert %{"key" => "claude/claude-sonnet-5"} = hd(ci["by_model"])
+      assert %{"key" => 2} = hd(ci["by_difficulty"])
+      assert ci["outcomes"]["total"] == 1
+      assert ci["outcomes"]["counts"]["unknown"] == 1
+      assert ci["outcomes"]["unknown_share"] == 1.0
+      assert [%{"run_id" => run_id, "class" => "unknown"}] = ci["runs"]
+      assert run_id == fp.id
+      assert ci["meta"]["undercount"] =~ "approved"
+      assert ci["meta"]["classes"] == ~w(lint flake_rerun test_fix infra unknown)
+      assert body["markdown"] =~ "## CI: first-push red rate"
+    end
   end
 
   describe "POST /api/loop/propose" do

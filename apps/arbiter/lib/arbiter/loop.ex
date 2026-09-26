@@ -131,6 +131,77 @@ defmodule Arbiter.Loop do
 
   defp positive_int(_, default), do: default
 
+  @doc """
+  The CI-section settings for a workspace (`%Workspace{}`, workspace id, or
+  `nil` for the defaults), read from `loop.ci` in workspace config
+  (bd-cuu8n3):
+
+    * `lint_share_threshold` — a repo whose `:lint` share of fix_passes
+      exceeds this (a fraction in `(0, 1]`) gets a `:repo_doc_patch` proposal.
+    * `min_fix_passes` — the minimum fix_passes a repo needs in the window
+      before its share is judged at all.
+    * `check_commands` — `%{repo => command}`, the command the proposal tells
+      workers to run before pushing; otherwise it is derived from the repo's
+      red lint-job names.
+
+  Invalid values fall back to the defaults (`Arbiter.Loop.CiSection`).
+  """
+  @spec ci_config(Workspace.t() | String.t() | nil) :: %{
+          lint_share_threshold: float(),
+          min_fix_passes: pos_integer(),
+          check_commands: %{optional(String.t()) => String.t()}
+        }
+  def ci_config(%Workspace{config: config}) do
+    block =
+      case config do
+        %{"loop" => %{"ci" => %{} = ci}} -> ci
+        _ -> %{}
+      end
+
+    %{
+      lint_share_threshold:
+        fraction(
+          Map.get(block, "lint_share_threshold"),
+          Arbiter.Loop.CiSection.default_lint_share_threshold()
+        ),
+      min_fix_passes:
+        positive_int(
+          Map.get(block, "min_fix_passes"),
+          Arbiter.Loop.CiSection.default_min_fix_passes()
+        ),
+      check_commands:
+        case Map.get(block, "check_commands") do
+          %{} = cmds ->
+            cmds
+            |> Enum.filter(fn {k, v} -> is_binary(k) and is_binary(v) and v != "" end)
+            |> Map.new()
+
+          _ ->
+            %{}
+        end
+    }
+  end
+
+  def ci_config(workspace_id) when is_binary(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, ws} -> ci_config(ws)
+      _ -> ci_config(nil)
+    end
+  end
+
+  def ci_config(_), do: ci_config(%Workspace{config: %{}})
+
+  defp fraction(n, _default) when is_number(n) and n > 0 and n <= 1, do: n / 1
+
+  defp fraction(s, default) when is_binary(s) do
+    case Float.parse(s) do
+      {n, ""} -> fraction(n, default)
+      _ -> default
+    end
+  end
+
+  defp fraction(_, default), do: default
+
   # ---- fingerprint --------------------------------------------------------
 
   @doc """
@@ -199,10 +270,11 @@ defmodule Arbiter.Loop do
 
   The Stage 1 pass cannot attribute a reviewer-finding category to one repo
   (`Arbiter.Loop.Proposals` leaves `repo: nil` on every `:claude_md`-destined
-  finding, and the apply path refuses a row with no repo), so this is
-  currently the only production entry point onto rung 2 of the destination
-  ladder: an operator who has read a repo-specific lesson names the repo and
-  the lesson text directly, rather than waiting on that attribution work.
+  finding, and the apply path refuses a row with no repo). Its one automatic
+  `:repo_doc_patch` producer is the CI section's lint share (bd-cuu8n3); any
+  other repo-specific lesson comes through here: an operator who has read it
+  names the repo and the lesson text directly, rather than waiting on that
+  attribution work.
 
   `attrs`:
 
