@@ -171,7 +171,13 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     test "Autopilot dispatch checks refined flag at dispatch time (bd-a1bmyx)", %{ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "demoted after plan", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "demoted after plan",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       assert task.refined
 

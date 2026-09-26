@@ -762,17 +762,29 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
   describe "return to Backlog" do
     test "a refined task offers the demote action", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "ready now", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "ready now",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       assert task.refined
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
     end
 
     test "clicking it demotes the task and the action goes away", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "demote me", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "demote me",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
@@ -786,7 +798,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "an already-unrefined task offers no demote action", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "already backlog", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "already backlog", workspace_id: ws.id})
+
       refute task.refined
 
       {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
@@ -795,7 +809,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "a task with a live worker cannot be demoted", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "running", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "running",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
@@ -809,7 +829,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "an in_progress task cannot be demoted", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "in progress", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "in progress",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, task} = Ash.update(task, %{status: :in_progress})
 
@@ -823,7 +849,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "an awaiting_verification task cannot be demoted", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "awaiting verification", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "awaiting verification",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, task} = Ash.update(task, %{status: :awaiting_verification})
 
@@ -837,7 +869,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "a closed task cannot be demoted", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "closed task", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "closed task",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, task} = Ash.update(task, %{}, action: :close)
 
