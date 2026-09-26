@@ -17,8 +17,6 @@ defmodule ArbiterWeb.DemoteEntry do
 
   use Phoenix.Component
 
-  import Phoenix.LiveView, only: [put_flash: 3]
-
   @doc """
   Whether `issue` should be offered a Return to Backlog action.
 
