@@ -129,6 +129,11 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
   defp stub_cmds(opts \\ []) do
     test_pid = self()
     systemd? = Keyword.get(opts, :systemd, true)
+    # Fires the instant the restart actually happens (systemctl restart, or
+    # the SIGTERM/start pair) — lets a cold-to-green test flip its
+    # `/api/workspaces` stub from down to up at exactly that point, rather
+    # than guessing how many green-wait polls happen first.
+    on_restart = Keyword.get(opts, :on_restart, fn -> :ok end)
 
     Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
       send(test_pid, {:cmd, cmd, args})
@@ -139,6 +144,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
           if systemd?, do: {"", 0}, else: {"Unit arbiter.service could not be found.", 1}
 
         {"systemctl", ["--user", "restart", "arbiter.service"]} ->
+          on_restart.()
           {"", 0}
 
         # Non-systemd path: one listener to SIGTERM before the fresh start.
@@ -146,6 +152,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
           {"4242\n", 0}
 
         _ ->
+          on_restart.()
           {"", 0}
       end
     end)
@@ -616,6 +623,263 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
       # current symlink restored to the prior release — the deploy must not be
       # reported as successful when the server never actually moved.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == prior_tag
+    end
+  end
+
+  # ---- cold deploy: server was already down before the deploy began -------
+  #
+  # bd-5zvux5: the pre-flight doctor snapshot distinguishes "the stack was
+  # already down before this deploy touched anything" (first-ever deploy, or
+  # a planned-downtime deploy like a DB move where the operator stops the
+  # server on purpose) from "this deploy broke a healthy server". Only the
+  # latter should ever auto-roll-back — rolling back when there was nothing
+  # healthy to preserve just relabels "stack is down" as this deploy's fault.
+  describe "cold deploy (server unreachable before the deploy began)" do
+    # Unlike `stub_release/4` (whose `/api/workspaces` route is a static
+    # 200/fixture), this keeps `/api/workspaces` transport-erroring for every
+    # request — before the swap, during the green-wait, and after — so
+    # `Restart.perform/2`'s pre-restart `Doctor.reachable?()` sample (which
+    # `ReleaseDeploy` uses to tell cold from warm) is genuinely false, the
+    # same as a truly stopped server.
+    defp stub_release_stack_down(tag, tarball, sha) do
+      api_path = "/repos/#{@repo}/releases/latest"
+
+      stub_routes([
+        {{"get", api_path}, {release_json(tag), 200}},
+        {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
+        {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha) end},
+        {{"get", "/api/workspaces"},
+         fn conn -> Req.Test.transport_error(conn, :econnrefused) end},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+    end
+
+    test "no prior release, still unreachable after restart: deploys without rolling back",
+         %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_stack_down(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      refute out =~ "Rolled back"
+      refute out =~ "No prior release to roll back to"
+      assert out =~ @vsn
+      assert out =~ "was already down before this deploy began"
+
+      # current still points at the new release — nothing was rolled back.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+      assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+    end
+
+    test "a prior release exists (planned-downtime deploy, e.g. a DB move): still does not roll back",
+         %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag)
+      point_current(home, prior)
+
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_stack_down(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      refute out =~ "Rolled back to #{prior_tag}"
+      assert out =~ "was already down before this deploy began"
+
+      # current still points at the new release, not back at the prior one.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+    end
+
+    test "--json reports cold_deploy: true, deployed: true, rolled_back: false", %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_stack_down(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} =
+        capture(fn -> ReleaseDeploy.run(["--timeout", "1", "--json"]) end)
+
+      assert code == 1
+      payload = Jason.decode!(out)
+
+      assert payload["cold_deploy"] == true
+      assert payload["deployed"] == true
+      assert payload["rolled_back"] == false
+      assert payload["version"] == @vsn
+      assert payload["ok"] == false
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+    end
+  end
+
+  # ---- cold deploy that goes green (server was down, new release comes up) -
+  #
+  # bd-5zvux5 round 2: the main case the pre-flight/cold-restart machinery
+  # exists for — the stack was down, the new release starts and this time
+  # actually comes up green, and the deploy reports a plain success with no
+  # rollback and no "the stack is down" framing. `/api/workspaces` transport-
+  # errors until the moment the restart actually fires (flipped from
+  # `stub_cmds`'s `on_restart` hook), then serves green — the same shape a
+  # real "systemctl start" bringing Phoenix up would produce.
+  describe "cold deploy that goes green" do
+    defp stub_release_cold_to_green(tag, tarball, sha, opts \\ []) do
+      latest? = Keyword.get(opts, :latest, true)
+
+      api_path =
+        if latest?,
+          do: "/repos/#{@repo}/releases/latest",
+          else: "/repos/#{@repo}/releases/tags/#{tag}"
+
+      Process.put(:cold_deploy_up, false)
+
+      stub_routes([
+        {{"get", api_path}, {release_json(tag), 200}},
+        {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
+        {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha) end},
+        {{"get", "/api/workspaces"}, &cold_deploy_workspaces_response/1},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+    end
+
+    defp stub_local_apis_cold_to_green do
+      Process.put(:cold_deploy_up, false)
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, &cold_deploy_workspaces_response/1},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+    end
+
+    defp cold_deploy_workspaces_response(conn) do
+      if Process.get(:cold_deploy_up) do
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(@green)
+      else
+        Req.Test.transport_error(conn, :econnrefused)
+      end
+    end
+
+    defp go_up_on_restart, do: fn -> Process.put(:cold_deploy_up, true) end
+
+    test "--version vX: unpacks, swaps, starts, and reports green with no rollback",
+         %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_cold_to_green(@vsn, tarball, sha, latest: false)
+      stub_cmds(on_restart: go_up_on_restart())
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--version", @vsn]) end)
+
+      assert code == 0
+      assert out =~ "Deployed release #{@vsn}"
+      refute out =~ "Rolled back"
+      refute out =~ "was already down before this deploy began"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+    end
+
+    test "default (latest) source: unpacks, swaps, starts, and reports green with no rollback",
+         %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_cold_to_green(@vsn, tarball, sha)
+      stub_cmds(on_restart: go_up_on_restart())
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 0
+      assert out =~ "Deployed release #{@vsn}"
+      refute out =~ "Rolled back"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+    end
+
+    test "--local <tarball>: unpacks, swaps, starts, and reports green with no rollback",
+         %{home: home} do
+      tarball_bytes = flat_release_tarball()
+      path = Path.join(System.tmp_dir!(), "local-#{System.unique_integer([:positive])}.tar.gz")
+      File.write!(path, tarball_bytes)
+      on_exit(fn -> File.rm(path) end)
+
+      stub_local_apis_cold_to_green()
+      stub_cmds(on_restart: go_up_on_restart())
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--local", path]) end)
+
+      assert code == 0
+      assert out =~ "Deployed release local-"
+      refute out =~ "Rolled back"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) |> String.starts_with?("local-")
+    end
+  end
+
+  # ---- transient restart-time blip is not a cold deploy (bd-5zvux5 round 2) -
+  #
+  # `Restart.perform/2`'s "was it running before?" sample is a single GET with
+  # no retry (`client.ex`), so a healthy server that merely stalls (GC pause,
+  # busy DB) for that one request can sample false even though the pre-flight
+  # snapshot, taken moments earlier, saw it green. Treating that alone as
+  # "cold" would skip auto-rollback on a deploy that broke a genuinely healthy
+  # server — this must still roll back exactly as before bd-5zvux5.
+  describe "restart-time sample errors despite a green pre-flight" do
+    # 1st /api/workspaces call is the pre-flight snapshot (green). 2nd is
+    # `Restart.perform/2`'s own pre-restart sample (the transient blip). Every
+    # call after that is the green-wait loop, which we keep red so the deploy
+    # times out and reaches the rollback decision under test.
+    defp workspaces_transient_blip_response(conn) do
+      n = Process.get(:ws_call_count, 0) + 1
+      Process.put(:ws_call_count, n)
+
+      case n do
+        1 -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(@green)
+        2 -> Req.Test.transport_error(conn, :econnrefused)
+        _ -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(@empty)
+      end
+    end
+
+    defp stub_release_transient_blip(tag, tarball, sha) do
+      api_path = "/repos/#{@repo}/releases/latest"
+      Process.put(:ws_call_count, 0)
+
+      stub_routes([
+        {{"get", api_path}, {release_json(tag), 200}},
+        {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
+        {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha) end},
+        {{"get", "/api/workspaces"}, &workspaces_transient_blip_response/1},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+    end
+
+    test "still rolls back — a single errored sample does not make this a cold deploy",
+         %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag)
+      point_current(home, prior)
+
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release_transient_blip(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      assert out =~ "Rolled back to #{prior_tag}"
+      refute out =~ "was already down before this deploy began"
+
       assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
       assert Path.basename(link_target) == prior_tag
     end
