@@ -50,6 +50,7 @@ defmodule Arbiter.Quota do
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
+  alias Arbiter.Quota.SpendCache
   alias Arbiter.Tasks.Workspace
   require Ash.Query
 
@@ -105,6 +106,20 @@ defmodule Arbiter.Quota do
 
   # Trailing window over which per-provider spend is summed for the cost figure.
   @cost_window_days 30
+
+  # Providers `ArbiterWeb.LiveHooks`'s `:quota` hook hides from the top bar
+  # pending fix (bd-1nyedk, bd-dcvo3n, bd-bi5t54, bd-5r6cdy) — see that
+  # module's `:quota` moduledoc section for the full story. Named here, not
+  # only there, so `list_latest/2`'s `:exclude_providers` option (bd-4p6pw7)
+  # can drop a hidden account's view *before* `decorate_view/2` spends a
+  # cache lookup on it, rather than filtering the fully-decorated list after
+  # the fact. `GET /api/quota` and `arb quota` do not pass this option — they
+  # still report every provider, hidden or not.
+  @hidden_providers ["codex", "gemini_cli"]
+
+  @doc "Quota provider codes `ArbiterWeb.LiveHooks` hides from the top bar — see `@hidden_providers`."
+  @spec hidden_providers() :: [String.t()]
+  def hidden_providers, do: @hidden_providers
 
   # ---- dispatch gate (bd-7cd38f) -----------------------------------------
 
@@ -971,13 +986,20 @@ defmodule Arbiter.Quota do
   so the dashboard can show dollars alongside utilization.
 
   `:spend_cache` reuses a caller's `spend_cache/1` memo (e.g. `GET /api/quota`,
-  which also serializes Claude on its own); with none given this builds one
-  for the pass, so the ledger is scanned once per workspace no matter how many
-  providers come back.
+  which also serializes Claude on its own); with none given this reads
+  `Arbiter.Quota.SpendCache`'s memoized `Arbiter.Usage.spend_by_workspace/1`
+  aggregate, so no request pays for a ledger scan of its own (bd-4p6pw7).
+
+  `:exclude_providers` (default `[]`) drops a view whose provider is in the
+  list before decoration — so a caller that never wants a given provider
+  (`ArbiterWeb.LiveHooks`'s `:quota` hook, `@hidden_providers`) doesn't pay
+  even the memoized cache lookup for it. `GET /api/quota` and `arb quota`
+  pass none, and keep showing every provider.
   """
   @spec list_latest(String.t() | [String.t()] | map(), keyword()) :: [map()]
   def list_latest(accounts, opts \\ []) do
     account_ids = normalize_account_ids(accounts)
+    excluded = Keyword.get(opts, :exclude_providers, [])
 
     if account_ids == [] do
       []
@@ -992,7 +1014,7 @@ defmodule Arbiter.Quota do
         |> Enum.map(&view/1)
         |> Enum.reject(&MapSet.member?(dedicated_providers, &1.provider))
 
-      case generic ++ dedicated do
+      case (generic ++ dedicated) |> Enum.reject(&(&1.provider in excluded)) do
         # No captured quota anywhere on these accounts — nothing to decorate,
         # so don't pay for the ledger scans a cache would run up front.
         [] ->
@@ -1101,12 +1123,7 @@ defmodule Arbiter.Quota do
   def provider_spend(nil), do: %{}
 
   def provider_spend(account_id) when is_binary(account_id) do
-    since = DateTime.utc_now() |> DateTime.add(-@cost_window_days * 86_400, :second)
-
-    case Arbiter.Usage.summarize(by: :provider, since: since, provider_account_id: account_id) do
-      {:ok, rows} -> Map.new(rows, &{&1.group, &1.total_cost_usd})
-      _ -> %{}
-    end
+    SpendCache.account_totals() |> Map.get(account_id, %{})
   rescue
     _ -> %{}
   end
@@ -1114,16 +1131,14 @@ defmodule Arbiter.Quota do
   def provider_spend(_), do: %{}
 
   @doc """
-  Build the `t:spend_cache/0` memo for `accounts`: one `workspace_spend/1`
-  scan per distinct workspace metered under them.
+  Build the `t:spend_cache/0` memo for `accounts`: `workspace_spend/1` for
+  every distinct workspace metered under them, read off the one memoized
+  `Arbiter.Quota.SpendCache.workspace_totals/0` aggregate (bd-4p6pw7) rather
+  than a scan per workspace.
 
-  `workspace_spend/1` reads every `usage_events` row in the window (blob
-  column included) and aggregates in Elixir, and its result is the same for
-  every provider, so the number of scans a request pays for must be the
-  number of *workspaces* it touches — not that times the number of providers
-  it renders. `list_latest/2` builds one of these per pass; a caller that
-  makes several calls for one request (`GET /api/quota`) builds it once and
-  passes it to each.
+  `list_latest/2` builds one of these per pass; a caller that makes several
+  calls for one request (`GET /api/quota`) builds it once and passes it to
+  each.
   """
   @spec spend_cache(String.t() | [String.t()] | map()) :: spend_cache()
   def spend_cache(accounts) do
@@ -1140,12 +1155,7 @@ defmodule Arbiter.Quota do
   """
   @spec workspace_spend(String.t() | nil) :: %{optional(String.t()) => float()}
   def workspace_spend(workspace_id) when is_binary(workspace_id) do
-    since = DateTime.utc_now() |> DateTime.add(-@cost_window_days * 86_400, :second)
-
-    case Arbiter.Usage.summarize(by: :provider, since: since, workspace_id: workspace_id) do
-      {:ok, rows} -> Map.new(rows, &{&1.group, &1.total_cost_usd})
-      _ -> %{}
-    end
+    SpendCache.workspace_totals() |> Map.get(workspace_id, %{})
   rescue
     _ -> %{}
   end

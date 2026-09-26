@@ -252,6 +252,22 @@ defmodule Arbiter.QuotaTest do
       assert providers == ["claude", "codex"]
     end
 
+    # bd-4p6pw7: `ArbiterWeb.LiveHooks`'s `:quota` hook passes this so a
+    # hidden provider's view never reaches `decorate_view/2` — and so never
+    # pays for a spend lookup either.
+    test ":exclude_providers drops a view before decoration" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+      {:ok, _} = Quota.capture(ws.id, @headers, provider: "codex")
+
+      providers =
+        ws.id
+        |> Quota.list_latest_for_workspace(exclude_providers: ["codex"])
+        |> Enum.map(& &1.provider)
+
+      assert providers == ["claude"]
+    end
+
     test "does not include another account's rows" do
       ws = workspace!()
       other = workspace!("other")
