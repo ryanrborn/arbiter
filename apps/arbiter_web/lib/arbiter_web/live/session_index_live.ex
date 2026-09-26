@@ -406,6 +406,7 @@ defmodule ArbiterWeb.SessionIndexLive do
           title="Sessions"
           count={length(@sessions)}
           subtitle="Coordinator sessions Arbiter hosts. They live in their own systemd scope, so they survive an arbiter restart."
+          stack_on_mobile
         >
           <:actions>
             <.launch_form

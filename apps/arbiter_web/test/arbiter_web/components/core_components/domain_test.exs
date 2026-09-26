@@ -98,7 +98,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
 
       html =
         rendered_to_string(~H"""
-        <ArbiterWeb.CoreComponents.Domain.index_header title="Sessions">
+        <ArbiterWeb.CoreComponents.Domain.index_header title="Sessions" stack_on_mobile>
           <:actions><button>Launch session</button></:actions>
         </ArbiterWeb.CoreComponents.Domain.index_header>
         """)

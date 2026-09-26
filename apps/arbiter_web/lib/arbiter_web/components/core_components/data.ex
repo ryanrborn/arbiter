@@ -214,6 +214,13 @@ defmodule ArbiterWeb.CoreComponents.Data do
   attr :rows, :list, required: true
   attr :class, :any, default: nil
 
+  attr :min_width, :string,
+    default: nil,
+    doc:
+      "CSS length (e.g. \"640px\") the grid tracks can't shrink below — " <>
+        "pairs with the wrapper's overflow-x-auto so a narrow viewport scrolls " <>
+        "the table instead of collapsing a flexible column to zero width"
+
   slot :col, required: true do
     attr :label, :string
     attr :width, :string, doc: ~s(CSS width, e.g. "84px" — omit for the flexible column)
@@ -235,7 +242,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
     <div id={@id} class={["w-full overflow-x-auto", @class]} role="table">
       <div
         class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
-        style={"grid-template-columns: #{@template_columns};"}
+        style={"grid-template-columns: #{@template_columns};#{@min_width && " min-width: #{@min_width};"}"}
         role="row"
       >
         <span
@@ -255,7 +262,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
           "grid items-center gap-3 min-h-[34px] px-[14px] hover:bg-[var(--arb-raised-hover)]",
           index != @last_index && "border-b border-[var(--arb-line-soft)]"
         ]}
-        style={"grid-template-columns: #{@template_columns};"}
+        style={"grid-template-columns: #{@template_columns};#{@min_width && " min-width: #{@min_width};"}"}
         role="row"
       >
         <span
