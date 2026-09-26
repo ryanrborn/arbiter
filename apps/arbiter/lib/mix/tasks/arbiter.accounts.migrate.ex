@@ -29,7 +29,8 @@ defmodule Mix.Tasks.Arbiter.Accounts.Migrate do
   Moving a key out of the blob stops a worker spawned from that workspace
   receiving it from the blob. Since P3 (bd-aiodva) the account row supplies it
   instead, but only once `:provider_accounts_enabled` is `true` — it ships
-  `false`. So the order is: migrate every workspace that carries a provider
+  `false`; set `ARBITER_PROVIDER_ACCOUNTS=1` in the server's environment and
+  restart to turn it on. So the order is: migrate every workspace that carries a provider
   credential, then flip the flag.
 
   With the flag on, a workspace whose blob still carries a credential that no
@@ -52,28 +53,38 @@ defmodule Mix.Tasks.Arbiter.Accounts.Migrate do
       suggests it; it is opt-in here rather than the default, because the file
       is the operator's own edited artefact and it contains no secret (only
       fingerprints and key names), so destroying it unasked buys nothing.
+
+  ## Release installs
+
+  A thin wrapper over `Arbiter.Release.accounts_migrate/1`, which a release
+  install (no Mix toolchain) runs directly:
+
+      bin/arbiter eval 'Arbiter.Release.accounts_migrate(plan: "/home/me/.arbiter/accounts.json", dry_run?: true)'
+      bin/arbiter eval 'Arbiter.Release.accounts_migrate(plan: "/home/me/.arbiter/accounts.json")'
+
+  See `docs/provider-accounts-release-runbook.md` for the full procedure,
+  including setting the flag.
   """
 
   use Mix.Task
-
-  require Logger
-
-  alias Arbiter.Accounts.Migrate
 
   @switches [plan: :string, dry_run: :boolean, delete_plan: :boolean]
 
   @impl Mix.Task
   def run(argv) do
-    Mix.Task.run("app.start")
+    # Config only: `Arbiter.Release.accounts_migrate/1` starts Ash, the Repo
+    # and the Vault itself, never the full application next to a live server.
+    Mix.Task.run("app.config")
     execute(argv)
   end
 
   @doc """
-  Everything `run/1` does after the application has booted.
+  Everything `run/1` does after config is loaded: parse `argv` and hand off to
+  `Arbiter.Release.accounts_migrate/1`, which holds the logic so a release
+  install can run the same migration through `bin/arbiter eval`.
 
   Split out so the migration can be exercised against a real, seeded,
-  sandboxed database in tests — `Mix.Task.run("app.start")` cannot run under
-  the Ecto sandbox.
+  sandboxed database in tests.
   """
   @spec execute([String.t()]) :: :ok
   def execute(argv) do
@@ -83,93 +94,16 @@ defmodule Mix.Tasks.Arbiter.Accounts.Migrate do
       Mix.raise("unrecognised option(s): #{Enum.map_join(invalid, ", ", &elem(&1, 0))}")
     end
 
-    plan_path = Keyword.get(opts, :plan) || Mix.raise("--plan PATH is required")
-    dry_run? = Keyword.get(opts, :dry_run, false)
+    release_opts = [
+      cli: :mix,
+      plan: opts[:plan],
+      dry_run?: Keyword.get(opts, :dry_run, false),
+      delete_plan?: Keyword.get(opts, :delete_plan, false)
+    ]
 
-    plan =
-      case Migrate.read_plan(plan_path) do
-        {:ok, plan} -> plan
-        {:error, reason} -> Mix.raise(reason)
-      end
-
-    case Migrate.apply_plan(plan, dry_run?: dry_run?) do
-      {:ok, result} ->
-        report(result, plan_path, opts)
-
-      {:error, reason} ->
-        Mix.raise("""
-        #{reason}
-
-        Nothing was written. Fix the plan (or re-run `mix arbiter.accounts.census`
-        to regenerate it) and try again.\
-        """)
-    end
-  end
-
-  defp report(result, plan_path, opts) do
-    Mix.shell().info(body(result))
-
-    if result.dry_run? do
-      Mix.shell().info("\nNothing was written (dry run). Re-run without --dry-run to apply.")
-    else
-      maybe_delete_plan(plan_path, opts)
-      Mix.shell().info(next_steps(result))
-
-      # Counts and ids only — see §7.4's "Logs" row.
-      Logger.info(
-        "Arbiter.Accounts.Migrate: migration #{result.migration_id} — " <>
-          "#{result.accounts_created} account(s), #{result.credentials_created} credential(s), " <>
-          "#{result.workspaces_attached} workspace attachment(s), " <>
-          "#{result.keys_removed} key(s) moved out of #{result.workspaces_modified} worker_env blob(s), " <>
-          "#{result.backups_written} backup row(s)"
-      )
-    end
-
+    _result = Arbiter.Release.accounts_migrate(release_opts)
     :ok
-  end
-
-  defp body(result) do
-    """
-    Provider account migration#{if result.dry_run?, do: " (dry run)", else: ""} — #{result.migration_id}
-
-    #{Enum.join(result.lines, "\n")}
-
-    #{summary(result)}\
-    """
-  end
-
-  defp summary(result) do
-    "#{result.accounts_created} account(s) created, " <>
-      "#{result.credentials_created} credential(s) written, " <>
-      "#{result.workspaces_attached} workspace(s) attached, " <>
-      "#{result.keys_removed} key(s) moved out of #{result.workspaces_modified} worker_env blob(s), " <>
-      "#{result.backups_written} encrypted backup row(s)."
-  end
-
-  defp maybe_delete_plan(plan_path, opts) do
-    if Keyword.get(opts, :delete_plan, false) do
-      File.rm!(plan_path)
-      Mix.shell().info("\nDeleted #{plan_path}.")
-    end
-  end
-
-  defp next_steps(%{workspaces_modified: 0} = result) do
-    """
-
-    No worker_env was modified, so there is nothing to undo. Rollback handle:
-    #{result.migration_id}\
-    """
-  end
-
-  defp next_steps(result) do
-    """
-
-    The moved key is no longer in the workspace's worker_env. The account row
-    supplies it to a spawn only with `:provider_accounts_enabled` set to true
-    (P3's read flip; it ships false) — so migrate every workspace that carries
-    a provider credential, then flip the flag. To undo this migration instead:
-
-        mix arbiter.accounts.rollback --migration-id #{result.migration_id}\
-    """
+  rescue
+    e in Arbiter.Release.Refused -> Mix.raise(e.message)
   end
 end

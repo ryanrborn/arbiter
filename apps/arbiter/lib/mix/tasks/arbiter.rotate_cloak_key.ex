@@ -75,18 +75,7 @@ defmodule Mix.Tasks.Arbiter.RotateCloakKey do
 
   defp start_deps! do
     Mix.Task.run("app.config")
-    {:ok, _} = Application.ensure_all_started(:ash)
-    {:ok, _} = Application.ensure_all_started(:ash_sqlite)
-
-    case Arbiter.Repo.start_link(pool_size: 1) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-
-    case Arbiter.Vault.start_link([]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
+    Arbiter.Release.start_release_vault!()
   end
 
   defp print_sweep_report(%{table: table, column: column} = report) do

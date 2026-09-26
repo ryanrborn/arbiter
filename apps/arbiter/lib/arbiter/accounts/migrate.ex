@@ -515,13 +515,15 @@ defmodule Arbiter.Accounts.Migrate do
       nil when values == [] ->
         {:error,
          "account #{account.slug}: no workspace in the plan still holds #{credential.env_var}. " <>
-           "Re-run `mix arbiter.accounts.census` and re-edit the plan."}
+           "Re-run the census (`mix arbiter.accounts.census`, or " <>
+           "`Arbiter.Release.accounts_census/1` on a release) and re-edit the plan."}
 
       nil ->
         {:error,
          "account #{account.slug}: #{credential.env_var} no longer matches the plan's " <>
            "fingerprint #{Census.short_fingerprint(credential.fingerprint)} — the credential " <>
-           "changed since the census. Re-run `mix arbiter.accounts.census`."}
+           "changed since the census. Re-run the census (`mix arbiter.accounts.census`, or " <>
+           "`Arbiter.Release.accounts_census/1` on a release)."}
 
       secret ->
         {:ok, secret}

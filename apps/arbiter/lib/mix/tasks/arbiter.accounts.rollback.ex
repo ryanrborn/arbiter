@@ -40,13 +40,17 @@ defmodule Mix.Tasks.Arbiter.Accounts.Rollback do
     * `--list` — print the backup rows and exit, restoring nothing.
     * `--all-keys` — re-merge the entire snapshot, not just the removed keys.
     * `--dry-run` — report what would be restored; write nothing.
+
+  ## Release installs
+
+  A thin wrapper over `Arbiter.Release.accounts_rollback/1`, which a release
+  install (no Mix toolchain) runs directly:
+
+      bin/arbiter eval 'Arbiter.Release.accounts_rollback(list?: true)'
+      bin/arbiter eval 'Arbiter.Release.accounts_rollback(migration_id: "20260918T120000Z-a1b2c3")'
   """
 
   use Mix.Task
-
-  require Logger
-
-  alias Arbiter.Accounts.Migrate
 
   @switches [
     migration_id: :string,
@@ -60,13 +64,16 @@ defmodule Mix.Tasks.Arbiter.Accounts.Rollback do
 
   @impl Mix.Task
   def run(argv) do
-    Mix.Task.run("app.start")
+    # Config only: `Arbiter.Release.accounts_rollback/1` starts Ash, the Repo
+    # and the Vault itself, never the full application next to a live server.
+    Mix.Task.run("app.config")
     execute(argv)
   end
 
   @doc """
-  Everything `run/1` does after the application has booted. Split out for the
-  same reason as the migrate task's: `app.start` cannot run under the sandbox.
+  Everything `run/1` does after config is loaded: parse `argv` and hand off to
+  `Arbiter.Release.accounts_rollback/1`. Split out for the same reason as the
+  migrate task's.
   """
   @spec execute([String.t()]) :: :ok
   def execute(argv) do
@@ -76,82 +83,18 @@ defmodule Mix.Tasks.Arbiter.Accounts.Rollback do
       Mix.raise("unrecognised option(s): #{Enum.map_join(invalid, ", ", &elem(&1, 0))}")
     end
 
-    if Keyword.get(opts, :list, false), do: list(), else: restore(opts)
-  end
-
-  defp list do
-    case Migrate.list_backups() do
-      [] ->
-        Mix.shell().info("No provider-account migration backups.")
-
-      backups ->
-        Mix.shell().info("""
-        Provider account migration backups — names and counts only, no values.
-
-        #{Enum.map_join(backups, "\n", &backup_line/1)}\
-        """)
-    end
-
-    :ok
-  end
-
-  defp backup_line(backup) do
-    state = if backup.restored_at, do: "restored #{backup.restored_at}", else: "pending"
-
-    "  #{backup.migration_id}  #{backup.workspace}  " <>
-      "[#{Enum.join(backup.removed_keys, ", ")}]  #{state}  (#{backup.id})"
-  end
-
-  defp restore(opts) do
-    selector =
-      Keyword.take(opts, [:migration_id, :backup_id, :workspace]) ++ all_selector(opts)
-
-    if selector == [] do
-      Mix.raise(
-        "give one of --migration-id, --backup-id, --workspace or --all " <>
-          "(or --list to see what there is)"
-      )
-    end
-
-    rollback_opts =
-      selector ++
+    release_opts =
+      Keyword.take(opts, [:migration_id, :backup_id, :workspace, :all]) ++
         [
+          cli: :mix,
+          list?: Keyword.get(opts, :list, false),
           all_keys?: Keyword.get(opts, :all_keys, false),
           dry_run?: Keyword.get(opts, :dry_run, false)
         ]
 
-    case Migrate.rollback(rollback_opts) do
-      {:ok, result} -> report(result)
-      {:error, reason} -> Mix.raise(reason)
-    end
-  end
-
-  # `--all` is expressed to `Migrate.rollback/1` as "every un-restored backup",
-  # which is the same selector `--workspace` uses, widened.
-  defp all_selector(opts) do
-    if Keyword.get(opts, :all, false), do: [all: true], else: []
-  end
-
-  defp report(result) do
-    Mix.shell().info("""
-    Provider account rollback#{if result.dry_run?, do: " (dry run)", else: ""}
-
-    #{Enum.join(result.lines, "\n")}
-
-    #{result.restored} workspace(s) restored, #{result.keys_restored} key(s) merged back, \
-    #{result.skipped} skipped.\
-    """)
-
-    if result.dry_run? do
-      Mix.shell().info("\nNothing was written (dry run). Re-run without --dry-run to restore.")
-    else
-      # Counts and names only — §7.4.
-      Logger.info(
-        "Arbiter.Accounts.Migrate rollback: #{result.restored} workspace(s) restored, " <>
-          "#{result.keys_restored} key(s) merged back, #{result.skipped} skipped"
-      )
-    end
-
+    _result = Arbiter.Release.accounts_rollback(release_opts)
     :ok
+  rescue
+    e in Arbiter.Release.Refused -> Mix.raise(e.message)
   end
 end
