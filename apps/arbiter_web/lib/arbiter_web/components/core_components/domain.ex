@@ -116,13 +116,30 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :count, :integer, default: nil, doc: "live total, rendered in parentheses"
   attr :subtitle, :string, default: nil
   attr :class, :any, default: nil
+
+  attr :stack_on_mobile, :boolean,
+    default: false,
+    doc:
+      "stack the title above the actions below `sm` and let the actions slot wrap (bd-39kw9e, Usage page only) — " <>
+        "every other index page keeps the original fixed row layout unless it opts in"
+
   attr :rest, :global
 
   slot :actions, doc: ~s(right side — normally a live badge plus one primary button)
 
   def index_header(assigns) do
     ~H"""
-    <div class={["flex items-start justify-between gap-4", @class]} {@rest}>
+    <div
+      class={[
+        "flex gap-4",
+        if(@stack_on_mobile,
+          do: "flex-col sm:flex-row sm:items-start sm:justify-between",
+          else: "items-start justify-between"
+        ),
+        @class
+      ]}
+      {@rest}
+    >
       <div class="min-w-0">
         <h1 class="flex items-center gap-[9px] m-0 font-semibold text-[24px] leading-[1.2] tracking-[var(--tracking-section)] text-[var(--text-title)]">
           <ArbiterWeb.CoreComponents.Core.icon
@@ -146,7 +163,10 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           {@subtitle}
         </p>
       </div>
-      <div :if={@actions != []} class="flex items-center gap-2 min-w-0">
+      <div
+        :if={@actions != []}
+        class={["flex items-center gap-2 min-w-0", @stack_on_mobile && "flex-wrap"]}
+      >
         {render_slot(@actions)}
       </div>
     </div>
