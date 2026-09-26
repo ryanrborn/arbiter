@@ -232,16 +232,26 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
     # 6. Verifying the version changed to match the new tag
     # 7. Cleaning up the temporary tag
 
-    # Use a unique tag name to avoid collisions when tests run in parallel.
-    # System.unique_integer with [:positive, :monotonic] provides a large,
-    # monotonically increasing integer that's unique across all processes.
+    # Use a unique tag name that won't collide and will be picked up by git describe.
+    # Create a tag with a large version number that sorts after any previous test tags.
     unique_id = System.unique_integer([:positive, :monotonic])
-    temp_tag = "v99.99.#{unique_id}"
+    temp_tag = "v999.999.#{unique_id}"
     repo_root = Path.expand("../../../../", __DIR__)
     arbiter_cli_dir = Path.join(repo_root, "apps/arbiter_cli")
     escript_path = Path.join(arbiter_cli_dir, "arb")
 
     try do
+      # Clean up any stale test tags from previous runs (both v99.99 and v999.999 patterns).
+      # This ensures git describe will pick up our newly created tag.
+      {tags_99, _} = System.cmd("git", ["tag", "-l", "v99.99.*"], cd: repo_root)
+      {tags_999, _} = System.cmd("git", ["tag", "-l", "v999.999.*"], cd: repo_root)
+
+      old_tags = String.split(tags_99 <> tags_999, "\n", trim: true)
+
+      Enum.each(old_tags, fn tag ->
+        System.cmd("git", ["tag", "-d", tag], cd: repo_root)
+      end)
+
       # Get the current version before tagging
       {version_before, version_rc_before} =
         System.cmd(escript_path, ["version"], stderr_to_stdout: true)
