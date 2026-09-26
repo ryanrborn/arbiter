@@ -82,14 +82,45 @@ warrants at least the same gate.
    it is a report of what the four buckets can name, not of everything
    reviewers found.
 
-5. **Difficulty misestimates**, segmented by `(difficulty, repo)` cell — tasks
+5. **CI: first-push red rate and fix_pass outcomes** (bd-cuu8n3). The share
+   of PR-bearing tasks (a main run in the window + a PR) that needed at least
+   one CI fix_pass, overall and by repo, by provider/model (the task's latest
+   main run in the window) and by difficulty, with counts. Then every fix_pass
+   run in the window, classified deterministically by
+   `Arbiter.Loop.FixPassClassifier` — no model call — into exactly one of
+   `lint` (format/credo/dialyzer/compile warning), `flake_rerun` (no code
+   change, job re-run), `test_fix`, `infra` (auth, rate limit, runner/DB, or
+   the worker's own `ci_mark_external` verdict) or `unknown`. Structured
+   evidence is read first: `worker_run_steps` (was a file edited or a commit
+   made — the diff is non-empty — was a job re-run, was `ci_mark_external`
+   called?) and the failing CI jobs the worker was briefed with (names and,
+   on GitLab, log tails, recovered from the run's archived `.prompt`). The
+   closing summary text is only the fallback. The report prints how many runs
+   were decided from each source and the **unknown share**.
+
+   **Known undercount:** a fix_pass is only dispatched for an *approved* PR
+   blocked on red CI, so a push that went red and was fixed during review
+   leaves no fix_pass and is not counted. The rate is a lower bound.
+
+   A repo whose `lint` share of fix_passes exceeds
+   `loop.ci.lint_share_threshold` (default 0.3, with ≥
+   `loop.ci.min_fix_passes`, default 3, fix_passes in the window) is flagged.
+   Under `--propose` it becomes a `repo_doc_patch` proposal for that repo's
+   `CLAUDE.md`: *run `<check command>` before every push*. The command is
+   `loop.ci.check_commands.<repo>` if set, otherwise it is derived from the
+   repo's red lint-job names (`mix precommit (compile, deps, format)` →
+   `mix precommit`). The proposal accumulates lint fix_pass runs as
+   incidents against the normal evidence bar, and applying it stays a human
+   `arb loop apply`.
+
+6. **Difficulty misestimates**, segmented by `(difficulty, repo)` cell — tasks
    where the dispatched difficulty under-provisioned the actual cost/rounds.
 
-6. **`(difficulty, repo)` cells** with rework rate and mean cost. Compare
+7. **`(difficulty, repo)` cells** with rework rate and mean cost. Compare
    *within* a cell: metrics move with difficulty mix and repo, so cross-cell
    comparison reads drift as improvement.
 
-7. **Suggestions.** Each names the metric it should move, that metric's current
+8. **Suggestions.** Each names the metric it should move, that metric's current
    baseline, and a destination.
 
 ## The discipline the report enforces — and you must too

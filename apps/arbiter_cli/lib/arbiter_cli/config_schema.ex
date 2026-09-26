@@ -172,6 +172,14 @@ defmodule ArbiterCli.ConfigSchema do
                     proposed rather than filed as a hypothesis
         min_incidents       positive integer                        (default: 3)
         min_distinct_tasks  positive integer                        (default: 2)
+      ci            (map) — the CI section of `arb loop analyze` (bd-cuu8n3)
+        lint_share_threshold  number in (0, 1] — a repo whose lint share of CI
+                    fix_passes exceeds this gets a repo_doc_patch proposal
+                    ("run <check command> before push")       (default: 0.3)
+        min_fix_passes  positive integer — fix_passes a repo needs in the
+                    window before its lint share is judged      (default: 3)
+        check_commands  map of repo => command the proposal names; otherwise
+                    derived from the repo's red lint-job names
       autonomous_routing_enabled  bool — OFF on every workspace by default. Set
                     true to let Arbiter apply one already-proposed routing-tier
                     adjustment on its own, to half of this workspace's
