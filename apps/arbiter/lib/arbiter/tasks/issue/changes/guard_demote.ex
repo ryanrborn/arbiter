@@ -17,8 +17,8 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardDemote do
 
   require Logger
 
-  alias Ash.Changeset
   alias Arbiter.Worker.Registry, as: WorkerRegistry
+  alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do
