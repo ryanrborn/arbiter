@@ -8,7 +8,7 @@
 #
 # A counter (kept in `.git`, so it never shows up in `git status
 # --porcelain`) tracks how many reviewing passes have run.
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --git-common-dir)"
 counter_file="$git_dir/review_reject_twice_pass"
 pass=0
 [ -f "$counter_file" ] && pass="$(cat "$counter_file")"

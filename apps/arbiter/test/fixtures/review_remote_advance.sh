@@ -14,7 +14,7 @@
 # reason. Never invokes the paid CLI.
 other="$1"
 branch="${2:-main}"
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --git-common-dir)"
 counter="$git_dir/remote_advance_pass"
 pass=0
 [ -f "$counter" ] && pass="$(cat "$counter")"

@@ -29,7 +29,11 @@ defmodule Arbiter.Worker.ReviewGate do
 
   Each review pass spawns a **distinct** reviewer worker — a second
   `Arbiter.Worker` with a `#review`-suffixed task id and its own
-  `Arbiter.Worker.ClaudeSession`, running in the same worktree. A different
+  `Arbiter.Worker.ClaudeSession`. It does NOT run in the implementer's worktree:
+  each review round provisions its own detached, throwaway checkout at the head
+  `origin` carries after the push gate, and the reviewer runs there with
+  Edit/Write/NotebookEdit denied (bd-a22hib — see `provision_review_checkout/1`).
+  That SHA is what an APPROVE stamps as reviewed. A different
   process = a different Claude invocation = a different mind (no self-grading).
   It is handed the task's acceptance criteria + description and asked to review
   the branch diff for correctness / regressions, **without booting the app** (the
@@ -161,6 +165,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.ReviewGate.Round
+  alias Arbiter.Reviews.Checkout
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.PushState
   alias Arbiter.Tasks.Issue
@@ -168,6 +173,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
@@ -825,7 +831,15 @@ defmodule Arbiter.Worker.ReviewGate do
       # timed out is never retried inside the round. Reset per round by
       # `dispatch_next_review/2` — a fresh diff is a fresh chance for a provider
       # that timed out on the previous one.
-      reviewer_timeouts: []
+      reviewer_timeouts: [],
+      # bd-a22hib: the CURRENT review round's own detached checkout,
+      # `%{path:, head_sha:}` — provisioned by `provision_review_checkout/1`
+      # at the pushed head right before the round's first reviewer pass, shared
+      # by every pass of that round (re-prompts, timeout retries, provider
+      # rotations), and removed by `release_review_checkout/1` the moment the
+      # round ends. nil between rounds (the fix pass runs in `worktree_path`)
+      # and for a gate with no branch worktree to check out from.
+      review_checkout: nil
     }
 
     Process.monitor(author)
@@ -905,6 +919,16 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp launch_first_reviewer(state) do
+    case provision_review_checkout(state) do
+      {:ok, state} ->
+        launch_first_reviewer_in_checkout(state)
+
+      {:error, reason} ->
+        escalate_pre_review(state, checkout_failure_message(state, reason), :reviewer_failed)
+    end
+  end
+
+  defp launch_first_reviewer_in_checkout(state) do
     case launch_worker(state, state.review_id, :reviewer, review_prompt(state), state.command) do
       {:ok, state} ->
         {:noreply, state}
@@ -1071,6 +1095,203 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp push_gate(_state), do: :ok
+
+  # ---- the reviewer's own checkout at the pushed head (bd-a22hib) ----------
+  #
+  # The in-gate reviewer used to run in the implementer's own worktree, under
+  # the plain workspace policy. It read the implementer's LOCAL state rather
+  # than what was pushed (the cause `push_gate/1` only guards against), nothing
+  # but the prompt kept it from writing to the branch it was reviewing, and its
+  # test runs shared the implementer's `_build` and `deps`.
+  #
+  # So every review round now gets what a dispatched reviewer (`review: true`,
+  # bd-199giy) already gets: `Checkout.provision_branch/3` — fetch the branch
+  # from `origin`, resolve the fetched tip, check THAT commit out detached into
+  # a throwaway worktree — and `Dispatch.review_security_policy/2`'s
+  # Edit/Write/NotebookEdit denial. It runs after `push_gate/1`, so the tip
+  # `origin` hands back is the head the round just pushed or confirmed. The
+  # checked-out SHA is what an APPROVE stamps and records coverage for
+  # (`reviewed_head/1`): what was reviewed is exactly what the merge guard
+  # compares against.
+  #
+  # One checkout per round, shared by every pass of that round (a re-prompt, a
+  # timeout retry and a provider rotation all read the same diff). Released
+  # when the round ends — `enter_revise/2` on a reject, `terminate/2` on every
+  # terminal path — and swept on boot (`Checkout.sweep_orphans/1`) for a gate
+  # that never reached `terminate/2`.
+  #
+  # Skipped only when there is nothing to check out from: no worktree, or a
+  # worktree positively checked out on some OTHER branch — the ad-hoc / test-rig
+  # shape `prepare_branch_for_review/1`, `reviewer_commit_check/1` and
+  # `PushState` all already treat as "not the task's branch worktree". Every
+  # other failure is returned, and the round parks naming it: falling back to
+  # the implementer's worktree would silently reintroduce the thing this fixes.
+
+  @review_checkout_prefix "gate-review"
+
+  @doc """
+  The leaf prefix of an in-gate reviewer checkout under the worktree root —
+  what `Arbiter.Reviews.Checkout.sweep_orphans/1` reclaims on boot.
+  """
+  @spec review_checkout_prefix() :: String.t()
+  def review_checkout_prefix, do: @review_checkout_prefix
+
+  @doc """
+  Boot sweep for in-gate reviewer checkouts whose gate died without reaching
+  `terminate/2` (a server restart, a brutal kill). Removes every
+  `review_checkout_prefix/0` leaf under the worktree root that predates this
+  VM; returns the removed paths. A non-primary instance (`primary?: false`)
+  sweeps nothing — the live instance's gates own those checkouts.
+
+  Extra opts are passed through to `Arbiter.Reviews.Checkout.sweep_orphans/1`
+  (`:root`, `:before`).
+  """
+  @spec sweep_orphaned_review_checkouts(keyword()) :: [String.t()]
+  def sweep_orphaned_review_checkouts(opts \\ []) do
+    {primary?, opts} = Keyword.pop(opts, :primary?, true)
+
+    if primary? do
+      Checkout.sweep_orphans([prefix: @review_checkout_prefix] ++ opts)
+    else
+      []
+    end
+  end
+
+  @doc """
+  Provision the current review round's detached checkout at the head `origin`
+  carries for `state.branch`, and record it on `state.review_checkout`
+  (`%{path:, head_sha:}`). Any checkout the state still held is released first,
+  so a gate never holds two.
+
+  Returns `{:ok, state}` unchanged (no checkout) when there is nothing to check
+  out from — no `worktree_path`, or a worktree checked out on a different branch
+  than `state.branch`. Returns `{:error, reason}` for every other failure; the
+  caller parks the round rather than reviewing in the implementer's worktree.
+
+  Public so the remote-head property can be exercised directly against a real
+  worktree with unpushed commits; the gate reaches it at the start of every
+  review round.
+  """
+  @spec provision_review_checkout(map()) :: {:ok, map()} | {:error, term()}
+  def provision_review_checkout(state) do
+    state = release_review_checkout(state)
+
+    case review_checkout_source(state) do
+      :none ->
+        {:ok, state}
+
+      {:ok, wt, branch} ->
+        case Checkout.provision_branch(wt, branch, prefix: @review_checkout_prefix) do
+          {:ok, %{path: path, head_sha: sha}} ->
+            # The reviewer may run tests here. Seed the implementer's fetched
+            # and compiled deps (never the umbrella apps themselves — those
+            # compile fresh from the checked-out source) so a test run does not
+            # start from a cold `deps.get` + full dep compile. Copies, not
+            # symlinks: nothing the reviewer builds reaches the implementer's
+            # tree. Best-effort, and a no-op for a repo with no `deps`/`_build`.
+            :ok = Worktree.seed_compiled_deps(wt, path)
+
+            Logger.info(
+              "ReviewGate: round #{Map.get(state, :round)} for task=#{Map.get(state, :task_id)} " <>
+                "reviews #{String.slice(sha, 0, 12)} in its own checkout #{path}"
+            )
+
+            {:ok, Map.put(state, :review_checkout, %{path: path, head_sha: sha})}
+
+          {:error, reason} ->
+            Logger.warning(
+              "ReviewGate: could not provision a review checkout of `#{branch}` for " <>
+                "task=#{Map.get(state, :task_id)}: #{inspect(reason)}"
+            )
+
+            {:error, reason}
+        end
+    end
+  end
+
+  @doc """
+  Remove the current round's review checkout, if any, and clear
+  `state.review_checkout`. Idempotent; never fails (`Checkout.teardown/1`).
+  """
+  @spec release_review_checkout(map()) :: map()
+  def release_review_checkout(%{review_checkout: %{path: path}} = state) do
+    :ok = Checkout.teardown(path)
+    %{state | review_checkout: nil}
+  end
+
+  def release_review_checkout(state), do: state
+
+  defp review_checkout_source(%{worktree_path: wt, branch: branch})
+       when is_binary(wt) and is_binary(branch) do
+    case Worktree.current_branch(wt) do
+      {:ok, ^branch} -> {:ok, wt, branch}
+      {:ok, _other_branch} -> :none
+      {:error, _} -> {:ok, wt, branch}
+    end
+  end
+
+  defp review_checkout_source(_state), do: :none
+
+  defp checkout_failure_message(state, reason) do
+    """
+    ReviewGate could not provision the review checkout for round #{state.round}:
+    a detached, write-denied checkout of `#{state.branch}` at the head `origin`
+    carries, which is where the reviewer runs (bd-a22hib).
+
+    Reason: #{inspect(reason)}
+
+    No reviewer was run. It was deliberately NOT run in the implementer's
+    worktree instead: that tree can hold unpushed or uncommitted work, and the
+    reviewer could write to the branch it is reviewing. Nothing about the work
+    itself has been faulted — fix the cause (worktree root writable, `origin`
+    reachable, the branch fetchable) and re-run the review.
+    """
+    |> String.trim()
+  end
+
+  # Where a pass runs. Only a reviewer moves into the round's checkout; the fix
+  # pass (and a reviewer with no checkout — see `review_checkout_source/1`)
+  # stays in the implementer's worktree.
+  defp session_cwd(%{review_checkout: %{path: path}}, :reviewer), do: path
+  defp session_cwd(state, _role), do: state.worktree_path
+
+  # The tree the reviewer actually read: the round's checkout when there is one.
+  defp review_tree(%{review_checkout: %{path: path}}), do: path
+  defp review_tree(state), do: Map.get(state, :worktree_path)
+
+  @doc """
+  The security policy a ReviewGate pass spawns under.
+
+  The workspace posture scoped to `state.repo` for every pass — the same
+  resolution the dispatch spawn path uses (bd-9u10op, bd-3gc18m). A reviewer
+  standing in its round's checkout additionally goes through
+  `Arbiter.Worker.Dispatch.review_security_policy/2`, the one hardening every
+  worktree-backed reviewer shares: Edit/Write/NotebookEdit denied. The
+  implementer keeps the plain posture — it is the one pass meant to write.
+  """
+  @spec session_security_policy(Workspace.t() | map() | nil, map(), :reviewer | :implementer) ::
+          SecurityPolicy.t()
+  def session_security_policy(ws, state, role) do
+    checkout =
+      case {role, Map.get(state, :review_checkout)} do
+        {:reviewer, %{path: _} = checkout} -> checkout
+        _ -> nil
+      end
+
+    ws
+    |> SecurityPolicy.resolve(%{}, Map.get(state, :repo))
+    |> Dispatch.review_security_policy(review_checkout: checkout)
+  end
+
+  # The head an APPROVE stamps and records coverage for. With a round checkout
+  # it is the SHA the reviewer was actually handed — fetched from `origin` after
+  # the push gate — so the reviewed SHA the merge guard compares against is
+  # exactly what was reviewed, even if the implementer's local HEAD has since
+  # moved. Without one, the bd-2jkrqu `pushed_head/1` answer as before.
+  defp reviewed_head(%{review_checkout: %{head_sha: sha}}) when is_binary(sha) and sha != "",
+    do: {:ok, sha}
+
+  defp reviewed_head(state), do: pushed_head(state)
 
   # The findings text for a head that could not be put on the remote branch.
   # Returned (not sent) so the caller decides which terminal it belongs to —
@@ -1299,6 +1520,14 @@ defmodule Arbiter.Worker.ReviewGate do
       safe(fn -> Worker.stop(state.reviewer_pid, :normal) end)
     end
 
+    # bd-a22hib: every terminal path — APPROVE, a reject at the cap, a park, a
+    # timeout, a reviewer that died, the author going away, a crash in a
+    # callback — ends in `{:stop, …}` and so lands here. Releasing the round's
+    # checkout AFTER stopping the reviewer means nothing is still standing in
+    # it. A gate killed outright (no `terminate/2`) is covered by the boot
+    # sweep, `Arbiter.Reviews.Checkout.sweep_orphans/1`.
+    _ = release_review_checkout(state)
+
     :ok
   end
 
@@ -1461,12 +1690,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # via `Worktree.create/3` are always checked out on the per-task branch, so
   # the guard is fully live there.
   defp finalize_approval(state, verdict, findings) do
+    # bd-a22hib: a round checkout IS the branch's pushed head by construction
+    # (detached, so the on-branch test would always say no) — ask it directly.
     empty_net_diff? =
-      worktree_on_expected_branch?(state) and
-        match?(
-          {:ok, true},
-          NetDiff.local_diff_blank?(Map.get(state, :worktree_path), diff_range(state))
-        )
+      (is_map(Map.get(state, :review_checkout)) or worktree_on_expected_branch?(state)) and
+        match?({:ok, true}, NetDiff.local_diff_blank?(review_tree(state), diff_range(state)))
 
     if empty_net_diff? do
       Logger.warning(
@@ -1665,6 +1893,11 @@ defmodule Arbiter.Worker.ReviewGate do
     # The reviewer's subprocess has exited; stop its worker so it can't linger
     # (it may not have self-completed if it never printed `arb done`).
     stop_worker(state)
+
+    # bd-a22hib: the review round is over — its checkout goes with it. The fix
+    # pass runs in the implementer's worktree, and the next round provisions a
+    # fresh checkout at whatever head the fix pass pushes.
+    state = release_review_checkout(state)
 
     # bd-bq8c8a: fetch before handing the branch to an implementer. If the
     # remote moved while this round was reviewing, a fix commit on top of the
@@ -2043,6 +2276,18 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp launch_next_reviewer(next, review_id) do
+    case provision_review_checkout(next) do
+      {:ok, next} ->
+        launch_next_reviewer_in_checkout(next, review_id)
+
+      {:error, reason} ->
+        message = checkout_failure_message(next, reason)
+        record_round(next, :review, :request_changes, message, converged: false)
+        {:done, finish(next, {:parked, :reviewer_failed, message})}
+    end
+  end
+
+  defp launch_next_reviewer_in_checkout(next, review_id) do
     case launch_worker(next, review_id, :reviewer, rereview_prompt(next), next.command) do
       {:ok, state} ->
         {:continue, state}
@@ -3710,7 +3955,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # `last_reviewed_sha` at its older, more conservative value, which keeps the
     # merge guard CLOSED — the safe direction.
     with task_id when is_binary(task_id) <- Map.get(state, :task_id),
-         {:ok, sha} <- pushed_head(state),
+         {:ok, sha} <- reviewed_head(state),
          {:ok, task} <- Ash.get(Issue, task_id) do
       case Ash.update(task, %{last_reviewed_sha: sha, last_reviewed_at: DateTime.utc_now()}) do
         {:ok, _} ->
@@ -3766,7 +4011,7 @@ defmodule Arbiter.Worker.ReviewGate do
          # one. `{:error, {:head_not_pushed, _}}` routes into coverage_failed/4
          # below: no row, and one page — the silently-missing row §3.3 warns
          # about is exactly what an unpushed approval would leave behind.
-         {:ok, head_sha} <- pushed_head(state),
+         {:ok, head_sha} <- reviewed_head(state),
          {:ok, base_ref} <- present(base_ref, :no_base_ref),
          {:ok, net_diff_id} <- coverage_net_diff_id(state) do
       coverage_writer().(%{
@@ -3867,14 +4112,18 @@ defmodule Arbiter.Worker.ReviewGate do
   # reviewer prompt, so fingerprinting the same range means the row describes
   # exactly the content that was approved. `nil` is a failure, never a value —
   # see `NetDiff.fingerprint/1` on why an empty diff must not compare equal.
-  defp coverage_net_diff_id(%{worktree_path: wt} = state) when is_binary(wt) do
-    case NetDiff.fingerprint_local(wt, diff_range(state)) do
-      id when is_binary(id) -> {:ok, id}
-      nil -> {:error, :no_net_diff}
+  defp coverage_net_diff_id(state) do
+    case review_tree(state) do
+      tree when is_binary(tree) ->
+        case NetDiff.fingerprint_local(tree, diff_range(state)) do
+          id when is_binary(id) -> {:ok, id}
+          nil -> {:error, :no_net_diff}
+        end
+
+      _ ->
+        {:error, :no_worktree}
     end
   end
-
-  defp coverage_net_diff_id(_state), do: {:error, :no_worktree}
 
   defp present(value, _tag) when is_binary(value) and value != "", do: {:ok, value}
   defp present(_value, tag), do: {:error, tag}
@@ -4069,7 +4318,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # (`ClaudeSession.start/1` forwards it as `:composed_prompt` →
     # `Arbiter.Worker.PromptLog`). Without it a custom-argv pass leaves no
     # record of its prompt at all.
-    base = [owner: pid, worktree_path: state.worktree_path, command: command, prompt: prompt]
+    base = [owner: pid, worktree_path: session_cwd(state, role), command: command, prompt: prompt]
 
     prov_str =
       case Map.get(state, :command_provider) do
@@ -4093,7 +4342,7 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp build_session_opts(state, pid, role, prompt, nil, revision) do
-    base = [owner: pid, worktree_path: state.worktree_path]
+    base = [owner: pid, worktree_path: session_cwd(state, role)]
 
     case load_workspace(state.workspace_id) do
       nil ->
@@ -4119,7 +4368,9 @@ defmodule Arbiter.Worker.ReviewGate do
         # per-repo override (config["agent"]["security"]["repos"][repo]) reaches
         # the review/revise workers spawned into that repo's worktree, matching
         # the dispatch spawn path (bd-3gc18m). `state.repo` defaults to
-        # "unknown", a safe no-op when no override exists.
+        # "unknown", a safe no-op when no override exists. A reviewer standing
+        # in its round's checkout is also write-denied (bd-a22hib) — see
+        # `session_security_policy/3`.
         # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
         # the worker OAuth token from this workspace's `worker_env` before
         # falling back to the server env (bd-bw3466).
@@ -4139,9 +4390,9 @@ defmodule Arbiter.Worker.ReviewGate do
         agent_opts =
           agent_opts_for_role(ws, role_atom, state.task_id, adapter) ++
             [
-              security: SecurityPolicy.resolve(ws, %{}, state.repo),
+              security: session_security_policy(ws, state, role),
               workspace: ws,
-              worktree_path: state.worktree_path,
+              worktree_path: session_cwd(state, role),
               timeout_ms: state.timeout_ms
             ]
 
@@ -4517,7 +4768,7 @@ defmodule Arbiter.Worker.ReviewGate do
     #{task.acceptance}
 
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
-    #{head_sha_instruction(state)}
+    #{head_sha_instruction(state)}#{review_checkout_block(state)}
     #{scope_guidance(state)}
     Judge the change against the acceptance criteria AND for correctness,
     regressions, and obvious defects.
@@ -5070,6 +5321,23 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp head_sha_instruction(_state), do: ""
+
+  # bd-a22hib: tell the reviewer where it is standing. Without this, a detached
+  # HEAD (`git branch --show-current` prints nothing) and denied Edit/Write read
+  # like a broken environment rather than the intended posture.
+  defp review_checkout_block(%{review_checkout: %{path: path, head_sha: sha}} = state) do
+    """
+    You are working in a DETACHED, READ-ONLY checkout made for this review round
+    only: `#{path}`, at commit `#{sha}` — the head of `origin/#{state.branch}` as
+    it stood after the ReviewGate pushed it. It is not the implementer's
+    worktree. Edit/Write are denied here; do not commit or push from it. You may
+    run tests in it (same timeout rule as below). It is deleted when this round
+    ends.
+
+    """
+  end
+
+  defp review_checkout_block(_state), do: ""
 
   # bd-129xh4: when the author opened the PR before the gate ran, point the
   # reviewer at the real PR so it can `gh pr diff <n>` / record an inline review

@@ -2,10 +2,11 @@
 # Fixture: a reviewer that commits a drive-by change into the worktree and THEN
 # approves (bd-2jkrqu, acceptance 2).
 #
-# Real reviewers do sometimes write to the worktree. When they commit, the head
-# the gate would stamp and record coverage for is a commit that exists only
-# locally — the PR carries the previous one. The stamping path must refuse to
-# name it rather than record a review of a commit the PR does not have.
+# Real reviewers do sometimes write to their checkout. Before bd-a22hib that
+# checkout was the implementer's worktree, so a reviewer commit moved the head
+# the gate would stamp to a commit only the worktree had. The reviewer now runs
+# in a detached throwaway checkout: the commit lands there, the branch never
+# moves, and the stamp names the pushed head the reviewer was handed.
 echo "reviewing the diff..."
 echo "reviewer drive-by" >> reviewer-note.txt
 git add reviewer-note.txt >/dev/null 2>&1

@@ -17,9 +17,9 @@
 # Stands in for a real `claude --print` reviewer; never invokes the paid CLI.
 branch="${1:-main}"
 mode="${2:-ROUND1}"
-marker="$(git rev-parse --git-dir)/review_gate_push_check_attempt"
+marker="$(git rev-parse --git-common-dir)/review_gate_push_check_attempt"
 # Sentinel: proves the reviewer really ran, so a test can assert it did NOT.
-: > "$(git rev-parse --git-dir)/review_gate_push_check_ran"
+: > "$(git rev-parse --git-common-dir)/review_gate_push_check_ran"
 
 local_head="$(git rev-parse HEAD 2>/dev/null)"
 remote_head="$(git rev-parse "origin/$branch" 2>/dev/null)"

@@ -14,7 +14,7 @@
 # Never invokes the paid CLI.
 branch="${1:-main}"
 hold="$2"
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --git-common-dir)"
 counter="$git_dir/handshake_pass"
 pass=0
 [ -f "$counter" ] && pass="$(cat "$counter")"
