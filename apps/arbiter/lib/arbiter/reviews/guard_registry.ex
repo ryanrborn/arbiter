@@ -480,9 +480,15 @@ defmodule Arbiter.Reviews.GuardRegistry do
       sites: [
         {ReviewGate, :do_route_after_reject, 2},
         {ReviewGate, :terminal_reject_verdict, 1},
-        {ReviewGate, :escalate_fabricated_evidence, 2}
+        {ReviewGate, :escalate_fabricated_evidence, 2},
+        {ReviewGate, :escalate_coordinator_only, 2}
       ],
-      anchors: ["@default_rounds", "@rounds_by_difficulty", "EvidenceIntegrity.flagged?"],
+      anchors: [
+        "@default_rounds",
+        "@rounds_by_difficulty",
+        "EvidenceIntegrity.flagged?",
+        "CoordinatorOnlyFindings.only_coordinator_blocked_unmet?"
+      ],
       summary: "review<->revise round budget, capped per difficulty",
       policy_note:
         "P9 split this arm. A verdict guard that refused an APPROVE and reached " <>
@@ -494,7 +500,13 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "findings flag fabricated evidence (`Arbiter.Worker.EvidenceIntegrity`) " <>
           "ends the loop at any round via `escalate_fabricated_evidence/2`. It is " <>
           "a genuine rejection, so it records `:failed_run` like the cap, and C3 " <>
-          "escalates it once instead of dispatching a fix round."
+          "escalates it once instead of dispatching a fix round. bd-6d3h8m adds a " <>
+          "fourth, same shape: a REQUEST_CHANGES whose every `[NOT MET]` criterion " <>
+          "the reviewer tagged as needing coordinator/operator action " <>
+          "(`Arbiter.Worker.CoordinatorOnlyFindings`) ends the loop the same way via " <>
+          "`escalate_coordinator_only/2`, and `Arbiter.Worker.maybe_dispatch_fix_round/3` " <>
+          "skips the automatic fix round too — another implementer round cannot fix " <>
+          "what the reviewer already said an implementer can't fix."
     },
     %{
       id: :commit_gate_head_unchanged,

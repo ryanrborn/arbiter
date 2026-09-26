@@ -59,8 +59,10 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   """
 
   alias Arbiter.Messages.Message
+  alias Arbiter.ReviewGate.Round
   alias Arbiter.Worker.Dispatch
 
+  require Ash.Query
   require Logger
 
   # This module both defines the behaviour and ships the default implementation,
@@ -96,11 +98,18 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       falsified its evidence (`Arbiter.Worker.EvidenceIntegrity`, bd-80talz).
       A fix round would hand that back to the same provider, and the reviewer
       can be wrong about provenance too, so a human judges it.
+    * `:needs_coordinator` — every `[NOT MET]` criterion in the round's
+      findings is one the reviewer marked as needing coordinator/operator
+      action rather than another implementer round
+      (`Arbiter.Worker.CoordinatorOnlyFindings`, bd-6d3h8m) — e.g. a criterion
+      that can only be verified post-merge or post-deploy. Another implementer
+      round cannot fix what the reviewer already says it cannot fix.
   """
   @type give_up_reason ::
           :budget_exhausted
           | :not_converging
           | :fabricated_evidence
+          | :needs_coordinator
           | {:dispatch_failed, term()}
 
   @doc """
@@ -249,14 +258,16 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
         ) :: :ok | {:error, :no_workspace_id}
   def escalate_exhausted(task_id, workspace_id, attempts, reason)
       when is_binary(task_id) and is_binary(workspace_id) and is_integer(attempts) do
+    total_reviews = total_review_rounds(task_id)
+
     Message.send_mail(%{
       kind: :escalation,
       to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: workspace_id,
       task_ref: task_id,
-      subject: subject(task_id, attempts, reason),
-      body: body(task_id, attempts, reason)
+      subject: subject(task_id, attempts, reason, total_reviews),
+      body: body(task_id, attempts, reason, total_reviews)
     })
 
     :ok
@@ -286,22 +297,48 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     {:error, :no_workspace_id}
   end
 
-  defp subject(task_id, attempts, :budget_exhausted),
-    do: "#{task_id}: ReviewGate fix rounds exhausted after #{attempts} round(s)"
+  # bd-6d3h8m: how many `:review`-role rows exist for this task, across every
+  # pass (the original gate AND every automatic fix round's fresh gate). The
+  # fix-round `attempts` counter alone hides the real cost — on bd-28t80i, "1
+  # round" was 6 Opus reviews across 2 passes. Best-effort: nil (rather than a
+  # raised exception) if the query fails, so a DB hiccup never blocks the page
+  # this is attached to.
+  defp total_review_rounds(task_id) do
+    Round
+    |> Ash.Query.filter(task_id == ^task_id and role == :review)
+    |> Ash.count!()
+  rescue
+    _ -> nil
+  end
 
-  defp subject(task_id, _attempts, :not_converging),
+  defp review_count_note(nil), do: "review count unknown"
+  defp review_count_note(1), do: "1 review"
+  defp review_count_note(n), do: "#{n} reviews"
+
+  defp subject(task_id, attempts, :budget_exhausted, total_reviews) do
+    "#{task_id}: ReviewGate fix rounds exhausted after #{attempts} round(s) " <>
+      "(#{review_count_note(total_reviews)} over #{attempts + 1} pass(es))"
+  end
+
+  defp subject(task_id, _attempts, :not_converging, _total_reviews),
     do: "#{task_id}: ReviewGate fix round is not converging (identical findings)"
 
-  defp subject(task_id, _attempts, :fabricated_evidence),
+  defp subject(task_id, _attempts, :fabricated_evidence, _total_reviews),
     do: "#{task_id}: ReviewGate reviewer flagged fabricated evidence — no automatic fix round"
 
-  defp subject(task_id, attempts, {:dispatch_failed, _}),
+  defp subject(task_id, _attempts, :needs_coordinator, _total_reviews),
+    do:
+      "#{task_id}: ReviewGate findings need coordinator/operator action — no automatic fix round"
+
+  defp subject(task_id, attempts, {:dispatch_failed, _}, _total_reviews),
     do: "#{task_id}: ReviewGate fix round FAILED to dispatch after #{attempts} round(s)"
 
-  defp body(task_id, attempts, :budget_exhausted) do
+  defp body(task_id, attempts, :budget_exhausted, total_reviews) do
     """
     Task #{task_id} was rejected by the ReviewGate (REQUEST_CHANGES) and the
-    automatic implementer fix round is out of budget after #{attempts} round(s).
+    automatic implementer fix round is out of budget after #{attempts} round(s):
+    #{review_count_note(total_reviews)} across #{attempts + 1} review pass(es)
+    (the original ReviewGate plus each automatic fix round's fresh gate).
 
     #{lede(attempts)}
 
@@ -313,7 +350,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     """
   end
 
-  defp body(task_id, attempts, :not_converging) do
+  defp body(task_id, attempts, :not_converging, _total_reviews) do
     """
     Task #{task_id} was rejected by the ReviewGate with the SAME findings the last
     automatic fix round was already dispatched against, so that round changed
@@ -329,7 +366,26 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     """
   end
 
-  defp body(task_id, attempts, :fabricated_evidence) do
+  defp body(task_id, attempts, :needs_coordinator, _total_reviews) do
+    """
+    Task #{task_id} was rejected by the ReviewGate, and every `[NOT MET]`
+    criterion in the round is one the reviewer explicitly marked as needing
+    coordinator/operator action, not another implementer round (e.g. a
+    criterion that can only be verified after merge or deploy).
+    #{attempts} automatic fix round(s) had run before this one was skipped.
+
+    No fix round was dispatched. Another implementer pass cannot make progress
+    on a criterion the reviewer already says it cannot fix — bd-28t80i spent
+    6 reviews and 4 implementer passes finding the same "needs deploy" gap
+    every round before this rule existed.
+
+    Read the findings (`review_gate_rounds_list #{task_id}`) and either verify
+    the criterion yourself (a deploy, a live check) and mark it resolved, or
+    decide the acceptance criteria need revising.
+    """
+  end
+
+  defp body(task_id, attempts, :fabricated_evidence, _total_reviews) do
     """
     Task #{task_id} was rejected by the ReviewGate, and the reviewer says the
     work fabricated or falsified evidence: a mockup presented as a screenshot,
@@ -350,7 +406,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     """
   end
 
-  defp body(task_id, attempts, {:dispatch_failed, reason}) do
+  defp body(task_id, attempts, {:dispatch_failed, reason}, _total_reviews) do
     """
     Task #{task_id} was rejected by the ReviewGate (REQUEST_CHANGES) and the
     automatic implementer fix round could not start: #{inspect(reason)}.

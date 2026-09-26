@@ -22,7 +22,10 @@ defmodule ArbiterWeb.Api.ReviewGateRoundController do
     rounds =
       Round
       |> Ash.Query.filter(task_id == ^task_id)
-      |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+      # bd-6d3h8m: `round` restarts at 1 on every automatic fix round's fresh
+      # gate; sort on `fix_round_attempt` first so the two passes don't
+      # interleave.
+      |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
       |> Ash.read!()
 
     json(conn, %{data: Enum.map(rounds, &render_round/1)})
@@ -38,6 +41,7 @@ defmodule ArbiterWeb.Api.ReviewGateRoundController do
       task_id: r.task_id,
       run_id: r.run_id,
       round: r.round,
+      fix_round_attempt: r.fix_round_attempt,
       role: r.role,
       verdict: r.verdict,
       findings: r.findings,

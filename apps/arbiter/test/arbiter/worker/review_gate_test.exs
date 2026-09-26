@@ -796,6 +796,50 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Enum.any?(runs, &(&1.task_id == task.id)), "expected the author's own run row"
     end
 
+    # bd-6d3h8m: when a fix round's dispatcher resumes the worker with
+    # `meta[:review_gate_fix_round_attempts]` set, the fresh gate it spawns
+    # must tag its own `Round` rows with that attempt — `round` alone restarts
+    # at 1 on every fresh gate, so without this the row is indistinguishable
+    # from the original pass's round 1.
+    test "a fresh gate tags its Round rows with meta[:review_gate_fix_round_attempts]",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-fixround-tag"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reviewer, "APPROVE"],
+        review_timeout_ms: 5_000,
+        # As if this worker were the one an automatic fix round resumed.
+        review_gate_fix_round_attempts: 1
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert round.round == 1
+      assert round.fix_round_attempt == 1
+    end
+
     # bd-78vg4v: a reviewing pass that hangs past the timeout ceiling is retried
     # once with a FRESH reviewer mind before escalating. The @timeout_retry
     # fixture hangs on its first pass, then APPROVEs on the retry → the branch

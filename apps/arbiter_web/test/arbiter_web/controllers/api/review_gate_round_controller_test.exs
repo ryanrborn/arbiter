@@ -70,5 +70,45 @@ defmodule ArbiterWeb.Api.ReviewGateRoundControllerTest do
       conn = get(conn, ~p"/api/review_gate_rounds")
       assert conn.status == 400
     end
+
+    # bd-6d3h8m: an automatic fix round's fresh gate restarts `round` at 1, so
+    # sorting on `round` alone (the pre-fix behavior) interleaves it with the
+    # original pass instead of reading as two consecutive passes.
+    test "a fix round's rounds do not interleave with the original pass's", %{conn: conn} do
+      task_id = "bd-rest-fixround-#{System.unique_integer([:positive])}"
+
+      for round <- 1..2 do
+        insert_round!(%{
+          task_id: task_id,
+          round: round,
+          fix_round_attempt: 1,
+          verdict: :request_changes,
+          findings: "pass 2 round #{round}",
+          converged: false
+        })
+      end
+
+      for round <- 1..2 do
+        insert_round!(%{
+          task_id: task_id,
+          round: round,
+          fix_round_attempt: 0,
+          verdict: :request_changes,
+          findings: "pass 1 round #{round}",
+          converged: false
+        })
+      end
+
+      conn = get(conn, ~p"/api/review_gate_rounds", %{task_id: task_id})
+      {:ok, parsed} = Jason.decode(conn.resp_body)
+
+      assert Enum.map(parsed["data"], &{&1["fix_round_attempt"], &1["round"], &1["findings"]}) ==
+               [
+                 {0, 1, "pass 1 round 1"},
+                 {0, 2, "pass 1 round 2"},
+                 {1, 1, "pass 2 round 1"},
+                 {1, 2, "pass 2 round 2"}
+               ]
+    end
   end
 end
