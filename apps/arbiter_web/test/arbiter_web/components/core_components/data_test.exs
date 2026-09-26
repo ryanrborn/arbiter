@@ -216,6 +216,24 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       # The outer wrapper should have overflow-x-auto for horizontal scrolling
       assert html =~ "overflow-x-auto"
     end
+
+    test "min_width keeps columns from collapsing to zero on a narrow viewport" do
+      assigns = %{rows: [%{id: "task1", detail: "open → in_progress"}]}
+
+      html =
+        rendered_to_string(~H"""
+        <.data_table id="tasks" rows={@rows} min_width="600px">
+          <:col :let={row} label="ID" width="84px">{row.id}</:col>
+          <:col :let={row} label="Detail" width="minmax(200px, 1fr)" wrap>{row.detail}</:col>
+        </.data_table>
+        """)
+
+      # Both the header row and the body rows must carry the min-width so the
+      # grid tracks (in particular a `minmax(_, 1fr)` column) can't be forced
+      # to zero by a container narrower than the content needs — that's what
+      # squished the audit log's Detail column into one character per line.
+      assert count_occurrences(html, "min-width: 600px") == 2
+    end
   end
 
   defp count_occurrences(haystack, needle) do

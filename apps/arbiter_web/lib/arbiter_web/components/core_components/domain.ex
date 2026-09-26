@@ -116,13 +116,30 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :count, :integer, default: nil, doc: "live total, rendered in parentheses"
   attr :subtitle, :string, default: nil
   attr :class, :any, default: nil
+
+  attr :stack_on_mobile, :boolean,
+    default: false,
+    doc:
+      "stack the title above the actions below `sm` and let the actions slot wrap (bd-39kw9e, Usage page only) — " <>
+        "every other index page keeps the original fixed row layout unless it opts in"
+
   attr :rest, :global
 
   slot :actions, doc: ~s(right side — normally a live badge plus one primary button)
 
   def index_header(assigns) do
     ~H"""
-    <div class={["flex items-start justify-between gap-4", @class]} {@rest}>
+    <div
+      class={[
+        "flex gap-4",
+        if(@stack_on_mobile,
+          do: "flex-col sm:flex-row sm:items-start sm:justify-between",
+          else: "items-start justify-between"
+        ),
+        @class
+      ]}
+      {@rest}
+    >
       <div class="min-w-0">
         <h1 class="flex items-center gap-[9px] m-0 font-semibold text-[24px] leading-[1.2] tracking-[var(--tracking-section)] text-[var(--text-title)]">
           <ArbiterWeb.CoreComponents.Core.icon
@@ -146,7 +163,10 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           {@subtitle}
         </p>
       </div>
-      <div :if={@actions != []} class="flex items-center gap-2 min-w-0">
+      <div
+        :if={@actions != []}
+        class={["flex items-center gap-2 min-w-0", @stack_on_mobile && "flex-wrap"]}
+      >
         {render_slot(@actions)}
       </div>
     </div>
@@ -580,33 +600,44 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       phx-hook=".LogStreamStick"
       data-live={to_string(@live)}
       style={@pane_style}
-      class={[
-        "text-[11.5px] leading-[var(--leading-log)] font-normal font-[family-name:var(--font-mono)]",
-        !@bare &&
-          "bg-[var(--surface-field)] border border-[var(--border-default)] rounded-[var(--radius-field)]",
-        @max_height && "overflow-x-hidden overflow-y-auto",
-        is_nil(@max_height) && "overflow-hidden",
-        @class
-      ]}
+      class={
+        [
+          "text-[11.5px] leading-[var(--leading-log)] font-normal font-[family-name:var(--font-mono)]",
+          !@bare &&
+            "bg-[var(--surface-field)] border border-[var(--border-default)] rounded-[var(--radius-field)]",
+          # bd-bcroux: the pane is its own horizontal scroll container so a long
+          # line can be touch-scrolled without the whole page moving sideways.
+          "overflow-x-auto",
+          @max_height && "overflow-y-auto",
+          is_nil(@max_height) && "overflow-y-hidden",
+          @class
+        ]
+      }
       {@rest}
     >
       <div
         :for={{line, i} <- Enum.with_index(@lines)}
         id={"#{@id}-line-#{i}"}
         style={@line_style}
-        class={[
-          "grid gap-3 px-3 py-1 min-h-[var(--row-log)] items-center",
-          "border-b border-[var(--arb-line-soft)] last:border-b-0",
-          "animate-[arb-fade-in_var(--dur-instant)_var(--arb-ease-out)]",
-          to_string(line.role) == "tool" && "bg-[var(--arb-panel)]"
-        ]}
+        class={
+          [
+            # bd-bcroux: `w-max` lets a row grow past the pane's own width when
+            # its text is long, which is what gives the pane's `overflow-x-auto`
+            # something to scroll; `min-w-full` keeps short rows (and their
+            # border/background) spanning the full pane width regardless.
+            "grid w-max min-w-full gap-3 px-3 py-1 min-h-[var(--row-log)] items-center",
+            "border-b border-[var(--arb-line-soft)] last:border-b-0",
+            "animate-[arb-fade-in_var(--dur-instant)_var(--arb-ease-out)]",
+            to_string(line.role) == "tool" && "bg-[var(--arb-panel)]"
+          ]
+        }
       >
         <span class="text-[var(--arb-text-ghost)] tabular-nums">{line.time}</span>
         <span class={log_stream_role_class(line.role)}>{line.role}</span>
         <span
           title={line.text}
           class={[
-            "overflow-hidden text-ellipsis whitespace-nowrap",
+            "whitespace-pre",
             if(Map.get(line, :emphasis, false),
               do: "text-[var(--arb-text-body)]",
               else: "text-[var(--text-secondary)]"

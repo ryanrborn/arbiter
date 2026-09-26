@@ -65,6 +65,40 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ "No worker registered"
     end
 
+    test "the output pane is its own horizontal scroll container (bd-bcroux)", %{
+      conn: conn,
+      ws: ws
+    } do
+      long_line = String.duplicate("x", 400)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-hscroll", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo")
+      :ok = Worker.report(pid, :output_lines, [long_line])
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      pane_class =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query("#worker-output")
+        |> LazyHTML.attribute("class")
+        |> List.first()
+
+      assert pane_class =~ "overflow-x-auto"
+      refute pane_class =~ "overflow-x-hidden"
+
+      line_class =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query("#worker-output-line-0 span[title]")
+        |> LazyHTML.attribute("class")
+        |> List.first()
+
+      assert line_class =~ "whitespace-pre"
+      refute line_class =~ "whitespace-nowrap"
+      refute line_class =~ "text-ellipsis"
+      refute line_class =~ "overflow-hidden"
+    end
+
     test "does not default an unknown provider to claude", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-no-provider", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
