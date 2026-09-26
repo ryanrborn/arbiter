@@ -20,11 +20,22 @@ defmodule Mix.Tasks.Arbiter.BackfillTaskStatuses do
   A list of tasks that would be closed, with the commit SHA and subject
   that justified each closure. No writes happen. Review the list, then
   re-run with `--apply` to commit the changes.
+
+  ## Release installs
+
+  This is a thin CLI wrapper over `Arbiter.Release.backfill/2`, which is
+  Mix-free and callable from a release install with no Elixir toolchain:
+
+      bin/arbiter eval 'Arbiter.Release.backfill(:task_statuses)'             # dry-run
+      bin/arbiter eval 'Arbiter.Release.backfill(:task_statuses, apply?: true)'
+
+  It starts only Ash + the Ecto repo, never the full app-boot task ("app.start"):
+  booting the full application next to a live coordinator would start a
+  second endpoint on the same port, a second Autopilot and a second set of
+  patrols against the same database.
   """
 
   use Mix.Task
-
-  alias Arbiter.Tasks.StatusBackfill
 
   @switches [apply: :boolean, branch: :string]
 
@@ -32,53 +43,13 @@ defmodule Mix.Tasks.Arbiter.BackfillTaskStatuses do
   def run(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
 
-    Mix.Task.run("app.start")
+    Mix.Task.run("app.config")
 
-    proposals_opts =
-      []
+    backfill_opts =
+      [apply?: opts[:apply] == true]
       |> maybe_put(opts, :branch)
 
-    proposals = StatusBackfill.proposals(proposals_opts)
-
-    cond do
-      proposals == [] ->
-        Mix.shell().info("No drifted tasks found. Nothing to do.")
-
-      opts[:apply] == true ->
-        Mix.shell().info(banner(proposals, :apply))
-        emit_table(proposals)
-        {closed, errors} = StatusBackfill.apply!(proposals)
-        Mix.shell().info("\nClosed #{length(closed)} task(s).")
-
-        unless errors == [] do
-          Mix.shell().error("Failed on #{length(errors)} task(s):")
-
-          for {id, reason} <- errors do
-            Mix.shell().error("  #{id}: #{inspect(reason)}")
-          end
-        end
-
-      true ->
-        Mix.shell().info(banner(proposals, :dry_run))
-        emit_table(proposals)
-        Mix.shell().info("\nDry-run only. Re-run with --apply to commit these changes.")
-    end
-  end
-
-  defp banner(proposals, :dry_run),
-    do: "Would close #{length(proposals)} task(s):\n"
-
-  defp banner(proposals, :apply),
-    do: "Closing #{length(proposals)} task(s):\n"
-
-  defp emit_table(proposals) do
-    width = proposals |> Enum.map(&String.length(&1.task_id)) |> Enum.max(fn -> 0 end)
-
-    for p <- proposals do
-      padded = String.pad_trailing(p.task_id, width)
-      short_sha = String.slice(p.commit_sha, 0, 7)
-      Mix.shell().info("  #{padded}  #{short_sha}  #{p.commit_subject}")
-    end
+    Arbiter.Release.backfill(:task_statuses, Keyword.put(backfill_opts, :hint, "--apply"))
   end
 
   defp maybe_put(acc, opts, key) do

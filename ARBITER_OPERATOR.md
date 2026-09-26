@@ -95,9 +95,15 @@ auto-claim, the dashboard create form, and worker-filed follow-ups. Epics,
 decisions and `task`-type issues are not exempt.
 
 Issues filed before this are backfilled with
-`mix arbiter.backfill_issue_repos` (dry-run by default, `--apply` to write;
-re-running it is a no-op). It prints, per workspace, how many rows it set and
-how many it left null.
+`mix arbiter.backfill_issue_repos` on a dev/source install (dry-run by
+default, `--apply` to write; re-running it is a no-op), or on a release
+install with no Mix toolchain:
+
+    bin/arbiter eval 'Arbiter.Release.backfill(:issue_repos)'             # dry-run
+    bin/arbiter eval 'Arbiter.Release.backfill(:issue_repos, apply?: true)'
+
+It prints, per workspace, how many rows it set and how many it left null. See
+"Data backfills on a release install" in section 8 for the other four.
 
 ## 4. File Issues Well
 
@@ -236,6 +242,25 @@ this, compare the two releases' migration directories by hand before deciding.
 migrations were probably never applied — the message says so rather than
 asserting the schema moved. Check the schema before choosing between fixing
 forward and rolling back.
+
+### Data backfills on a release install
+
+A release install (the production path, since 2026-06) has no Mix toolchain,
+so `mix arbiter.backfill_*` cannot run there — only `bin/arbiter eval` can.
+Every backfill lives in `Arbiter.Release.backfill/2`, starts only Ash + the
+repo (never a second endpoint/Autopilot/patrols next to the live server), and
+defaults to a dry run. Pass `apply?: true` to write:
+
+    bin/arbiter eval 'Arbiter.Release.backfill(:codex_usage)'
+    bin/arbiter eval 'Arbiter.Release.backfill(:gemini_usage_note)'
+    bin/arbiter eval 'Arbiter.Release.backfill(:issue_repos)'
+    bin/arbiter eval 'Arbiter.Release.backfill(:run_steps)'
+    bin/arbiter eval 'Arbiter.Release.backfill(:task_statuses, repo_path: "/path/to/arbiter")'
+
+`:task_statuses` reads `git log`, and `:repo_path` defaults to wherever
+`bin/arbiter` was invoked from — always pass it explicitly in a release eval.
+See the `Arbiter.Release.backfill/2` moduledoc for the full option list per
+backfill.
 
 ### The first upgrade past v0.1.63 is not protected — snapshot the DB
 
