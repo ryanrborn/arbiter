@@ -266,6 +266,7 @@ defmodule Arbiter.Sessions.UsageIngest do
   defp write_deltas(session_id, totals, path, workspace_id) do
     billed = already_billed_by_day(session_id)
     note = ClaudeSessionFile.cost_note_for(totals)
+    ctx = %{session_id: session_id, path: path, workspace_id: workspace_id}
 
     totals
     |> day_buckets()
@@ -280,7 +281,7 @@ defmodule Arbiter.Sessions.UsageIngest do
 
         match?(
           {:ok, _},
-          insert_row(session_id, totals, day, bucket, delta, already, note, path, workspace_id)
+          insert_row(ctx, totals, day, bucket, delta, already, note)
         ) ->
           %{acc | rows: acc.rows + 1}
 
@@ -413,7 +414,8 @@ defmodule Arbiter.Sessions.UsageIngest do
       delta.cache_read_tokens > 0 or delta.message_count > 0 or (delta.cost_usd || 0.0) > 0.0
   end
 
-  defp insert_row(session_id, totals, day, bucket, delta, billed, note, path, workspace_id) do
+  defp insert_row(ctx, totals, day, bucket, delta, billed, note) do
+    %{session_id: session_id, path: path, workspace_id: workspace_id} = ctx
     account_id = resolve_account_id(workspace_id)
 
     attrs = %{
