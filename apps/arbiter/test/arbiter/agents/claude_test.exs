@@ -195,6 +195,25 @@ defmodule Arbiter.Agents.ClaudeTest do
       refute "--permission-mode" in argv
     end
 
+    # -- bd-7e8ezw: the injected MCP config is passed explicitly ------------
+    #
+    # Claude Code applies the MAIN checkout's `.claude/settings.local.json` to
+    # every git worktree of the repo, and a `disabledMcpjsonServers: ["arbiter"]`
+    # there silently drops the worktree's `.mcp.json`. `--mcp-config` servers
+    # are not subject to that list, so the spawn names the file explicitly.
+
+    test ":mcp_config emits --mcp-config <path>" do
+      assert {:ok, argv} = Claude.default_argv("the prompt", mcp_config: "/wt/.mcp.json")
+
+      assert ["--mcp-config", "/wt/.mcp.json" | _] =
+               Enum.drop_while(argv, &(&1 != "--mcp-config"))
+    end
+
+    test "no :mcp_config emits no --mcp-config, even with a worktree_path" do
+      assert {:ok, argv} = Claude.default_argv("the prompt", worktree_path: "/wt")
+      refute "--mcp-config" in argv
+    end
+
     # -- bd-11abk2 regression: oversized prompt (MAX_ARG_STRLEN) fix ---------
 
     test "a prompt over 131_072 bytes is delivered via stdin, not argv", %{stub: stub} do

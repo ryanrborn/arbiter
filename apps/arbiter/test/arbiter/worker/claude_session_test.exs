@@ -381,6 +381,106 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  # bd-7e8ezw: a worker whose arbiter MCP server failed to connect used to
+  # discover that on its own, mid-task, with nothing on the Arbiter side. The
+  # stream-json `init` event reports each server's status; a spawn that was
+  # handed an MCP config (`--mcp-config`) must surface anything but
+  # "connected".
+  describe "MCP connection check on the init event (bd-7e8ezw)" do
+    import ExUnit.CaptureLog
+
+    defp mcp_session(expected) do
+      Map.put(detection_session(), :mcp_server, expected)
+    end
+
+    defp init_event(servers) do
+      Jason.encode!(%{
+        "type" => "system",
+        "subtype" => "init",
+        "session_id" => "s-1",
+        "model" => "claude-opus-5-5",
+        "mcp_servers" => servers
+      })
+    end
+
+    test "build_session_config expects the arbiter server only when argv carries --mcp-config" do
+      with_flag =
+        ClaudeSession.build_session_config("bd-x", nil,
+          redact_values: [],
+          argv: ["sh", "-c", "x", "sh", "claude", "--print", "p", "--mcp-config", "/wt/.mcp.json"]
+        )
+
+      without_flag =
+        ClaudeSession.build_session_config("bd-x", nil,
+          redact_values: [],
+          argv: ["sh", "-c", "x", "sh", "claude", "--print", "p"]
+        )
+
+      assert with_flag.mcp_server == Arbiter.MCP.server_name()
+      assert without_flag.mcp_server == nil
+    end
+
+    test "a failed arbiter server is logged and shown in the worker stream" do
+      log =
+        capture_log(fn ->
+          session =
+            ClaudeSession.handle_data(
+              mcp_session("arbiter"),
+              init_event([%{"name" => "arbiter", "status" => "failed", "source" => "dynamic"}]),
+              true
+            )
+
+          send(self(), {:session, session})
+        end)
+
+      assert_received {:session, session}
+      assert log =~ "MCP server \"arbiter\" did not connect"
+      assert log =~ "status=failed"
+      assert session.mcp_status == "failed"
+      assert Enum.any?(session.output_lines, &(&1 =~ "arbiter MCP server not connected"))
+    end
+
+    test "an arbiter server missing from the init event is surfaced as not connected" do
+      log =
+        capture_log(fn ->
+          session = ClaudeSession.handle_data(mcp_session("arbiter"), init_event([]), true)
+          send(self(), {:session, session})
+        end)
+
+      assert_received {:session, session}
+      assert log =~ "status=missing"
+      assert session.mcp_status == "missing"
+    end
+
+    test "a connected arbiter server stays quiet" do
+      log =
+        capture_log(fn ->
+          session =
+            ClaudeSession.handle_data(
+              mcp_session("arbiter"),
+              init_event([%{"name" => "arbiter", "status" => "connected"}]),
+              true
+            )
+
+          send(self(), {:session, session})
+        end)
+
+      assert_received {:session, session}
+      refute log =~ "did not connect"
+      assert session.mcp_status == "connected"
+      refute Enum.any?(session.output_lines, &(&1 =~ "MCP server not connected"))
+    end
+
+    test "a spawn with no MCP config expected is never checked" do
+      log =
+        capture_log(fn ->
+          ClaudeSession.handle_data(mcp_session(nil), init_event([]), true)
+        end)
+
+      refute log =~ "did not connect"
+    end
+  end
+
   describe "failed run terminates a live agent (bd-7a0pi8)" do
     test "failing a run SIGKILLs a live port and confirms exit before :failed is observable" do
       {pid, _task_id} = start_worker()
