@@ -760,6 +760,129 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
   end
 
+  describe "return to Backlog" do
+    test "a refined task offers the demote action", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "ready now",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+      assert task.refined
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
+    end
+
+    test "clicking it demotes the task and the action goes away", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "demote me",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.refined
+      assert reloaded.status == :open
+
+      refute html =~ ~s(phx-click="return_to_backlog")
+    end
+
+    test "an already-unrefined task offers no demote action", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "already backlog", workspace_id: ws.id})
+
+      refute task.refined
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ ~s(phx-click="return_to_backlog")
+    end
+
+    test "a task with a live worker cannot be demoted", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "running",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # Button is shown for refined + open tasks
+      assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
+
+      # Clicking it returns an error because of the live worker
+      html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
+      assert html =~ "live worker"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.refined
+    end
+
+    test "an in_progress task offers no demote button", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "in progress",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+      {:ok, _task} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # Button is not shown when status is not :open
+      refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
+    end
+
+    test "an awaiting_verification task offers no demote button", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "awaiting verification",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+      {:ok, _task} = Ash.update(task, %{}, action: :await_verification)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # Button is not shown when status is not :open
+      refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
+    end
+
+    test "a closed task cannot be demoted", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "closed task",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+      {:ok, task} = Ash.update(task, %{}, action: :close)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
+    end
+  end
+
   describe "dispatch" do
     test "no dispatch action while a worker is already running", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "busy", workspace_id: ws.id})

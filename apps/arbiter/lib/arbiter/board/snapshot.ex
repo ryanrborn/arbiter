@@ -646,7 +646,9 @@ defmodule Arbiter.Board.Snapshot do
         workspace_id: Map.get(issue, :workspace_id),
         scope: FileScope.declared_paths(issue),
         blocked_by: Map.get(blocked_by, issue.id, []),
-        conflicts_with: EdgeGate.conflicts(conflicts, issue.id)
+        conflicts_with: EdgeGate.conflicts(conflicts, issue.id),
+        refined: true,
+        status: Map.get(issue, :status)
       }
     end)
   end

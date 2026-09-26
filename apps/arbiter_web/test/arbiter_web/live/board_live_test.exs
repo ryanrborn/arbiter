@@ -504,6 +504,38 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
+  describe "the Ready column: return to Backlog" do
+    test "a Ready card offers the demote button", %{conn: conn, ws: ws} do
+      task = issue(ws, "ready now")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               ~s(#board-column-ready [id="card-#{task.id}"] button[phx-click="return_to_backlog"])
+             )
+    end
+
+    test "clicking the demote button returns the card to Backlog", %{conn: conn, ws: ws} do
+      task = issue(ws, "demote me")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      _html =
+        view
+        |> element(
+          ~s(#board-column-ready [id="card-#{task.id}"] button[phx-click="return_to_backlog"])
+        )
+        |> render_click()
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.refined
+
+      assert has_element?(view, ~s(#board-column-backlog [id="card-#{task.id}"]))
+      refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
+    end
+  end
+
   describe "hand-ranking Ready" do
     test "reordering moves a card to the head of the queue and makes it next up", %{
       conn: conn,

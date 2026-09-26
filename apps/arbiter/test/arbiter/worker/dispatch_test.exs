@@ -169,6 +169,31 @@ defmodule Arbiter.Worker.DispatchTest do
       assert {:error, {:task_awaiting_review, _}} =
                Dispatch.dispatch(task.id, start_driver: false)
     end
+
+    test "Autopilot dispatch checks refined flag at dispatch time (bd-a1bmyx)", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "demoted after plan",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+      assert task.refined
+
+      # Simulate Autopilot planning the dispatch with refined=true but then
+      # it gets demoted between plan and dispatch.
+      {:ok, task} = Ash.update(task, %{}, action: :return_to_backlog)
+      refute task.refined
+
+      # Autopilot dispatch should refuse because refined is now false.
+      assert {:error, {:task_not_ready, _}} =
+               Dispatch.dispatch(task.id, dispatched_by: "autopilot", start_driver: false)
+
+      # Non-Autopilot dispatch should still work (manual dispatch allows unrefined).
+      {:ok, task} = Ash.get(Issue, task.id)
+      assert {:ok, _worker} = Worker.start(task_id: task.id, repo: "arbiter")
+    end
   end
 
   # bd-bi5pn0: a step AFTER start_worker/3 (e.g. the Claude subprocess spawn,

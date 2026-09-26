@@ -38,7 +38,7 @@ defmodule Arbiter.MCP.RefinePolicy do
   updating any task — it allows updating a task in the subtree.
 
   **Nothing that starts, stops, or closes work.** No dispatch (`can_dispatch` is
-  hard-wired false on the tier), no `task_close`/`task_reopen`/`task_verify`, no
+  hard-wired false on the tier), no `task_demote`/`task_close`/`task_reopen`/`task_verify`, no
   scheduler or circuit-breaker controls, no installation or
   workspace config writes, no skill writes, no outbound mail. A refine session
   shapes a backlog item and promotes it; the board decides what happens next.
@@ -80,7 +80,7 @@ defmodule Arbiter.MCP.RefinePolicy do
 
   # --- denied, with the reason the caller sees -----------------------------
   @deny_reason_dispatch "a refine session shapes work, it never starts it (can_dispatch is always false)"
-  @deny_reason_lifecycle "a refine session may promote from Backlog but never close, reopen or verify a task"
+  @deny_reason_lifecycle "a refine session may promote from Backlog but never demote, close, reopen or verify a task"
   @deny_reason_worker_ops "worker operations are outside a refine session's authority"
   @deny_reason_config "configuration is installation state, not issue state"
   @deny_reason_scheduler "board and breaker controls are coordinator authority"
@@ -95,6 +95,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "task_close" => @deny_reason_lifecycle,
     "task_reopen" => @deny_reason_lifecycle,
     "task_verify" => @deny_reason_lifecycle,
+    "task_demote" => @deny_reason_lifecycle,
     "task_sync_upstream_close" => @deny_reason_lifecycle,
 
     # dispatch

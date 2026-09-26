@@ -16,6 +16,7 @@ defmodule ArbiterCli.Cmd.Issue do
       arb issue close     <id> [--reason ...]
       arb issue reopen    <id>
       arb issue promote   <id> [--waive REASON]
+      arb issue demote    <id>
       arb issue verify    <id> --observed "<evidence>" | --failed "<evidence>"
       arb issue claim     <issue#> [--force] [--repo <repo>]
       arb issue sync      [--dry]
@@ -55,6 +56,7 @@ defmodule ArbiterCli.Cmd.Issue do
       ["close" | rest] -> Cmd.Close.run(rest)
       ["reopen" | rest] -> Cmd.Reopen.run(rest)
       ["promote" | rest] -> Cmd.Promote.run(rest)
+      ["demote" | rest] -> Cmd.Demote.run(rest)
       ["verify" | rest] -> Cmd.Verify.run(rest)
       ["claim" | rest] -> Cmd.Claim.run(rest)
       ["sync" | rest] -> Cmd.Sync.run(rest)
@@ -68,6 +70,6 @@ defmodule ArbiterCli.Cmd.Issue do
   end
 
   defp usage_hint do
-    "verbs: list, show, create, update, close, reopen, promote, verify, claim, sync, ready, dispatch"
+    "verbs: list, show, create, update, close, reopen, promote, demote, verify, claim, sync, ready, dispatch"
   end
 end
