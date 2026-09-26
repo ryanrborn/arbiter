@@ -43,13 +43,13 @@ if (SCREENSHOT_DIR) mkdirSync(SCREENSHOT_DIR, { recursive: true })
 const WIDTHS = [375, 414, 1280]
 const THEMES = ["light", "dark"]
 
-// The app-shell header's theme toggle (Layouts.theme_toggle/1) overflows the
-// viewport by ~4px at 375px on every page in the app — pre-existing, present
-// before this branch, and outside bd-39kw9e's three named pages/components.
-// Tolerating it here (instead of a strict <=1px) keeps this check honest
-// about what this ticket actually fixed without masking a *new* regression a
-// bigger overflow would reveal.
-const KNOWN_SHELL_OVERFLOW_PX = 6
+// The app-shell header (Layouts.app/1) used to overflow the viewport by ~4px
+// at 375px on every page in the app, from its fixed gap/padding leaving no
+// room for the live badge + inbox trigger + theme toggle cluster. Trimmed the
+// header's gap/padding below `sm` (layouts.ex) so the shell itself fits; this
+// residual is just measurement slack (subpixel rounding, scrollbar-gutter),
+// not real page content overflow.
+const KNOWN_SHELL_OVERFLOW_PX = 1
 
 const checks = []
 const consoleErrors = []

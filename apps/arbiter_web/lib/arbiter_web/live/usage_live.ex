@@ -322,6 +322,7 @@ defmodule ArbiterWeb.UsageLive do
           icon="hero-clock"
           title="Usage"
           subtitle={"Actual spend over the #{since_label(@range)} from the usage ledger. Rework is the number to watch — extra sessions on one task."}
+          stack_on_mobile
         >
           <:actions>
             <div class="flex flex-wrap items-center gap-3">
