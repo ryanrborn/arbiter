@@ -858,7 +858,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
-      {:ok, _task} = Ash.update(task, %{status: :awaiting_verification})
+      {:ok, _task} = Ash.update(task, %{}, action: :await_verification)
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
 
