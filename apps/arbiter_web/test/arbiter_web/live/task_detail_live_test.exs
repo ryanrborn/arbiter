@@ -819,16 +819,20 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
-      html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
 
+      # Button is shown for refined + open tasks
+      assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
+
+      # Clicking it returns an error because of the live worker
+      html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
       assert html =~ "live worker"
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.refined
     end
 
-    test "an in_progress task cannot be demoted", %{conn: conn, ws: ws} do
+    test "an in_progress task offers no demote button", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
           title: "in progress",
@@ -837,18 +841,15 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      {:ok, _task} = Ash.update(task, %{status: :in_progress})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
-      html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
 
-      assert html =~ "in progress"
-
-      {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.refined
+      # Button is not shown when status is not :open
+      refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
     end
 
-    test "an awaiting_verification task cannot be demoted", %{conn: conn, ws: ws} do
+    test "an awaiting_verification task offers no demote button", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
           title: "awaiting verification",
@@ -857,15 +858,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
-      {:ok, task} = Ash.update(task, %{status: :awaiting_verification})
+      {:ok, _task} = Ash.update(task, %{status: :awaiting_verification})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
-      html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
 
-      assert html =~ "awaiting verification"
-
-      {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.refined
+      # Button is not shown when status is not :open
+      refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
     end
 
     test "a closed task cannot be demoted", %{conn: conn, ws: ws} do
