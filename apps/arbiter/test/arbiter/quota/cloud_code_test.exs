@@ -325,5 +325,49 @@ defmodule Arbiter.Quota.CloudCodeTest do
       {:ok, contents} = File.read(counter)
       assert String.trim(contents) |> String.split("\n") |> length() == 1
     end
+
+    # bd-au2xhz: 53 of 117 daily-timeout runs had already finished `/usage`
+    # (its output sitting in the temp file) before the `timeout` coreutil's
+    # SIGTERM/SIGKILL caught a lingering child and the shell reported 124/137.
+    test "output already written before a 124/137 kill is read as a real success, not a timeout" do
+      dir = System.tmp_dir!()
+      script = Path.join(dir, "agy_lingers_#{System.unique_integer([:positive])}.sh")
+
+      File.write!(script, """
+      #!/bin/sh
+      echo '{"command":{"data":{"groups":[{"name":"Gemini Models","buckets":[{"window":"weekly","remaining_fraction":0.25,"reset_time":"1782250684"}]}]}}}'
+      sleep 5
+      """)
+
+      File.chmod!(script, 0o755)
+      on_exit(fn -> File.rm(script) end)
+
+      snap = CloudCode.antigravity(agy_cmd: script, agy_probe_timeout: 500)
+
+      refute snap.message
+      assert length(snap.models) == 1
+    end
+
+    test "a genuine timeout with no output logs a warning naming the elapsed time" do
+      dir = System.tmp_dir!()
+      script = Path.join(dir, "agy_hangs_#{System.unique_integer([:positive])}.sh")
+
+      File.write!(script, """
+      #!/bin/sh
+      sleep 5
+      """)
+
+      File.chmod!(script, 0o755)
+      on_exit(fn -> File.rm(script) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          snap = CloudCode.antigravity(agy_cmd: script, agy_probe_timeout: 500)
+          assert snap.message =~ "did not respond in time"
+        end)
+
+      assert log =~ "timed out"
+      assert log =~ "ms"
+    end
   end
 end
