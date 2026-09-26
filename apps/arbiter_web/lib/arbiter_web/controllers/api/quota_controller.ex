@@ -58,9 +58,9 @@ defmodule ArbiterWeb.Api.QuotaController do
         codex = Quota.Codex.serialize_latest(accounts["codex"])
 
         # Every `account`/`workspaces` block below carries each workspace's
-        # 30-day spend, and each of those is a full ledger scan that does not
-        # vary by provider. One request = one scan per workspace, so the memo
-        # is built here and threaded through all three calls.
+        # 30-day spend, read off `Arbiter.Quota.SpendCache`'s memoized
+        # grouped aggregate (bd-4p6pw7) rather than a scan per workspace, so
+        # the memo is built here once and threaded through all three calls.
         spend = Quota.spend_cache(accounts)
 
         # §6's `--json` gains `account` / `workspaces` at the top level. They
