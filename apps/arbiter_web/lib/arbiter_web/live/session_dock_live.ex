@@ -2045,9 +2045,14 @@ defmodule ArbiterWeb.SessionDockLive do
                 # already collapses to Max below `--session-dock-min-cols`
                 # (`size_fallback?`) and Compact is not a useful phone size.
                 # Max alone grows to the touch target: it is the control this
-                # ticket's "maximize" acceptance criterion is about.
+                # ticket's "maximize" acceptance criterion is about. Once
+                # already maximized, Max itself is redundant on a phone — the
+                # dedicated Restore button below takes its place, so this one
+                # steps out of the way instead of sitting there pressed and
+                # inert (bd-bcroux round 2, finding 2).
                 size != "max" && "max-sm:hidden",
-                size == "max" && "max-sm:h-11 max-sm:px-3",
+                size == "max" &&
+                  if(@size == "max", do: "max-sm:hidden", else: "max-sm:h-11 max-sm:px-3"),
                 if(@size == size,
                   do: "bg-[var(--surface-card)] text-[var(--text-title)]",
                   else: "bg-transparent text-[var(--text-label)] hover:text-[var(--text-primary)]"
@@ -2056,6 +2061,27 @@ defmodule ArbiterWeb.SessionDockLive do
             }
           >
             {label}
+          </button>
+
+          <%!-- The obvious way back out of Maximize on a phone (bd-bcroux
+                round 2, finding 2): below `sm`, Compact and Side are hidden
+                and Max — already pressed — does nothing on a second tap, so
+                there was nothing left to restore to. This calls `set_size`
+                back to the dock's own default preset rather than "collapse",
+                so restoring leaves the window open at its normal docked
+                size instead of closing it outright. --%>
+          <button
+            :if={@size == "max"}
+            type="button"
+            id={"session-dock-restore-#{@session.id}"}
+            phx-click="set_size"
+            phx-value-id={@session.id}
+            phx-value-size="compact"
+            aria-label={"Restore #{@name} from maximized"}
+            title="Restore"
+            class="sm:hidden size-11 flex items-center justify-center rounded-[var(--radius-chip)] cursor-pointer border-0 bg-transparent text-[var(--text-label)] hover:text-[var(--text-primary)]"
+          >
+            <.icon name="hero-arrows-pointing-in-micro" class="size-4" />
           </button>
         </div>
 
@@ -2129,7 +2155,7 @@ defmodule ArbiterWeb.SessionDockLive do
         aria-expanded={to_string(@open?)}
         aria-controls={"session-dock-menu-panel-#{@session.id}"}
         aria-label={"Controls for #{@name}"}
-        class="flex items-center justify-center size-[22px] rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
+        class="flex items-center justify-center size-[22px] max-sm:size-11 rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
       >
         <.icon name="hero-ellipsis-horizontal-micro" class="size-4" />
       </button>

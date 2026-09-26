@@ -278,6 +278,16 @@ async function sessionDockPass(page, width, theme) {
     `frame ${frame.width}x${frame.height} in a ${width}x${HEIGHT} viewport`
   )
 
+  // The obvious way back out of Maximize itself (bd-bcroux round 2, finding
+  // 2): below `sm`, Max is a dead end on a second tap once already pressed,
+  // so a dedicated Restore control has to be present and touch-sized too.
+  const restore = await page.json(rectProbe(`session-dock-restore-${sessionId}`))
+  check(
+    `${width}-${theme}-restore-from-maximize-is-touch-sized`,
+    restore.width >= TOUCH_TARGET && restore.height >= TOUCH_TARGET,
+    `${restore.width}x${restore.height}, need >=${TOUCH_TARGET}`
+  )
+
   const dismissAfterMax = await page.json(rectProbe(`session-dock-dismiss-${sessionId}`))
   check(
     `${width}-${theme}-close-still-reachable-and-touch-sized-once-maximized`,
@@ -328,51 +338,17 @@ async function openDock(page) {
   return sessionId
 }
 
-// A page-level scrollbar could come from `#app-status-bar` (the global top
-// bar — pre-existing, out of this ticket's scope: it names the worker output
-// pane and the session dock, not the header) rather than from either of
-// those two. So this does not just assert `scrollWidth <= viewport`; it asks
-// *whose* overflow it is, by hiding the header and re-measuring. If the page
-// still overflows without it, the overflow is charged to `owner` (the pane or
-// the dock) and the check fails; if hiding the header clears it, the header
-// is the sole cause, and that is reported as a NOTE — a known, pre-existing
-// issue this ticket did not introduce and is not about — rather than a FAIL
-// that would misattribute someone else's bug to this change.
+// The acceptance criterion rules out *any* page-level horizontal scroll, so
+// this checks the page as users actually see it — header included — rather
+// than carving the header out of the measurement (bd-bcroux round 2: the
+// header itself used to overflow a few px at 375/414 from the fixed-width
+// wordmark; that's now fixed at the source in layouts.ex, so there is
+// nothing left to exempt here).
 async function checkNoPageOverflow(page, width, theme, pageScrollWidth, owner) {
-  if (pageScrollWidth <= width + 1) {
-    check(
-      `${width}-${theme}-${owner}-no-page-level-horizontal-scroll`,
-      true,
-      `document scrollWidth=${pageScrollWidth} viewport=${width}`
-    )
-    return
-  }
-
-  const withoutHeader = await page.json(`(() => {
-    const header = document.getElementById("app-status-bar")
-    const prev = header ? header.style.display : null
-    if (header) header.style.display = "none"
-    const width = document.documentElement.scrollWidth
-    if (header) header.style.display = prev
-    return width
-  })()`)
-
-  if (withoutHeader <= width + 1) {
-    console.log(
-      `NOTE: ${width}-${theme} page scrollWidth=${pageScrollWidth} (viewport ${width}) comes entirely from #app-status-bar (pre-existing, unrelated to the worker output pane or the session dock — scrollWidth=${withoutHeader} with it hidden). Not charged to this ticket.`
-    )
-    check(
-      `${width}-${theme}-${owner}-no-page-level-horizontal-scroll`,
-      true,
-      `${owner} itself adds no page-level overflow (header-only overflow noted above)`
-    )
-    return
-  }
-
   check(
     `${width}-${theme}-${owner}-no-page-level-horizontal-scroll`,
-    false,
-    `document scrollWidth=${pageScrollWidth} viewport=${width}, persists at ${withoutHeader} with the header hidden — not just the header`
+    pageScrollWidth <= width + 1,
+    `document scrollWidth=${pageScrollWidth} viewport=${width}`
   )
 }
 

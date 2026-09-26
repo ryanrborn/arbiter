@@ -1483,6 +1483,32 @@ defmodule ArbiterWeb.SessionDockLiveTest do
                ~r/max-sm:h-\[?(44px|var\(--control-lg\))\]?|max-sm:h-11\b/
     end
 
+    test "maximized offers a touch-sized way back below `sm` (bd-bcroux)", %{conn: conn} do
+      session = launch!(name: "restore-target")
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-restore-#{session.id}")
+
+      render_click(element(dock, "#session-dock-size-max-#{session.id}"))
+
+      html = render(dock)
+      document = LazyHTML.from_fragment(html)
+
+      restore_class =
+        document
+        |> LazyHTML.query("#session-dock-restore-#{session.id}")
+        |> LazyHTML.attribute("class")
+        |> List.first()
+
+      assert restore_class =~ ~r/\bsize-11\b/
+
+      render_click(element(dock, "#session-dock-restore-#{session.id}"))
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="compact"]))
+      refute has_element?(dock, "#session-dock-restore-#{session.id}")
+    end
+
     test "a collapsed window offers no size control", %{conn: conn} do
       a = launch!(name: "a")
       b = launch!(name: "b")
