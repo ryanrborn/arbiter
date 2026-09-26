@@ -2017,7 +2017,11 @@ defmodule Arbiter.Worker.Dispatch do
             # detached worktree, so injecting there would be safe. Left keyed to
             # `worktree_path` deliberately — enabling MCP tools for audit
             # dispatches is a behavior change beyond that fix's scope.
-            _ = maybe_write_mcp_config(task, worktree_path, opts)
+            #
+            # bd-7e8ezw: the returned `mcp_config:` path is threaded to the
+            # adapter so Claude is handed the file explicitly (`--mcp-config`)
+            # rather than trusting cwd auto-load — see `inject_mcp_config/3`.
+            opts = Keyword.merge(opts, inject_mcp_config(task, worktree_path, opts))
 
             # Resolve the layered effective skill set and materialize ONLY it
             # into the isolated worktree (bd-d5hy7y). Threaded onto opts so the
@@ -2296,7 +2300,8 @@ defmodule Arbiter.Worker.Dispatch do
         # read a different HOME than the one the MCP config was written into.
         agent_opts =
           agent_opts_from_choice(choice) ++
-            [security: policy, workspace: workspace, worktree_path: worktree_path]
+            [security: policy, workspace: workspace, worktree_path: worktree_path] ++
+            Keyword.take(opts, [:mcp_config])
 
         tracker_context = fetch_tracker_context(task, workspace)
 
@@ -2533,7 +2538,10 @@ defmodule Arbiter.Worker.Dispatch do
   # checkout) → never write the token-bearing `.mcp.json`. Injecting it into the
   # canonical checkout would leak the scope token into the working tree the live
   # server and operator share (bd-dlv3no).
-  defp maybe_write_mcp_config(_task, nil, _opts), do: :ok
+  #
+  # Returns `{provider, write_result}` when it attempted a write, `:skipped`
+  # otherwise.
+  defp maybe_write_mcp_config(_task, nil, _opts), do: :skipped
 
   defp maybe_write_mcp_config(%Issue{} = task, worktree_path, opts)
        when is_binary(worktree_path) do
@@ -2557,15 +2565,44 @@ defmodule Arbiter.Worker.Dispatch do
       result = Arbiter.MCP.AgentConfig.write(provider, worktree_path, write_opts)
       _ = surface_unsupported_mcp_config(task, provider, result)
       _ = maybe_verify_codex_mcp_connection(task, provider, result, write_opts)
-      result
+      {provider, result}
     else
-      :ok
+      :skipped
     end
   rescue
     e ->
       require Logger
       Logger.warning("Arbiter.Worker.Dispatch: MCP config injection failed: #{inspect(e)}")
-      :ok
+      :skipped
+  end
+
+  @doc """
+  Mint a worker scope token for `task`, write the provider's MCP config into
+  `worktree_path`, and return the agent opts that point the spawn at it.
+
+  Returns `[mcp_config: path]` when a Claude `.mcp.json` was written — callers
+  merge that into the adapter opts so `Arbiter.Agents.Claude.default_argv/2`
+  passes it with `--mcp-config` — and `[]` otherwise (injection disabled, no
+  isolated worktree, another provider, a failed write). Best-effort: never
+  raises, never blocks a spawn.
+
+  Every spawn path that hands an agent an isolated worktree must call this
+  (bd-7e8ezw). `FixPassDispatcher` used to skip it, so a CI fix pass ran with
+  no MCP config, or with the original run's `.mcp.json` whose 4h worker lease
+  had long expired, and reported the `arbiter` server "not connected".
+
+  `opts` honours `:repo`, `:depth`, `:agent_type` and `:agent_adapter` (the
+  provider the config is written for; see `resolve_mcp_provider/2`).
+  """
+  @spec inject_mcp_config(Issue.t(), Path.t() | nil, keyword()) :: keyword()
+  def inject_mcp_config(%Issue{} = task, worktree_path, opts) do
+    case maybe_write_mcp_config(task, worktree_path, opts) do
+      {:claude, :ok} ->
+        [mcp_config: Path.join(worktree_path, Arbiter.MCP.AgentConfig.Claude.filename())]
+
+      _ ->
+        []
+    end
   end
 
   # bd-m8geh4: some provider CLIs have no worktree-local MCP config file at all

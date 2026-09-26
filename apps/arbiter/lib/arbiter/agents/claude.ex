@@ -86,6 +86,7 @@ defmodule Arbiter.Agents.Claude do
             thinking_flag(opts) ++
             Security.permission_argv(policy) ++
             Security.settings_argv(policy) ++
+            mcp_config_flag(opts) ++
             stream_flags()
 
         build_argv(claude, prompt, flags)
@@ -428,6 +429,23 @@ defmodule Arbiter.Agents.Claude do
   defp thinking_flag(opts) do
     case Keyword.get(opts, :thinking) do
       level when is_binary(level) and level != "" -> Config.thinking_argv(level)
+      _ -> []
+    end
+  end
+
+  # bd-7e8ezw: name the spawn's injected `.mcp.json` explicitly. Claude Code
+  # applies the MAIN checkout's `.claude/settings.local.json` to every git
+  # worktree of the repo, and a `disabledMcpjsonServers: ["arbiter"]` there
+  # silently drops the worktree's auto-loaded `.mcp.json` — the operator
+  # declining the server for their own interactive session cut every worker
+  # off from Arbiter's MCP tools. `--mcp-config` servers are not subject to
+  # that list. Only set by callers that wrote the file themselves
+  # (`Arbiter.Worker.Dispatch.inject_mcp_config/3`), never derived from
+  # whatever `.mcp.json` happens to sit in the cwd: a review spawn runs in
+  # the operator's shared checkout, whose own config is theirs to disable.
+  defp mcp_config_flag(opts) do
+    case Keyword.get(opts, :mcp_config) do
+      path when is_binary(path) and path != "" -> ["--mcp-config", path]
       _ -> []
     end
   end

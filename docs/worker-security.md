@@ -343,12 +343,16 @@ name (no `(...)`) maps onto the equivalent whole-path rule where agy has one —
 `WebFetch(domain:<host>)` → `read_url(<host>)`. Until bd-80talz these were
 emitted as `url(*)`, which is not an agy rule kind: agy rewrites
 `settings.json` on load and silently drops it (probed on 1.2.11), so the
-network-off deny and the reviewer's `WebFetch` deny never reached agy. That is what keeps the reviewer read-only
-posture (`Arbiter.Worker.Dispatch.review_security_policy/2` denies
-`Edit`/`Write`/`NotebookEdit` on every worktree-backed review dispatch) working
-for agy as well as for Claude. A rule with no agy analogue at all — `Monitor`,
-`ScheduleWakeup`, for which agy has no tool-name rule kind — is dropped rather
-than emitted uninterpretably.
+network-off deny and the reviewer's `WebFetch` deny never reached agy. The
+`write_file(**)` side of the `Edit`/`Write`/`NotebookEdit` mapping is still
+emitted, but does **not** gate agy's native `write_to_file` tool (see the
+"`write_file(...)` deny rules do not gate" bullet below) — so the reviewer
+read-only posture from `Arbiter.Worker.Dispatch.review_security_policy/2`
+(which denies `Edit`/`Write`/`NotebookEdit` on every worktree-backed review
+dispatch) is only actually enforced for agy's `run_command` and `read_file`,
+not for native writes. A rule with no agy analogue at all — `Monitor`,
+`ScheduleWakeup`, for which agy has no tool-name rule kind — is dropped
+rather than emitted uninterpretably.
 
 ### What was verified live, and what agy does *not* enforce
 
@@ -387,12 +391,23 @@ throwaway `$HOME`:
 * **`allowNonWorkspaceAccess: false` does not work.** With it set, a
   `touch <outside-the-worktree>/marker` via `run_command` still succeeded, and
   so did a `view_file` read of a file outside the workspace. The key is still
-  emitted (it is the documented switch and costs nothing), but the load-bearing
-  out-of-worktree guard is the `write_file(...)` deny list plus `:strict`'s
-  allowlist-only shell — not that flag. Note `write_file` itself is
-  deny-list-gated, not allowlist-gated, under every `toolPermission` probed:
-  an out-of-worktree `write_to_file` with *no* matching allow rule at all
-  still succeeded under `"proceed-in-sandbox"`.
+  emitted (it is the documented switch and costs nothing).
+* **`write_file(...)` deny rules do not gate agy's native `write_to_file`
+  tool at all (bd-25ivqe AC6, agy 1.2.11).** A prior revision of this doc
+  claimed `write_file` was "deny-list-gated" like `command`/`read_file`; that
+  was never confirmed against a real match, only against `/etc/**`, which a
+  non-root user cannot write to regardless of agy's own gating. Re-probed
+  against a path the user genuinely can write: an exactly-matching
+  `write_file(<dir>/**)` deny, a blanket `write_file(**)` deny, and
+  `--sandbox` (which bwraps `run_command` but not the native tool) all still
+  let `write_to_file` write outside the worktree with no denial.
+  `disabledTools` (a real `settings.json` key) doesn't stop it either — that
+  key gates MCP-server tools, not agy's own built-ins. There is currently no
+  `settings.json` lever that confines `write_to_file` to the worktree; this
+  is exactly what post-merge probe bd-7h2cuk observed (arb/notes worked, but
+  an out-of-worktree `write_to_file` was not denied). Closing it needs an
+  upstream agy fix or real OS isolation, not a settings change — see AC6 in
+  bd-25ivqe, explicitly post-merge and non-blocking for this reason.
 * **`--sandbox` disables the allowlist gate under `"proceed-in-sandbox"`
   (bd-25ivqe).** With `--sandbox` on argv, agy runs the command inside a real
   `bwrap` jail and *auto-proceeds* there regardless of `permissions.allow` —
