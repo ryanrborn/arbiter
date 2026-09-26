@@ -65,7 +65,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "phoenix reachable",
           status: :fail,
           detail: err.message,
-          hint: err.hint,
+          hint: reachable_hint(),
           fatal: true,
           blocks_readiness: true
         }
@@ -99,6 +99,16 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: "no workspaces found",
           hint: "Run `mix run priv/repo/seeds.exs` or create one via the API.",
+          fatal: true,
+          blocks_readiness: true
+        }
+
+      {:error, %Client.Error{kind: :connection_refused} = err} ->
+        %Result{
+          name: "at least one workspace exists",
+          status: :fail,
+          detail: err.message,
+          hint: reachable_hint(),
           fatal: true,
           blocks_readiness: true
         }
@@ -253,6 +263,20 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # compile-time value, not to reinstalling from a release asset.
   defp dev_install? do
     ArbiterCli.Version.dev_build?()
+  end
+
+  # `phoenix reachable`'s connection-refused hint, mode-aware: a source
+  # checkout's stack is booted with `mix phx.server` directly, but a release
+  # install has no Mix/Elixir toolchain on the box at all — that advice is
+  # simply wrong there. Reuses the same `dev_install?/0` signal the version
+  # check already keys its own mode-aware hint off of.
+  defp reachable_hint do
+    if dev_install?() do
+      "Phoenix app isn't running. Start it with `mix phx.server` from the umbrella root."
+    else
+      "Phoenix app isn't running. Start it with `systemctl --user start arbiter` " <>
+        "(or `<data-home>/current/bin/arbiter start` if not managed by systemd)."
+    end
   end
 
   # `fatal: true` — this is still an operator-actionable misconfiguration

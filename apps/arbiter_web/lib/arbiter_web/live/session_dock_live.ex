@@ -891,7 +891,21 @@ defmodule ArbiterWeb.SessionDockLive do
   # Maximized window covers, which is why `roster/1` carries `relative z-40`.
   defp window_size_class(false, _size), do: "basis-[11rem] max-w-[11rem] min-w-[5rem]"
 
-  defp window_size_class(true, "compact"), do: "basis-[44rem] max-w-[44rem] min-w-[16rem]"
+  # bd-bcroux: Compact's `min-w-[16rem]` (256px) is a floor within the flex
+  # row it shares with the roster — at phone width the two together do not
+  # fit, and neither can shrink past its floor, so the row overflows and
+  # drags the whole page into horizontal scroll with it (the ticket's "close
+  # and maximize controls are unreachable": the window's own right edge, close
+  # button included, lands off past the viewport's edge). Below `sm` Compact
+  # therefore leaves the flex row the same way Side and Maximized already do
+  # — `fixed`, sized off the viewport rather than off its neighbours — so it
+  # can never again compete with the roster for width it does not have.
+  defp window_size_class(true, "compact") do
+    "basis-[44rem] max-w-[44rem] min-w-[16rem] " <>
+      "max-sm:fixed max-sm:inset-x-3 max-sm:top-[var(--nav-height)] " <>
+      "max-sm:bottom-[var(--session-dock-strip-height)] " <>
+      "max-sm:basis-auto max-sm:max-w-none max-sm:min-w-0"
+  end
 
   defp window_size_class(true, "side") do
     "fixed top-[var(--nav-height)] right-0 bottom-[var(--session-dock-strip-height)] " <>
@@ -2018,16 +2032,56 @@ defmodule ArbiterWeb.SessionDockLive do
             phx-value-size={size}
             aria-pressed={to_string(@size == size)}
             title={hint}
-            class={[
-              "px-1.5 h-[18px] flex items-center rounded-[var(--radius-chip)] cursor-pointer",
-              "border-0 text-[10px] font-medium transition-colors duration-100",
-              if(@size == size,
-                do: "bg-[var(--surface-card)] text-[var(--text-title)]",
-                else: "bg-transparent text-[var(--text-label)] hover:text-[var(--text-primary)]"
-              )
-            ]}
+            class={
+              [
+                "px-1.5 h-[18px] flex items-center rounded-[var(--radius-chip)] cursor-pointer",
+                "border-0 text-[10px] font-medium transition-colors duration-100",
+                # bd-bcroux: below `sm` there is no room in the strip for three
+                # preset buttons at a 44px touch target each without the title
+                # bar overflowing the window's own `min-w-[16rem]` floor and
+                # dragging the page into horizontal scroll with it (see
+                # `window_size_class/2`) — Compact and Side stay their 18px
+                # desktop size but drop out of the strip entirely, since Side
+                # already collapses to Max below `--session-dock-min-cols`
+                # (`size_fallback?`) and Compact is not a useful phone size.
+                # Max alone grows to the touch target: it is the control this
+                # ticket's "maximize" acceptance criterion is about. Once
+                # already maximized, Max itself is redundant on a phone — the
+                # dedicated Restore button below takes its place, so this one
+                # steps out of the way instead of sitting there pressed and
+                # inert (bd-bcroux round 2, finding 2).
+                size != "max" && "max-sm:hidden",
+                size == "max" &&
+                  if(@size == "max", do: "max-sm:hidden", else: "max-sm:h-11 max-sm:px-3"),
+                if(@size == size,
+                  do: "bg-[var(--surface-card)] text-[var(--text-title)]",
+                  else: "bg-transparent text-[var(--text-label)] hover:text-[var(--text-primary)]"
+                )
+              ]
+            }
           >
             {label}
+          </button>
+
+          <%!-- The obvious way back out of Maximize on a phone (bd-bcroux
+                round 2, finding 2): below `sm`, Compact and Side are hidden
+                and Max — already pressed — does nothing on a second tap, so
+                there was nothing left to restore to. This calls `set_size`
+                back to the dock's own default preset rather than "collapse",
+                so restoring leaves the window open at its normal docked
+                size instead of closing it outright. --%>
+          <button
+            :if={@size == "max"}
+            type="button"
+            id={"session-dock-restore-#{@session.id}"}
+            phx-click="set_size"
+            phx-value-id={@session.id}
+            phx-value-size="compact"
+            aria-label={"Restore #{@name} from maximized"}
+            title="Restore"
+            class="sm:hidden size-11 flex items-center justify-center rounded-[var(--radius-chip)] cursor-pointer border-0 bg-transparent text-[var(--text-label)] hover:text-[var(--text-primary)]"
+          >
+            <.icon name="hero-arrows-pointing-in-micro" class="size-4" />
           </button>
         </div>
 
@@ -2058,7 +2112,7 @@ defmodule ArbiterWeb.SessionDockLive do
           phx-click="dismiss"
           phx-value-id={@session.id}
           aria-label={"Dismiss #{@name}"}
-          class="shrink-0 flex items-center justify-center size-[22px] rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
+          class="shrink-0 flex items-center justify-center size-[22px] max-sm:size-11 rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
         >
           <.icon name="hero-x-mark-micro" class="size-4" />
         </button>
@@ -2101,7 +2155,7 @@ defmodule ArbiterWeb.SessionDockLive do
         aria-expanded={to_string(@open?)}
         aria-controls={"session-dock-menu-panel-#{@session.id}"}
         aria-label={"Controls for #{@name}"}
-        class="flex items-center justify-center size-[22px] rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
+        class="flex items-center justify-center size-[22px] max-sm:size-11 rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
       >
         <.icon name="hero-ellipsis-horizontal-micro" class="size-4" />
       </button>

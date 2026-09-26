@@ -322,7 +322,7 @@ defmodule ArbiterWeb.AuditLogLive do
           Nothing here
         </Feedback.empty_state>
 
-        <Data.data_table :if={@events != []} id="audit-table" rows={@events}>
+        <Data.data_table :if={@events != []} id="audit-table" rows={@events} min_width="760px">
           <:col :let={row} label="Time" width="150px">
             <span class="text-xs text-base-content/60 font-mono tabular-nums whitespace-nowrap">
               {Calendar.strftime(row.at, "%Y-%m-%d %H:%M:%S")}
@@ -339,7 +339,7 @@ defmodule ArbiterWeb.AuditLogLive do
           <:col :let={row} label="Action" width="140px">
             <span class="font-mono text-xs">{row.action}</span>
           </:col>
-          <:col :let={row} label="Detail" wrap>
+          <:col :let={row} label="Detail" width="minmax(220px, 1fr)" wrap>
             <span class="font-mono text-xs break-words">{detail_text(row)}</span>
           </:col>
         </Data.data_table>

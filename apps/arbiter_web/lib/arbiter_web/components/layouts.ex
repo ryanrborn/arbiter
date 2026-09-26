@@ -108,7 +108,7 @@ defmodule ArbiterWeb.Layouts do
           all three. --%>
     <header
       id="app-status-bar"
-      class="sticky top-0 z-20 flex items-center gap-[18px] h-[var(--nav-height)] px-4 bg-[var(--surface-chrome)] border-b border-solid border-[var(--border-default)]"
+      class="sticky top-0 z-20 flex items-center gap-3 sm:gap-[18px] h-[var(--nav-height)] px-3 sm:px-4 bg-[var(--surface-chrome)] border-b border-solid border-[var(--border-default)]"
     >
       <button
         type="button"
@@ -123,11 +123,19 @@ defmodule ArbiterWeb.Layouts do
         <ArbiterWeb.CoreComponents.Core.icon name="hero-bars-3" size={20} />
       </button>
 
-      <span class="flex-none" aria-label="Arbiter">
+      <span class="flex-none max-sm:hidden" aria-label="Arbiter">
         <.brandmark form="wordmark" size={120} tone="accent" />
       </span>
+      <%!-- The wordmark's 120px minimum width doesn't fit the status bar
+            below `sm` alongside the rail toggle and the right-hand cluster
+            (it overflowed the viewport by a few px at 375/414 — bd-bcroux);
+            the icon form is the mark's own fallback for that width, not a
+            one-off pixel hack. --%>
+      <span class="flex-none sm:hidden" aria-label="Arbiter">
+        <.brandmark form="icon" size={26} tone="accent" />
+      </span>
 
-      <div class="ml-auto flex flex-none items-center gap-4">
+      <div class="ml-auto flex flex-none items-center gap-2 sm:gap-4">
         <%!-- One row per provider, stacked (bd-gukyy1): the label, then its
               windows side by side — the shape one provider always had,
               repeated downward so a second provider costs height (the bar
