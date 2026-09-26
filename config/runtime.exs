@@ -19,6 +19,25 @@ if config_env() != :test do
     journal_mode: :wal,
     busy_timeout: 5000,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
+
+  # Provider accounts (docs/provider-account-design.md §7.5): config.exs ships
+  # the flag false and a release bakes that in, so the server's environment is
+  # the only place a release install can turn it on (bd-1zceei). Unset leaves
+  # the default alone. Run the migration first — see
+  # docs/provider-accounts-release-runbook.md. Test sets its own in test.exs.
+  case System.get_env("ARBITER_PROVIDER_ACCOUNTS") do
+    unset when unset in [nil, ""] ->
+      :ok
+
+    on when on in ["1", "true"] ->
+      config :arbiter, :provider_accounts_enabled, true
+
+    off when off in ["0", "false"] ->
+      config :arbiter, :provider_accounts_enabled, false
+
+    other ->
+      raise "ARBITER_PROVIDER_ACCOUNTS must be 1/true or 0/false, got: #{inspect(other)}"
+  end
 end
 
 if config_env() == :prod do

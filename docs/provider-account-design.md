@@ -542,7 +542,13 @@ That grouping is sound in one direction only. Fingerprint equality proves
 sameness; inequality proves nothing (§2.2), and the counter-example is already on
 this host. So the plan is **proposed, not applied**: the operator renames the
 candidates and merges any they know to be one plan, then
-`mix arbiter.accounts.migrate --plan accounts.json` applies it.
+`mix arbiter.accounts.migrate --plan accounts.json` applies it. On a release
+install (no Mix), the census, migrate and rollback steps are
+`Arbiter.Release.accounts_census/1`, `accounts_migrate/1` and
+`accounts_rollback/1` through `bin/arbiter eval`, and the flag is
+`ARBITER_PROVIDER_ACCOUNTS=1` in the server's environment. See
+[`provider-accounts-release-runbook.md`](provider-accounts-release-runbook.md)
+(bd-1zceei).
 
 On this install the plan is one line — one account, one credential, three
 workspaces — and the migration should proactively offer the operator's

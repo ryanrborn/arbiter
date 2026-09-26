@@ -412,12 +412,20 @@ the migration:
    plan to merge/name the candidate account, then apply it with
    `mix arbiter.accounts.migrate --plan accounts.json`.
 3. Flip `:provider_accounts_enabled` on once every workspace that needs the
-   token is covered by the migrated plan — this deletes the legacy chain
-   above for good (the "flip" release; see
+   token is covered by the migrated plan: set `ARBITER_PROVIDER_ACCOUNTS=1` in
+   `.arbiter.env` / `~/.arbiter/arbiter.env` and restart. This deletes the
+   legacy chain above for good (the "flip" release; see
    `docs/provider-account-design.md` §7.5).
 4. Remove `CLAUDE_CODE_OAUTH_TOKEN` from `.arbiter.env` / the service unit —
    it becomes inert once the flag is on, but leaving a stale credential lying
    around in a secrets file is its own risk.
+
+On a **release install** (no Mix), the same census, migrate and rollback steps
+run as `bin/arbiter eval 'Arbiter.Release.accounts_census(...)'`,
+`accounts_migrate/1` and `accounts_rollback/1`.
+[`docs/provider-accounts-release-runbook.md`](docs/provider-accounts-release-runbook.md)
+is the step-by-step procedure (census, dry run, migrate, set the flag,
+restart, verify) and the rollback.
 
 #### Account-model path (requires `:provider_accounts_enabled`)
 
