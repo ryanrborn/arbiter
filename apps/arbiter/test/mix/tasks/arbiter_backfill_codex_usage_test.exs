@@ -13,10 +13,13 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsageTest do
 
   test "does not boot the full application" do
     refute @run_body =~ "app.start", "must not call Mix.Task.run(\"app.start\")"
-    assert @run_body =~ "start_repo!()", "must start only the Repo via start_repo!/0"
+
+    assert @run_body =~ "Arbiter.Release.backfill(:codex_usage",
+           "must delegate to the release-callable backfill"
   end
 
-  test "documents that it starts the Repo, not the application" do
-    assert @source =~ "starts the Repo, not the application"
+  test "documents the release eval invocation" do
+    assert @source =~ "bin/arbiter eval"
+    assert @source =~ "Arbiter.Release.backfill(:codex_usage"
   end
 end

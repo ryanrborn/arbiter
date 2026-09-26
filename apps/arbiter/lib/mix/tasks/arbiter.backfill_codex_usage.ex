@@ -22,18 +22,21 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
   See `Arbiter.Usage.CodexUsageBackfill` for the matching/recovery logic and
   `Arbiter.Usage.CodexSessionFile` for the on-disk rollout format.
 
-  ## It starts the Repo, not the application
+  ## Release installs
 
-  Deliberately no `Mix.Task.run("app.start")`: booting the full application
-  next to a live coordinator would start a second endpoint on the same port,
-  a second Autopilot and a second set of patrols against the same database.
-  Like `mix arbiter.backfill_issue_repos`, this starts only what it needs —
-  the Ecto repo — so it is safe to run whether or not the server is up.
+  This is a thin CLI wrapper over `Arbiter.Release.backfill/2`, which is
+  Mix-free and callable from a release install with no Elixir toolchain:
+
+      bin/arbiter eval 'Arbiter.Release.backfill(:codex_usage)'             # dry-run
+      bin/arbiter eval 'Arbiter.Release.backfill(:codex_usage, apply?: true)'
+
+  It starts only Ash + the Ecto repo, never the full app-boot task ("app.start"):
+  booting the full application next to a live coordinator would start a
+  second endpoint on the same port, a second Autopilot and a second set of
+  patrols against the same database.
   """
 
   use Mix.Task
-
-  alias Arbiter.Usage.CodexUsageBackfill
 
   @switches [
     apply: :boolean,
@@ -47,53 +50,16 @@ defmodule Mix.Tasks.Arbiter.BackfillCodexUsage do
   def run(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
 
-    apply? = opts[:apply] == true
+    Mix.Task.run("app.config")
 
     backfill_opts =
-      [apply?: apply?]
+      [apply?: opts[:apply] == true]
       |> put_opt(:limit, opts[:limit])
       |> put_opt(:tolerance_ms, opts[:tolerance_ms])
       |> put_opt(:since, date(opts[:since], "--since"))
       |> put_opt(:until, date(opts[:until], "--until"))
 
-    start_repo!()
-
-    Mix.shell().info(banner(apply?))
-
-    backfill_opts
-    |> CodexUsageBackfill.backfill()
-    |> report(apply?)
-    |> Mix.shell().info()
-  end
-
-  # No-op when the repo is already running (an attached node / an iex session
-  # that started the app), so this is safe to call either way.
-  defp start_repo! do
-    Mix.Task.run("app.config")
-    {:ok, _} = Application.ensure_all_started(:ash)
-    {:ok, _} = Application.ensure_all_started(:ash_sqlite)
-
-    case Arbiter.Repo.start_link(pool_size: 1) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-  end
-
-  defp banner(true), do: "Backfilling codex usage from on-disk rollout JSONL (writing)…"
-  defp banner(false), do: "Backfilling codex usage — DRY RUN, no writes. Re-run with --apply.\n"
-
-  defp report(r, apply?) do
-    verb = if apply?, do: "backfilled", else: "would backfill"
-
-    """
-
-    codex rows scanned:  #{r.scanned}
-    #{String.pad_trailing(verb <> ":", 22)}#{r.backfilled + r.would_backfill}
-    no rollout file:      #{r.no_rollout_file}
-    no token_count line:  #{r.no_token_count}
-    unreadable file:      #{r.unreadable}
-    write failures:        #{r.failed}
-    """
+    Arbiter.Release.backfill(:codex_usage, backfill_opts)
   end
 
   defp put_opt(opts, _key, nil), do: opts

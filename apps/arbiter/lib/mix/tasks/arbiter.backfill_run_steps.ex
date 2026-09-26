@@ -31,11 +31,22 @@ defmodule Mix.Tasks.Arbiter.BackfillRunSteps do
   Rows written here are tagged `source: "backfill"`; see
   `Arbiter.Workers.StepBackfill` for how their timing and redaction differ
   from live capture.
+
+  ## Release installs
+
+  This is a thin CLI wrapper over `Arbiter.Release.backfill/2`, which is
+  Mix-free and callable from a release install with no Elixir toolchain:
+
+      bin/arbiter eval 'Arbiter.Release.backfill(:run_steps)'             # dry-run
+      bin/arbiter eval 'Arbiter.Release.backfill(:run_steps, apply?: true)'
+
+  It starts only Ash + the Ecto repo, never the full app-boot task ("app.start"):
+  booting the full application next to a live coordinator would start a
+  second endpoint on the same port, a second Autopilot and a second set of
+  patrols against the same database.
   """
 
   use Mix.Task
-
-  alias Arbiter.Workers.StepBackfill
 
   @switches [
     apply: :boolean,
@@ -49,43 +60,18 @@ defmodule Mix.Tasks.Arbiter.BackfillRunSteps do
   def run(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
 
-    apply? = opts[:apply] == true
+    Mix.Task.run("app.config")
 
-    # Validate the window before booting the app: a typo'd --since should
-    # fail in milliseconds, not after the supervision tree is up.
+    # Validate the window before running: a typo'd --since should fail in
+    # milliseconds, not after the file scan starts.
     backfill_opts =
-      [apply?: apply?]
+      [apply?: opts[:apply] == true]
       |> put_opt(:repo, opts[:repo])
       |> put_opt(:limit, opts[:limit])
       |> put_opt(:since, date(opts[:since], "--since"))
       |> put_opt(:until, date(opts[:until], "--until"))
 
-    Mix.Task.run("app.start")
-
-    Mix.shell().info(banner(apply?))
-
-    backfill_opts
-    |> StepBackfill.backfill()
-    |> report(apply?)
-    |> Mix.shell().info()
-  end
-
-  defp banner(true), do: "Backfilling run steps from on-disk session files (writing)…"
-  defp banner(false), do: "Backfilling run steps — DRY RUN, no writes. Re-run with --apply.\n"
-
-  defp report(r, apply?) do
-    verb = if apply?, do: "inserted", else: "would insert"
-
-    """
-
-    runs scanned:      #{r.scanned}
-    steps #{String.pad_trailing(verb <> ":", 13)}#{r.inserted}
-    already present:   #{r.existing}
-    no session file:   #{r.no_session_file}
-    no session id:     #{r.no_session_id}
-    unreadable file:   #{r.unreadable}
-    write failures:    #{r.failed}
-    """
+    Arbiter.Release.backfill(:run_steps, backfill_opts)
   end
 
   defp put_opt(opts, _key, nil), do: opts
