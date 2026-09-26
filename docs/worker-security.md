@@ -408,6 +408,12 @@ throwaway `$HOME`:
   an out-of-worktree `write_to_file` was not denied). Closing it needs an
   upstream agy fix or real OS isolation, not a settings change — see AC6 in
   bd-25ivqe, explicitly post-merge and non-blocking for this reason.
+  **Decided in bd-ca7xko** ([design/agy-strict-write-isolation.md](design/agy-strict-write-isolation.md)):
+  refuse `:strict` dispatch to agy until agy runs under a bubblewrap jail
+  that makes the worktree the only writable project path (probed live: a
+  jailed `write_to_file` outside it fails with `read-only file system`).
+  Until those follow-ups land, **an agy worker in any mode can write
+  wherever the operator's user can.**
 * **`--sandbox` disables the allowlist gate under `"proceed-in-sandbox"`
   (bd-25ivqe).** With `--sandbox` on argv, agy runs the command inside a real
   `bwrap` jail and *auto-proceeds* there regardless of `permissions.allow` —
