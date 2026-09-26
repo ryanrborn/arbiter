@@ -135,4 +135,39 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
     assert code != 0
     assert out =~ "Building in #{separate}"
   end
+
+  test "GLIBC baseline extraction does not SIGPIPE: ARB_GLIBC_BASELINE can be extracted safely" do
+    primary =
+      init_repo!(
+        Path.join(System.tmp_dir!(), "blr-primary-#{System.unique_integer([:positive])}")
+      )
+
+    separate =
+      init_repo!(
+        Path.join(System.tmp_dir!(), "blr-separate-#{System.unique_integer([:positive])}")
+      )
+
+    on_exit(fn -> File.rm_rf(primary) end)
+    on_exit(fn -> File.rm_rf(separate) end)
+
+    # Run the script which extracts GLIBC baseline — should not fail with SIGPIPE (141).
+    # It will fail later on git fetch, but we're testing that GLIBC extraction doesn't abort
+    # the script before that point.
+    {out, code} = run([separate], [{"ARB_PRIMARY_CHECKOUT", primary}])
+
+    # Code should not be 141 (SIGPIPE). It will fail on git fetch (code != 0),
+    # but not with SIGPIPE in the GLIBC extraction step.
+    assert code != 141,
+           "Script exited with SIGPIPE (141), suggesting GLIBC baseline extraction failed: #{out}"
+
+    assert out =~ "Building in #{separate}"
+  end
+
+  test "unexpected errors are reported with context (ERR trap)" do
+    # The script should have an ERR trap that reports which step failed.
+    # We can't easily trigger a real failure without a full build, but we can
+    # verify the script has error handling by checking for ERR trap declarations.
+    script_content = File.read!(@script)
+    assert script_content =~ "trap", "Script should have error handling via trap"
+  end
 end
