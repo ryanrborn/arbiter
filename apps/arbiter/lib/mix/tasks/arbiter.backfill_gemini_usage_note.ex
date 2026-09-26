@@ -17,18 +17,21 @@ defmodule Mix.Tasks.Arbiter.BackfillGeminiUsageNote do
 
   See `Arbiter.Usage.GeminiUsageNote` for why no recovery is attempted.
 
-  ## It starts the Repo, not the application
+  ## Release installs
 
-  Deliberately no `Mix.Task.run("app.start")`: booting the full application
-  next to a live coordinator would start a second endpoint on the same port,
-  a second Autopilot and a second set of patrols against the same database.
-  Like `mix arbiter.backfill_issue_repos`, this starts only what it needs —
-  the Ecto repo — so it is safe to run whether or not the server is up.
+  This is a thin CLI wrapper over `Arbiter.Release.backfill/2`, which is
+  Mix-free and callable from a release install with no Elixir toolchain:
+
+      bin/arbiter eval 'Arbiter.Release.backfill(:gemini_usage_note)'             # dry-run
+      bin/arbiter eval 'Arbiter.Release.backfill(:gemini_usage_note, apply?: true)'
+
+  It starts only Ash + the Ecto repo, never the full app-boot task ("app.start"):
+  booting the full application next to a live coordinator would start a
+  second endpoint on the same port, a second Autopilot and a second set of
+  patrols against the same database.
   """
 
   use Mix.Task
-
-  alias Arbiter.Usage.GeminiUsageNote
 
   @switches [apply: :boolean, since: :string, until: :string, limit: :integer]
 
@@ -36,51 +39,15 @@ defmodule Mix.Tasks.Arbiter.BackfillGeminiUsageNote do
   def run(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
 
-    apply? = opts[:apply] == true
+    Mix.Task.run("app.config")
 
     backfill_opts =
-      [apply?: apply?]
+      [apply?: opts[:apply] == true]
       |> put_opt(:limit, opts[:limit])
       |> put_opt(:since, date(opts[:since], "--since"))
       |> put_opt(:until, date(opts[:until], "--until"))
 
-    start_repo!()
-
-    Mix.shell().info(banner(apply?))
-
-    backfill_opts
-    |> GeminiUsageNote.backfill()
-    |> report(apply?)
-    |> Mix.shell().info()
-  end
-
-  # No-op when the repo is already running (an attached node / an iex session
-  # that started the app), so this is safe to call either way.
-  defp start_repo! do
-    Mix.Task.run("app.config")
-    {:ok, _} = Application.ensure_all_started(:ash)
-    {:ok, _} = Application.ensure_all_started(:ash_sqlite)
-
-    case Arbiter.Repo.start_link(pool_size: 1) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-  end
-
-  defp banner(true), do: "Rewriting gemini usage notes (writing)…"
-
-  defp banner(false),
-    do: "Rewriting gemini usage notes — DRY RUN, no writes. Re-run with --apply.\n"
-
-  defp report(r, apply?) do
-    verb = if apply?, do: "noted", else: "would note"
-
-    """
-
-    gemini rows scanned:  #{r.scanned}
-    #{String.pad_trailing(verb <> ":", 22)}#{r.noted + r.would_note}
-    write failures:        #{r.failed}
-    """
+    Arbiter.Release.backfill(:gemini_usage_note, Keyword.put(backfill_opts, :hint, "--apply"))
   end
 
   defp put_opt(opts, _key, nil), do: opts
