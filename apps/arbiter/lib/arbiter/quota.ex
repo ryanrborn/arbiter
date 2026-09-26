@@ -655,8 +655,13 @@ defmodule Arbiter.Quota do
 
   # CloudCode fetchers never raise, but bound the wall time anyway so a stalled
   # Google endpoint can't hang the quota surface. A timeout / crash → nil.
+  # 24s, not 20s: `shell_out_agy_usage/2`'s own `Task.yield` allows the agy
+  # subprocess up to `@default_agy_usage_timeout_ms` (20s) plus the `timeout
+  # -k 1` SIGKILL grace plus its own 3s margin (~23s total, `cloud_code.ex`)
+  # before it gives up and reads back a killed-but-finished run — brutal-
+  # killing it here first would throw that recovery away.
   defp await_snapshot(task) do
-    case Task.yield(task, 20_000) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, 24_000) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       _ -> nil
     end

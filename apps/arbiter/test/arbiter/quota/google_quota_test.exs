@@ -197,6 +197,16 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       degraded_row = CloudCode.latest(quota_account_id!(ws.id, "antigravity"), "antigravity")
 
       assert degraded_row.captured_at == backdated
+
+      # The stored `snapshot` JSON's own `captured_at` copy — what
+      # `serialize_latest/2` returns verbatim to `arb quota --json`,
+      # `GET /api/quota` and the MCP quota tool — must agree with the row
+      # column rather than being stamped with the failed attempt's `now`.
+      assert degraded_row.snapshot["captured_at"] == good_row.snapshot["captured_at"]
+
+      assert CloudCode.serialize_latest(quota_account_id!(ws.id, "antigravity"), "antigravity")[
+               "captured_at"
+             ] == good_row.snapshot["captured_at"]
     end
   end
 

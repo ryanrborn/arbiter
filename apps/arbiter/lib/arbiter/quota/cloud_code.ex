@@ -425,16 +425,18 @@ defmodule Arbiter.Quota.CloudCode do
 
   # A snapshot with no model data (a transient API error, or the "agy is live
   # but we hold no readable token" liveness-only status) must not clobber the
-  # last good reading's figures — but its `message`/`plan`/`captured_at` (the
-  # JSON `snapshot` column's own copy) must still land in the stored
-  # `snapshot` column, since that's what `serialize_latest/2` (and therefore
-  # `arb quota`/the MCP quota tool) reads back verbatim. The row's own
-  # `captured_at` **column** (bd-au2xhz) is a different story: it's what
-  # `Gate.stale?/1` and the Providers page use to judge freshness, so a
-  # degraded fetch must keep the *previous* row's value rather than stamping
-  # `now` over it — otherwise a transient timeout makes stale figures look
-  # freshly captured. Falls back to writing the empty snapshot as-is (with
-  # `now`) when there is no previous row to preserve.
+  # last good reading's figures — but its `message`/`plan` (the JSON
+  # `snapshot` column's own copy) must still land in the stored `snapshot`
+  # column, since that's what `serialize_latest/2` (and therefore `arb
+  # quota`/the MCP quota tool) reads back verbatim. `captured_at` (both the
+  # row **column** and its copy inside the `snapshot` JSON, bd-au2xhz) must
+  # stay the *previous* row's value rather than stamping `now` over it —
+  # otherwise a transient timeout makes stale figures look freshly captured,
+  # and `arb quota --json`/`GET /api/quota` disagree with the row column
+  # they're read alongside. The failed attempt's own timestamp is kept under
+  # `checked_at` instead, for anyone who wants it. Falls back to writing the
+  # empty snapshot as-is (with `now`) when there is no previous row to
+  # preserve.
   defp preserve_last_good(account_id, provider, snapshot, now) do
     case latest(account_id, provider) do
       %GoogleQuota{used_percent: used_percent, reset_at: reset_at, snapshot: prior} = row
@@ -445,7 +447,7 @@ defmodule Arbiter.Quota.CloudCode do
             stringify(%{
               message: snapshot[:message],
               plan: snapshot[:plan],
-              captured_at: snapshot[:captured_at]
+              checked_at: snapshot[:captured_at]
             })
           )
 
