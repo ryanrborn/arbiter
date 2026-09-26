@@ -1455,6 +1455,34 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert has_element?(dock, ~s(#session-dock-size-side-#{session.id}[aria-pressed="false"]))
     end
 
+    test "close and maximize are touch-sized at phone width (bd-bcroux)", %{conn: conn} do
+      session = launch!(name: "touch-target")
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      html = render(dock)
+      document = LazyHTML.from_fragment(html)
+
+      dismiss_class =
+        document
+        |> LazyHTML.query("#session-dock-dismiss-#{session.id}")
+        |> LazyHTML.attribute("class")
+        |> List.first()
+
+      # The desktop hit target is 22px; below `sm` it must grow to the app's
+      # 44px touch-target token so it stays reachable at phone width.
+      assert dismiss_class =~ ~r/max-sm:size-\[?(44px|var\(--control-lg\))\]?|max-sm:size-11\b/
+
+      max_class =
+        document
+        |> LazyHTML.query("#session-dock-size-max-#{session.id}")
+        |> LazyHTML.attribute("class")
+        |> List.first()
+
+      assert max_class =~
+               ~r/max-sm:h-\[?(44px|var\(--control-lg\))\]?|max-sm:h-11\b/
+    end
+
     test "a collapsed window offers no size control", %{conn: conn} do
       a = launch!(name: "a")
       b = launch!(name: "b")
